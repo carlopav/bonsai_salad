@@ -11,7 +11,6 @@ class BONSAI_SALAD_PT_main(bpy.types.Panel):
 
     def draw(self, _context):
         layout = self.layout
-        layout.label(text="Tools coming soon... or not?")
 
         col = layout.column(align=True)
         col.label(text="Sheets to PDF")

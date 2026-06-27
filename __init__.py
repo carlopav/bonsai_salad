@@ -10,16 +10,17 @@ bl_info = {
 
 import bpy
 from . import panels
-from .sheets_to_pdf.operator import classes as _sheets_to_pdf_classes
+from . import sheets_to_pdf
+from . import ifc_dxf
 
 
 def register():
-    for cls in _sheets_to_pdf_classes:
-        bpy.utils.register_class(cls)
+    sheets_to_pdf.register()
+    ifc_dxf.register()
     panels.register()
 
 
 def unregister():
     panels.unregister()
-    for cls in reversed(_sheets_to_pdf_classes):
-        bpy.utils.unregister_class(cls)
+    ifc_dxf.unregister()
+    sheets_to_pdf.unregister()
