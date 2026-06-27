@@ -29,8 +29,9 @@ class IfcDxfPanel(bpy.types.Panel):
 
         props = context.scene.ifc_dxf
         import os
-        tpl = props.template_path
-        tpl_name = os.path.basename(tpl) if tpl else "(default)"
+        from . import get_template_path as _get_tpl
+        tpl = props.template_path or (_get_tpl() or "")
+        tpl_name = os.path.basename(tpl) if tpl else "—"
         row = layout.row(align=True)
         row.label(text=tpl_name, icon="FILE")
         row.operator("bim.select_dxf_template", text="", icon="FILEBROWSER")
