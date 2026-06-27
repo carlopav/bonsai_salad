@@ -284,13 +284,15 @@ def is_mapped_repr(plan_repr):
 def get_type_block_name(element):
     """Return (type_entity, block_name) if element has a type, else (None, None).
 
-    block_name is always the type's GlobalId (unique) so that types with the
-    same Name (e.g. "Unnamed") do not share each other's blocks.
+    block_name = "{TypeName}_{GlobalId[:8]}" — human-readable in CAD viewers
+    while remaining unique even when multiple types share the same Name.
+    The full GlobalId is stored in the block description (DXF group code 4).
     """
     ifc_type = ifcopenshell.util.element.get_type(element)
     if ifc_type is None:
         return None, None
-    return ifc_type, ifc_type.GlobalId
+    name = (getattr(ifc_type, "Name", None) or ifc_type.is_a())
+    return ifc_type, f"{name}_{ifc_type.GlobalId[:8]}"
 
 
 def get_material_name(element):
@@ -1316,15 +1318,186 @@ def _parse_scale_factor(scale_str):
     return None
 
 
+# ── annotation helpers ────────────────────────────────────────────────────────
+
+def _get_drawing_annotations(ifc, drawing):
+    """Return list of IfcAnnotation elements associated with a Bonsai drawing.
+
+    Bonsai links drawing annotations via IfcRelAssignsToGroup → IfcGroup
+    (ObjectType='DRAWING', Name=drawing.Name).
+    """
+    drawing_name = drawing.Name
+    result = []
+    for rel in ifc.by_type("IfcRelAssignsToGroup"):
+        group = rel.RelatingGroup
+        if (group.is_a("IfcGroup")
+                and getattr(group, "ObjectType", None) == "DRAWING"
+                and group.Name == drawing_name):
+            for obj in rel.RelatedObjects:
+                if obj.is_a("IfcAnnotation") and obj.id() != drawing.id():
+                    result.append(obj)
+    return result
+
+
+def _annotation_polylines_2d(ann, cam_inv_np):
+    """Extract 2D projected polylines from an IfcAnnotation.
+
+    Returns list of polylines; each polyline is a list of (x, y) tuples
+    in drawing (camera-projected) space.
+    """
+    if not ann.Representation:
+        return []
+
+    wm = world_matrix_col_major(ann)
+    # Rotation-only matrix (for local→camera direction) — same as _cam_R
+    # but here we just use the full project() path since annotations are
+    # placed in world space (ObjectPlacement gives the world origin).
+    # project() = cam_inv @ world_point (translation + rotation).
+    cam_inv = cam_inv_np
+
+    def _world_to_2d(lx, ly):
+        """Local 2D point → world 3D → camera 2D."""
+        # Annotation geometry is in local XY (2D IfcCartesianPointList2D).
+        # The ObjectPlacement places them in world space.
+        wx = wm[0]*lx + wm[4]*ly + wm[12]
+        wy = wm[1]*lx + wm[5]*ly + wm[13]
+        wz = wm[2]*lx + wm[6]*ly + wm[14]
+        # camera projection (orthographic): cam_inv @ (wx, wy, wz, 1)
+        cx = cam_inv[0,0]*wx + cam_inv[0,1]*wy + cam_inv[0,2]*wz + cam_inv[0,3]
+        cy = cam_inv[1,0]*wx + cam_inv[1,1]*wy + cam_inv[1,2]*wz + cam_inv[1,3]
+        return (float(cx), float(cy))
+
+    polylines = []
+    for rep in ann.Representation.Representations:
+        if rep.ContextOfItems.ContextIdentifier not in ("Annotation",):
+            continue
+        for item in rep.Items:
+            if not item.is_a("IfcGeometricCurveSet"):
+                continue
+            for curve in item.Elements:
+                if not curve.is_a("IfcIndexedPolyCurve"):
+                    continue
+                pt_list = curve.Points
+                if not pt_list.is_a("IfcCartesianPointList2D"):
+                    continue
+                coords = pt_list.CoordList
+                pts = [_world_to_2d(c[0], c[1]) for c in coords]
+                if len(pts) >= 2:
+                    polylines.append(pts)
+    return polylines
+
+
+def _ensure_dim_style(doc, scale_factor):
+    """Create or update BONSAI_DIM DIMSTYLE.
+
+    All sizes are in model-space units, fixed in paper space:
+      text  2.5 mm paper  →  2.5e-3 / scale_factor  model-units
+      tick  2.0 mm paper  →  2.0e-3 / scale_factor  model-units
+
+    dimtsz > 0 activates oblique tick markers (the standard European/Italian
+    diagonal slash) instead of arrows.
+    """
+    text_h   = 0.0025 / scale_factor
+    tick_sz  = 0.0020 / scale_factor
+    ext_ext  = 0.0015 / scale_factor   # extension line overshoot past dim line
+    ext_off  = 0.0005 / scale_factor   # gap between defpoint and ext line start
+    gap      = text_h * 0.4            # gap between text and dim line
+
+    attrs = {
+        "dimtxt": text_h,
+        "dimtsz": tick_sz,   # > 0 → oblique tick, not arrow
+        "dimexe": ext_ext,
+        "dimexo": ext_off,
+        "dimgap": gap,
+        "dimtih": 0,         # text follows dim-line angle (not forced horizontal)
+        "dimtad": 1,         # text above dim line
+        "dimclrd": 256,      # BYLAYER
+        "dimclrt": 256,
+        "dimclre": 256,
+    }
+    if "BONSAI_DIM" not in doc.dimstyles:
+        doc.dimstyles.new("BONSAI_DIM", dxfattribs=attrs)
+    else:
+        style = doc.dimstyles.get("BONSAI_DIM")
+        for k, v in attrs.items():
+            style.dxf.set(k, v)
+
+
+def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor):
+    """Write DIMENSION annotations as native DXF DIMENSION entities.
+
+    Each IfcAnnotation(ObjectType='DIMENSION') stores a chain of 2D points
+    (the Blender Curve spline). Each consecutive pair is one dimension segment:
+    the stored points ARE the dimension-line endpoints (Bonsai places the
+    annotation curve at the desired dimension line position, not at the
+    measured-object edges).
+
+    add_aligned_dim(p1, p2, distance=0) puts the dimension line exactly at
+    p1-p2. Extension lines are zero-length (invisible). Text is auto-computed
+    from the point distance unless overridden by BBIM_Dimension pset.
+    """
+    _DIM_LAYER = "IfcAnnotation_Dimension"
+    _ensure_dim_style(doc, scale_factor)
+
+    for ann in annotations:
+        if getattr(ann, "ObjectType", None) != "DIMENSION":
+            continue
+
+        ann_psets   = ifcopenshell.util.element.get_psets(ann)
+        bbim_dim    = ann_psets.get("BBIM_Dimension", {})
+        prefix      = bbim_dim.get("TextPrefix", "") or ""
+        suffix      = bbim_dim.get("TextSuffix", "") or ""
+        show_desc   = bbim_dim.get("ShowDescriptionOnly", False)
+        description = getattr(ann, "Description", None) or ""
+
+        polylines = _annotation_polylines_2d(ann, cam_inv_np)
+        for pts in polylines:
+            for i in range(len(pts) - 1):
+                p0 = pts[i]
+                p1 = pts[i + 1]
+                dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+                length = (dx*dx + dy*dy) ** 0.5
+                if length < 1e-6:
+                    continue
+
+                if show_desc and description:
+                    text = description
+                elif prefix or suffix:
+                    text = f"{prefix}{length:.3f}{suffix}"
+                else:
+                    text = "<>"   # let DXF auto-compute from geometry
+
+                dim = msp.add_aligned_dim(
+                    p1=p0,
+                    p2=p1,
+                    distance=0,
+                    text=text,
+                    dimstyle="BONSAI_DIM",
+                    dxfattribs={"layer": _DIM_LAYER},
+                )
+                dim.render()
+
+
+# ── DXF writer ────────────────────────────────────────────────────────────────
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
-               flat_edges, wall_polys_by_key, layer_styles, scale_factor=0.01):
+               flat_edges, wall_polys_by_key,
+               annotations=None, cam_inv_np=None,
+               template_path=None, scale_factor=0.01):
     """Write all collected drawing data to a DXF file using ezdxf.
+
+    When template_path is provided the document is cloned from the template
+    (layers, dimstyles, layouts already configured); otherwise a minimal
+    document is created with basic layer defaults.
 
     block_defs:    name → {ifc_class, material, lines, arcs, circles, ellipses}
     block_order:   list of block names in insertion order
-    block_inserts: name → [(pos_2d, rot_deg), ...]
-    flat_edges:    [(p0, p1, layer), ...] — for wall_mode='flat'
-    wall_polys_by_key: {(ifc_class, material, is_section) → [shapely Polygon, ...]}
+    block_inserts: name → [(pos_2d, rot_deg, layer), ...]
+    flat_edges:    [(p0, p1, layer), ...]
+    wall_polys_by_key: {(ifc_class, material, layer) → [shapely Polygon, ...]}
+    annotations:   list of IfcAnnotation elements (optional, Bucket D)
+    cam_inv_np:    4×4 numpy camera inverse matrix (needed for annotations)
+    template_path: path to ifc_dxf_template.dxf (None → minimal fallback)
     scale_factor:  drawing scale as a pure ratio (0.01 for 1:100, 0.02 for 1:50)
     """
     import ezdxf
@@ -1339,27 +1512,23 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # lineweight → -2 (BYBLOCK per DXF spec group-code 370)
     _BB = {"layer": "0", "color": 0, "linetype": "BYBLOCK", "lineweight": -2}
 
-    doc = ezdxf.new("R2010")
-    doc.units = units.M
-    doc.header["$LTSCALE"] = float(scale_factor)
-    msp = doc.modelspace()
+    if template_path and os.path.isfile(template_path):
+        doc = ezdxf.readfile(template_path)
+        msp = doc.modelspace()
+        msp.delete_all_entities()
+    else:
+        doc = ezdxf.new("R2010")
+        doc.units = units.M
+        msp = doc.modelspace()
 
-    # Only create layers that are actually referenced by entities in this drawing.
-    used_layers = set()
-    for inserts in block_inserts.values():
-        for _pos, _rot, lyr in inserts:
-            used_layers.add(lyr)
-    for _p0, _p1, lyr in flat_edges:
-        used_layers.add(lyr)
-    for (ifc_class, _mat, lyr) in wall_polys_by_key:
-        used_layers.add(lyr)
-        used_layers.add(f"{ifc_class}_Hatches")
-    _setup_dxf_layers(doc, [s for s in layer_styles if s[0] in used_layers])
+    doc.header["$LTSCALE"] = float(scale_factor)
 
     # ── block definitions + inserts ──────────────────────────────────────────
     for block_name in block_order:
         bd  = block_defs[block_name]
         blk = doc.blocks.new(name=block_name)
+        # Store full IFC GlobalId in the block description (DXF group code 4).
+        blk.block.dxf.description = bd.get("globalid", "")
         for p0, p1 in bd["lines"]:
             blk.add_line(p0, p1, dxfattribs=_BB)
         for cx, cy, r, a_s, a_e in bd["arcs"]:
@@ -1457,6 +1626,10 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         doc.header["$EXTMAX"] = (xmax, ymax, 0)
         cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
         doc.set_modelspace_vport(height=ymax - ymin, center=(cx, cy))
+
+    # ── Bucket D: annotations ─────────────────────────────────────────────────
+    if annotations and cam_inv_np is not None:
+        _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor)
 
     doc.saveas(output_path)
 
@@ -1579,7 +1752,7 @@ def classify_elements(elements, cut_z, col_major, cam_dir, target_view,
 
 
 def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
-                   styles_path=None):
+                   template_path=None):
     import time
     if wall_mode == "shapely" and not SHAPELY_AVAILABLE:
         print("  (shapely not available → falling back to flat wall mode)")
@@ -1587,6 +1760,14 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     target_view = pset.get("TargetView", "PLAN_VIEW")
     human_scale = pset.get("HumanScale", "NTS")
     print(f"  TargetView : {target_view}   Scale: {human_scale}   WallMode: {wall_mode}")
+
+    if template_path is None:
+        template_path = os.path.join(SCRIPT_DIR, "ifc_dxf_template.dxf")
+    if os.path.isfile(template_path):
+        print(f"  Template   : {os.path.basename(template_path)}")
+    else:
+        print(f"  Template   : (not found, using minimal fallback)")
+        template_path = None
 
     col_major        = camera_matrix_inv_col_major(drawing)
     cam_dir, cam_pos = camera_dir_pos(drawing)
@@ -1596,10 +1777,6 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     _cam_x_proj  = _cam_R @ np.array([1.0, 0.0, 0.0])
     _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]),
                                                float(_cam_x_proj[0]))))
-
-    layer_styles = load_layer_styles(styles_path)
-    if layer_styles:
-        print(f"  Layer styles: {len(layer_styles)} overrides")
 
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")
@@ -1714,12 +1891,13 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         placed    = False
 
         try:
-            if rec.from_type or is_mapped_repr(rec.plan_repr):
-                _, block_name = get_type_block_name(element)
-                if block_name is None:
-                    block_name = gid
+            ifc_type, block_name = get_type_block_name(element)
+            if block_name is None:
+                # No shared type: use "{IfcClass}_{GlobalId[:8]}" — readable + unique
+                block_name  = f"{ifc_class}_{gid[:8]}"
+                block_gid   = gid
             else:
-                block_name = gid
+                block_gid   = ifc_type.GlobalId
 
             if block_name not in seen_blocks:
                 verts, edges, arcs, circles, ellipses = _extract_local_curves(
@@ -1748,6 +1926,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                         "ifc_class": ifc_class, "material": material,
                         "lines": lines, "arcs": arcs_blk,
                         "circles": circles_blk, "ellipses": ellipses_blk,
+                        "globalid": block_gid,
                     }
                     block_order.append(block_name)
                     seen_blocks[block_name] = True
@@ -1786,11 +1965,17 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         print(f"  Wall polys : {n_polys} total ({n_sec} section, {n_polys-n_sec} view)"
               f"  in {len(wall_polys_by_key)} groups")
 
+    annotations = _get_drawing_annotations(ifc, drawing)
+    if annotations:
+        print(f"  Annotations: {len(annotations)}"
+              f" ({sum(1 for a in annotations if a.ObjectType=='DIMENSION')} dims)")
+
     t0 = time.perf_counter()
     scale_factor = _parse_scale_factor(pset.get("Scale", "")) or 0.01
     _write_dxf(output_path, block_defs, block_order, block_inserts,
-               flat_edges, wall_polys_by_key, layer_styles,
-               scale_factor=scale_factor)
+               flat_edges, wall_polys_by_key,
+               annotations=annotations, cam_inv_np=_cam_inv_np,
+               template_path=template_path, scale_factor=scale_factor)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")

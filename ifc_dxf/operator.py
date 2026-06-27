@@ -172,7 +172,8 @@ def _get_type_block_name(element):
     ifc_type = ifc_elem.get_type(element)
     if ifc_type is None:
         return None, None
-    return ifc_type, ifc_type.GlobalId
+    name = (getattr(ifc_type, "Name", None) or ifc_type.is_a())
+    return ifc_type, f"{name}_{ifc_type.GlobalId[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1023,33 +1024,29 @@ def _parse_scale_factor(scale_str):
 
 
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
-               flat_edges, wall_polys_by_key, layer_styles,
-               dxf_version="R2010", scale_factor=0.01):
+               flat_edges, wall_polys_by_key,
+               template_path=None, dxf_version="R2010", scale_factor=0.01):
     import ezdxf
     from ezdxf import units
 
     SNAP_TOL = 0.0005
     _BB = {"layer": "0", "color": 0, "linetype": "BYBLOCK", "lineweight": -2}
 
-    doc = ezdxf.new(dxf_version)
-    doc.units = units.M
-    doc.header["$LTSCALE"] = float(scale_factor)
-    msp = doc.modelspace()
+    if template_path and os.path.isfile(template_path):
+        doc = ezdxf.readfile(template_path)
+        msp = doc.modelspace()
+        msp.delete_all_entities()
+    else:
+        doc = ezdxf.new(dxf_version)
+        doc.units = units.M
+        msp = doc.modelspace()
 
-    used_layers = set()
-    for inserts in block_inserts.values():
-        for _pos, _rot, lyr in inserts:
-            used_layers.add(lyr)
-    for _p0, _p1, lyr in flat_edges:
-        used_layers.add(lyr)
-    for (ifc_class, _mat, lyr) in wall_polys_by_key:
-        used_layers.add(lyr)
-        used_layers.add(f"{ifc_class}_Hatches")
-    _setup_dxf_layers(doc, [s for s in layer_styles if s[0] in used_layers])
+    doc.header["$LTSCALE"] = float(scale_factor)
 
     for block_name in block_order:
         bd  = block_defs[block_name]
         blk = doc.blocks.new(name=block_name)
+        blk.block.dxf.description = bd.get("globalid", "")
         for p0, p1 in bd["lines"]:
             blk.add_line(p0, p1, dxfattribs=_BB)
         for cx, cy, r, a_s, a_e in bd["arcs"]:
@@ -1203,9 +1200,10 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             _scale_str = ""
         scale_factor = _parse_scale_factor(_scale_str) or 0.01
 
-        styles_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                   "layer_styles.json")
-        layer_styles = _load_layer_styles(styles_path)
+        import bpy as _bpy
+        _tpl = getattr(getattr(_bpy.context.scene, "ifc_dxf", None), "template_path", "") or ""
+        template_path = _bpy.path.abspath(_tpl) if _tpl else os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "ifc_dxf_template.dxf")
 
         try:
             from bonsai import tool
@@ -1305,12 +1303,12 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             wm        = _world_matrix_flat(element)
 
             try:
-                if rec.from_type or _is_mapped_repr(rec.plan_repr):
-                    _, block_name = _get_type_block_name(element)
-                    if block_name is None:
-                        block_name = gid
+                ifc_type, block_name = _get_type_block_name(element)
+                if block_name is None:
+                    block_name = f"{ifc_class}_{gid[:8]}"
+                    block_gid  = gid
                 else:
-                    block_name = gid
+                    block_gid  = ifc_type.GlobalId
 
                 if block_name not in seen_blocks:
                     verts, edges, arcs, circles, ellipses = _extract_local_curves(
@@ -1339,6 +1337,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
                             "ifc_class": ifc_class, "material": material,
                             "lines": lines, "arcs": arcs_blk,
                             "circles": circles_blk, "ellipses": ellipses_blk,
+                            "globalid": block_gid,
                         }
                         block_order.append(block_name)
                         seen_blocks[block_name] = True
@@ -1353,7 +1352,8 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
 
         try:
             _write_dxf(output_path, block_defs, block_order, block_inserts,
-                       flat_edges, wall_polys_by_key, layer_styles,
+                       flat_edges, wall_polys_by_key,
+                       template_path=template_path,
                        dxf_version=self.dxf_version, scale_factor=scale_factor)
         except Exception as exc:
             self.report({"ERROR"}, f"DXF export failed: {exc}")
@@ -1363,4 +1363,13 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
-classes = [ExportDrawingToDxfOperator]
+class IfcDxfProperties(bpy.types.PropertyGroup):
+    template_path: bpy.props.StringProperty(
+        name="DXF Template",
+        description="Path to the ifc_dxf_template.dxf used as base for exports",
+        subtype="FILE_PATH",
+        default="",
+    )
+
+
+classes = [IfcDxfProperties, ExportDrawingToDxfOperator]
