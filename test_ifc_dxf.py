@@ -282,12 +282,15 @@ def is_mapped_repr(plan_repr):
 
 
 def get_type_block_name(element):
-    """Return (type_entity, block_name) if element has a type, else (None, None)."""
+    """Return (type_entity, block_name) if element has a type, else (None, None).
+
+    block_name is always the type's GlobalId (unique) so that types with the
+    same Name (e.g. "Unnamed") do not share each other's blocks.
+    """
     ifc_type = ifcopenshell.util.element.get_type(element)
     if ifc_type is None:
         return None, None
-    name = getattr(ifc_type, "Name", None) or ifc_type.GlobalId
-    return ifc_type, name
+    return ifc_type, ifc_type.GlobalId
 
 
 def get_material_name(element):
@@ -1295,8 +1298,26 @@ def _setup_dxf_layers(doc, layer_styles):
             pass
 
 
+def _parse_scale_factor(scale_str):
+    """Parse EPset_Drawing 'Scale' value (e.g. '1/100') → scale factor 0.01.
+
+    Uses fractions.Fraction so '1/100', '1/50', '2/1000' all parse correctly.
+    Returns None if absent, zero, or unparseable.
+    """
+    if not scale_str:
+        return None
+    from fractions import Fraction
+    try:
+        f = Fraction(str(scale_str))
+        if f > 0:
+            return float(f)   # '1/100' → 0.01
+    except (ValueError, ZeroDivisionError):
+        pass
+    return None
+
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
-               flat_edges, wall_polys_by_key, layer_styles):
+               flat_edges, wall_polys_by_key, layer_styles, scale_factor=0.01):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     block_defs:    name → {ifc_class, material, lines, arcs, circles, ellipses}
@@ -1304,14 +1325,23 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     block_inserts: name → [(pos_2d, rot_deg), ...]
     flat_edges:    [(p0, p1, layer), ...] — for wall_mode='flat'
     wall_polys_by_key: {(ifc_class, material, is_section) → [shapely Polygon, ...]}
+    scale_factor:  drawing scale as a pure ratio (0.01 for 1:100, 0.02 for 1:50)
     """
     import ezdxf
     from ezdxf import units
 
     SNAP_TOL = 0.0005  # 0.5 mm
 
+    # Entities inside block definitions use BYBLOCK so that the INSERT entity
+    # (on its layer) controls colour, linetype and lineweight.
+    # color=0    → BYBLOCK
+    # linetype   → "BYBLOCK"
+    # lineweight → -2 (BYBLOCK per DXF spec group-code 370)
+    _BB = {"layer": "0", "color": 0, "linetype": "BYBLOCK", "lineweight": -2}
+
     doc = ezdxf.new("R2010")
     doc.units = units.M
+    doc.header["$LTSCALE"] = float(scale_factor)
     msp = doc.modelspace()
 
     _setup_dxf_layers(doc, layer_styles)
@@ -1321,11 +1351,11 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         bd  = block_defs[block_name]
         blk = doc.blocks.new(name=block_name)
         for p0, p1 in bd["lines"]:
-            blk.add_line(p0, p1, dxfattribs={"layer": "0"})
+            blk.add_line(p0, p1, dxfattribs=_BB)
         for cx, cy, r, a_s, a_e in bd["arcs"]:
-            blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": "0"})
+            blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs=_BB)
         for cx, cy, r in bd["circles"]:
-            blk.add_circle((cx, cy), r, dxfattribs={"layer": "0"})
+            blk.add_circle((cx, cy), r, dxfattribs=_BB)
         for cx, cy, maj_x, maj_y, ratio, t1, t2 in bd.get("ellipses", []):
             blk.add_ellipse(
                 center=(cx, cy, 0),
@@ -1333,7 +1363,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 ratio=ratio,
                 start_param=t1,
                 end_param=t2,
-                dxfattribs={"layer": "0"},
+                dxfattribs=_BB,
             )
 
         # Each insert carries its own layer (may be IfcWindow, IfcWindow_Overhead, …)
@@ -1531,6 +1561,36 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     # Classes processed in Bucket B-Approximate (section from 3D solid)
     _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
 
+    cut_z = cam_pos[2]
+    floor_slabs = _compute_floor_slabs(ifc, cut_z) if SHAPELY_AVAILABLE else []
+    if floor_slabs:
+        print(f"  Floor slabs: {len(floor_slabs)} footprints for slab occlusion")
+
+    # Re-add fill elements above the frustum: openings entirely above cut_z are
+    # overhead → their fillings (windows/doors) need to appear on _Overhead layers
+    # but are excluded by frustum Z culling (frustum Z_max == cut_z).
+    element_ids = {e.id() for e in elements}
+    overhead_extras = set()
+    for elem in elements:
+        if elem.is_a() not in _SECTION_CLASSES:
+            continue
+        for rel in getattr(elem, 'HasOpenings', []):
+            op = rel.RelatedOpeningElement
+            if not hasattr(op, 'ObjectPlacement') or op.ObjectPlacement is None:
+                continue
+            wm_op = world_matrix_col_major(op)
+            z_min_op, _ = _wall_z_range(op, wm_op)
+            if z_min_op is None:
+                z_min_op = float(wm_op[14])
+            if z_min_op > cut_z + 1e-3:
+                for fill_rel in getattr(op, 'HasFillings', []):
+                    filling = getattr(fill_rel, 'RelatedBuildingElement', None)
+                    if filling is not None and filling.id() not in element_ids:
+                        overhead_extras.add(filling)
+    if overhead_extras:
+        elements = elements | overhead_extras
+        print(f"  Overhead+  : re-added {len(overhead_extras)} fill elements above frustum")
+
     block_defs    = {}   # name → {ifc_class, material, lines, arcs, circles, ellipses}
     block_order   = []
     block_inserts = {}   # name → [(pos_2d, rot_deg, layer), ...]
@@ -1542,11 +1602,6 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     bucket_a_classes = {}
     bucket_b_classes = {}
     bucket_c_classes = {}
-
-    cut_z = cam_pos[2]
-    floor_slabs = _compute_floor_slabs(ifc, cut_z) if SHAPELY_AVAILABLE else []
-    if floor_slabs:
-        print(f"  Floor slabs: {len(floor_slabs)} footprints for slab occlusion")
 
     records = classify_elements(elements, cut_z, col_major, cam_dir, target_view,
                                 floor_slabs, _SECTION_CLASSES)
@@ -1686,8 +1741,10 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
               f"  in {len(wall_polys_by_key)} groups")
 
     t0 = time.perf_counter()
+    scale_factor = _parse_scale_factor(pset.get("Scale", "")) or 0.01
     _write_dxf(output_path, block_defs, block_order, block_inserts,
-               flat_edges, wall_polys_by_key, layer_styles)
+               flat_edges, wall_polys_by_key, layer_styles,
+               scale_factor=scale_factor)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")

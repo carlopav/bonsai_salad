@@ -172,8 +172,7 @@ def _get_type_block_name(element):
     ifc_type = ifc_elem.get_type(element)
     if ifc_type is None:
         return None, None
-    name = getattr(ifc_type, "Name", None) or ifc_type.GlobalId
-    return ifc_type, name
+    return ifc_type, ifc_type.GlobalId
 
 
 # ---------------------------------------------------------------------------
@@ -1009,15 +1008,32 @@ def _classify_elements(elements, cut_z, cam_inv_np, cam_dir, target_view,
     return records
 
 
+def _parse_scale_factor(scale_str):
+    """Parse EPset_Drawing 'Scale' (e.g. '1/100') → scale factor 0.01."""
+    if not scale_str:
+        return None
+    from fractions import Fraction
+    try:
+        f = Fraction(str(scale_str))
+        if f > 0:
+            return float(f)
+    except (ValueError, ZeroDivisionError):
+        pass
+    return None
+
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
-               flat_edges, wall_polys_by_key, layer_styles, dxf_version="R2010"):
+               flat_edges, wall_polys_by_key, layer_styles,
+               dxf_version="R2010", scale_factor=0.01):
     import ezdxf
     from ezdxf import units
 
     SNAP_TOL = 0.0005
+    _BB = {"layer": "0", "color": 0, "linetype": "BYBLOCK", "lineweight": -2}
 
     doc = ezdxf.new(dxf_version)
     doc.units = units.M
+    doc.header["$LTSCALE"] = float(scale_factor)
     msp = doc.modelspace()
     _setup_dxf_layers(doc, layer_styles)
 
@@ -1025,11 +1041,11 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         bd  = block_defs[block_name]
         blk = doc.blocks.new(name=block_name)
         for p0, p1 in bd["lines"]:
-            blk.add_line(p0, p1, dxfattribs={"layer": "0"})
+            blk.add_line(p0, p1, dxfattribs=_BB)
         for cx, cy, r, a_s, a_e in bd["arcs"]:
-            blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": "0"})
+            blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs=_BB)
         for cx, cy, r in bd["circles"]:
-            blk.add_circle((cx, cy), r, dxfattribs={"layer": "0"})
+            blk.add_circle((cx, cy), r, dxfattribs=_BB)
         for cx, cy, maj_x, maj_y, ratio, t1, t2 in bd.get("ellipses", []):
             blk.add_ellipse(
                 center=(cx, cy, 0),
@@ -1037,7 +1053,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 ratio=ratio,
                 start_param=t1,
                 end_param=t2,
-                dxfattribs={"layer": "0"},
+                dxfattribs=_BB,
             )
         for pos, rot, layer in block_inserts.get(block_name, []):
             msp.add_blockref(block_name, pos,
@@ -1141,6 +1157,14 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         wall_mode    = "shapely" if _SHAPELY else "flat"
         cut_z        = cam_pos[2]
 
+        try:
+            import ifcopenshell.util.element as _ifc_elem
+            _pset = _ifc_elem.get_psets(drawing).get("EPset_Drawing", {})
+            _scale_str = _pset.get("Scale", "")
+        except Exception:
+            _scale_str = ""
+        scale_factor = _parse_scale_factor(_scale_str) or 0.01
+
         styles_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                    "layer_styles.json")
         layer_styles = _load_layer_styles(styles_path)
@@ -1154,15 +1178,40 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
 
         _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
 
+        ifc       = _get_ifc()
+        floor_slabs = _compute_floor_slabs(ifc, cut_z) if _SHAPELY else []
+
+        # Re-add fill elements above the frustum: openings entirely above cut_z
+        # are overhead → their fillings need to appear on _Overhead layers but
+        # may have been excluded by Bonsai's camera-view culling (frustum Z_max == cut_z).
+        element_ids = {e.id() for e in elements}
+        overhead_extras = set()
+        for elem in list(elements):
+            if elem.is_a() not in _SECTION_CLASSES:
+                continue
+            for rel in getattr(elem, 'HasOpenings', []):
+                op = rel.RelatedOpeningElement
+                if not hasattr(op, 'ObjectPlacement') or op.ObjectPlacement is None:
+                    continue
+                wm_op = _world_matrix_flat(op)
+                z_min_op, _ = _wall_z_range(op, wm_op)
+                if z_min_op is None:
+                    z_min_op = float(wm_op[14])
+                if z_min_op > cut_z + 1e-3:
+                    for fill_rel in getattr(op, 'HasFillings', []):
+                        filling = getattr(fill_rel, 'RelatedBuildingElement', None)
+                        if filling is not None and filling.id() not in element_ids:
+                            overhead_extras.add(filling)
+        if overhead_extras:
+            elements = set(elements) | overhead_extras
+            print(f"  Overhead+  : re-added {len(overhead_extras)} fill elements above frustum")
+
         block_defs    = {}
         block_order   = []
         block_inserts = {}   # name → [(pos_2d, rot_deg, layer), ...]
         flat_edges    = []
         wall_polys_by_key = {}  # (ifc_class, material, layer) → [Polygon, ...]
         seen_blocks   = {}
-
-        ifc       = _get_ifc()
-        floor_slabs = _compute_floor_slabs(ifc, cut_z) if _SHAPELY else []
 
         records = _classify_elements(elements, cut_z, _cam_inv_np, cam_dir,
                                      target_view, floor_slabs, _SECTION_CLASSES)
@@ -1267,7 +1316,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         try:
             _write_dxf(output_path, block_defs, block_order, block_inserts,
                        flat_edges, wall_polys_by_key, layer_styles,
-                       dxf_version=self.dxf_version)
+                       dxf_version=self.dxf_version, scale_factor=scale_factor)
         except Exception as exc:
             self.report({"ERROR"}, f"DXF export failed: {exc}")
             return {"CANCELLED"}

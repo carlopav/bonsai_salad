@@ -66,23 +66,26 @@ Riprodurre la struttura IFC nelle entità DXF nel modo più fedele possibile:
 
 | IFC | DXF |
 |-----|-----|
-| Tipo IFC (`IfcDoorType`, `IfcFurnitureType`, …) | Un **BLOCK** (nome = nome del tipo) |
+| Tipo IFC (`IfcDoorType`, `IfcFurnitureType`, …) | Un **BLOCK** (nome = `GlobalId` del tipo) |
 | Istanza di elemento IFC | Un **INSERT** |
 | Elemento senza tipo condiviso | BLOCK con nome = `GlobalId` dell'elemento |
 
+**Regola chiave:** usare sempre il `GlobalId` IFC come identificatore univoco di blocchi, non il campo `Name` (che può essere non univoco, es. "Unnamed" per più tipi diversi).
+
 ### Regole di posizionamento
 
-- **Geometria del BLOCK**: in coordinate locali dell'elemento/tipo. Entità su layer `"0"` (proprietà ereditate dall'INSERT via BYBLOCK).
+- **Geometria del BLOCK**: in coordinate locali dell'elemento/tipo. Entità su layer `"0"` con `color=0` (BYBLOCK), `linetype="BYBLOCK"`, `lineweight=-2` (BYBLOCK). Così l'INSERT controlla colore, tipo linea e spessore.
 - **INSERT position**: proiezione dell'origine world-space dell'`ObjectPlacement` dell'elemento.
 - **INSERT rotation**: angolo (gradi, CCW) che l'asse X locale dell'elemento forma con l'asse X del disegno, nel world XY (non in camera space — la geometria del BLOCK ha già R_cam baked in).
-- **INSERT layer**: nome esatto della classe IFC (es. `IfcDoor`, `IfcFurniture`).
+- **INSERT layer**: nome esatto della classe IFC (es. `IfcDoor`, `IfcFurniture`, `IfcWindow_Overhead`).
 - **MAI** mettere la geometria del block in coordinate world con INSERT a (0,0,0).
 
-### Coordinate
+### Coordinate e scala DXF
 
 - Sistema: metri reali 1:1. `$INSUNITS = 6` (Metres), `$MEASUREMENT = 1` (Metric).
 - Il centro camera corrisponde a (0, 0) nello spazio disegno.
 - Y crescente verso l'alto (convenzione DXF/matematica standard).
+- `$LTSCALE`: impostato al fattore di scala numerico della vista (es. 0.01 per 1:100, 0.02 per 1:50). Letto da `EPset_Drawing.Scale` (formato `"1/100"`) tramite `fractions.Fraction`. Default: 0.01.
 
 ---
 
@@ -101,6 +104,8 @@ Per ogni IfcSlab / IfcCovering(FLOOR) con Z_top ≤ cut_z:
   - estrai footprint 2D in world XY (IfcExtrudedAreaSolid → Shapely Polygon)
   - elemento escluso se: z_element_origin < z_top  AND  origin_XY ∈ footprint
 ```
+
+**Overhead windows/doors:** elementi che riempiono aperture interamente sopra il piano di taglio (z_min_apertura > cut_z) vengono mostrati sul layer `<Classe>_Overhead` (es. `IfcWindow_Overhead`) con linetype tratteggiato. Poiché il frustum della camera ha Z_max = cut_z, questi elementi vengono re-aggiunti esplicitamente alla lista degli elementi da processare dopo il frustum culling.
 
 **Sorgente geometria:** traversal Python diretto dell'albero IFC (`IfcMappedItem`, `IfcCompositeCurve`, `IfcTrimmedCurve`, `IfcIndexedPolyCurve`, ecc.). Fallback: `ifcopenshell.geom.create_shape` con `use-world-coords=False`.
 
@@ -175,10 +180,11 @@ Annotazioni 2D: quote, testi, simboli. Modulo `annotations` separato.
 | Tipo | Formato | Esempio |
 |---|---|---|
 | INSERT elementi (Bucket A) | nome classe IFC | `IfcDoor`, `IfcFurniture` |
+| INSERT overhead (Bucket A) | `<Classe>_Overhead` | `IfcWindow_Overhead` |
 | Sezione muri (Bucket B) | `<Classe>_Section` | `IfcWall_Section` |
 | Vista muri (Bucket B) | `<Classe>_View` | `IfcWall_View` |
 | Hatch muri (Bucket B) | `<Classe>_Hatches` | `IfcWall_Hatches` |
-| Geometria nei BLOCK | `"0"` | `0` (ereditato dall'INSERT) |
+| Geometria nei BLOCK | `"0"` con BYBLOCK | `0` (colore/linetype/lw dall'INSERT) |
 
 Stili per layer configurabili in `layer_styles.json` (color ACI, lineweight mm, linetype).
 
@@ -210,14 +216,13 @@ ifc_dxf non itera autonomamente tutti gli elementi IFC. Legge la lista filtrata 
 
 ## TODO / Roadmap
 
-1. **Slab occlusion pre-filter** (Bucket A): escludere elementi con Z_origin < Z_top del solaio/pavimento corrente.
-2. **Estensione B-Approximate**: aggiungere `IfcSlab`, `IfcColumn`, `IfcStairFlight` al path Shapely.
-3. **B-Accurate (OCC/HLR)**: linework preciso via ifcopenshell geom serializer.
-4. **Bucket C**: wireframe fallback dal Body 3D.
-5. **Bucket D**: annotazioni (quote, testi, simboli).
-6. **PR upstream Bonsai**: fix esportazione archi porta come `IfcCircle` invece di `IfcEllipse`.
-7. **Test data**: file IFC ridotto in `test_data/` per test riproducibili senza Dropbox.
-8. **Section view / Elevation**: logica camera non-zenitale.
+1. **Estensione B-Approximate**: aggiungere `IfcSlab`, `IfcColumn`, `IfcStairFlight` al path Shapely.
+2. **B-Accurate (OCC/HLR)**: linework preciso via ifcopenshell geom serializer.
+3. **Bucket C**: wireframe fallback dal Body 3D.
+4. **Bucket D**: annotazioni (quote, testi, simboli).
+5. **PR upstream Bonsai**: fix esportazione archi porta come `IfcCircle` invece di `IfcEllipse`.
+6. **Test data**: file IFC ridotto in `test_data/` per test riproducibili senza Dropbox.
+7. **Section view / Elevation**: logica camera non-zenitale.
 
 ---
 
