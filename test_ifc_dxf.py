@@ -1344,7 +1344,17 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     doc.header["$LTSCALE"] = float(scale_factor)
     msp = doc.modelspace()
 
-    _setup_dxf_layers(doc, layer_styles)
+    # Only create layers that are actually referenced by entities in this drawing.
+    used_layers = set()
+    for inserts in block_inserts.values():
+        for _pos, _rot, lyr in inserts:
+            used_layers.add(lyr)
+    for _p0, _p1, lyr in flat_edges:
+        used_layers.add(lyr)
+    for (ifc_class, _mat, lyr) in wall_polys_by_key:
+        used_layers.add(lyr)
+        used_layers.add(f"{ifc_class}_Hatches")
+    _setup_dxf_layers(doc, [s for s in layer_styles if s[0] in used_layers])
 
     # ── block definitions + inserts ──────────────────────────────────────────
     for block_name in block_order:
