@@ -1478,6 +1478,102 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                 dim.render()
 
 
+# ── text annotation styles ───────────────────────────────────────────────────
+# Paper-space heights in mm, mirroring the Bonsai CSS class names.
+# At export time: model_height [m] = paper_mm * 0.001 / scale_factor
+# e.g. "regular" 2.5 mm at 1:100 → 0.25 m in model space.
+_TEXT_STYLES_MM = {
+    "title":     7.0,
+    "header":    5.0,
+    "large":     3.5,
+    "regular":   2.5,
+    "small":     1.8,
+    "DIMENSION": 1.8,
+    "GRID":      3.5,
+}
+_DEFAULT_TEXT_MM = 2.5  # "regular"
+
+# IFC BoxAlignment → MTEXT attachment_point (ezdxf const)
+# MTEXT: 1=TL 2=TC 3=TR  4=ML 5=MC 6=MR  7=BL 8=BC 9=BR
+_BOX_ALIGN_TO_MTEXT = {
+    "top-left":     1, "top-center":    2, "top-right":    3,
+    "middle-left":  4, "center":        5, "middle-right": 6,
+    "bottom-left":  7, "bottom-center": 8, "bottom-right": 9,
+}
+
+
+def _write_text_annotations(msp, annotations, cam_inv_np, scale_factor):
+    """Write TEXT annotations as DXF MTEXT entities.
+
+    Text height is resolved from EPset_Annotation.Classes (style name) or
+    falls back to "regular" (2.5 mm paper).  All heights are stored in
+    model-space metres: paper_mm * 0.001 / scale_factor.
+    """
+    _TXT_LAYER = "IfcAnnotation_Text"
+
+    for ann in annotations:
+        if getattr(ann, "ObjectType", None) != "TEXT":
+            continue
+        if not ann.Representation:
+            continue
+
+        # ── style class → paper height ────────────────────────────────────
+        classes_str = (
+            ifcopenshell.util.element.get_pset(ann, "EPset_Annotation", "Classes") or ""
+        )
+        style = next(
+            (c for c in classes_str.split() if c in _TEXT_STYLES_MM), "regular"
+        )
+        paper_mm   = _TEXT_STYLES_MM[style]
+        txt_height = paper_mm * 0.001 / scale_factor   # model-space metres
+
+        # ── world position → 2D ──────────────────────────────────────────
+        wm = world_matrix_col_major(ann)
+        ci = cam_inv_np
+
+        def _world_to_2d(lx, ly):
+            wx = wm[0]*lx + wm[4]*ly + wm[12]
+            wy = wm[1]*lx + wm[5]*ly + wm[13]
+            wz = wm[2]*lx + wm[6]*ly + wm[14]
+            cx = ci[0,0]*wx + ci[0,1]*wy + ci[0,2]*wz + ci[0,3]
+            cy = ci[1,0]*wx + ci[1,1]*wy + ci[1,2]*wz + ci[1,3]
+            return float(cx), float(cy)
+
+        # ── rotation from ObjectPlacement X-axis ──────────────────────────
+        # Local X = (1,0,0) → project to see how it rotates in drawing space
+        ox, oy = _world_to_2d(0.0, 0.0)
+        x1, y1 = _world_to_2d(1.0, 0.0)
+        angle_deg = float(np.degrees(np.arctan2(y1 - oy, x1 - ox)))
+
+        # ── text content + alignment from IfcTextLiteralWithExtent ────────
+        for rep in ann.Representation.Representations:
+            if rep.ContextOfItems.ContextIdentifier != "Annotation":
+                continue
+            for item in rep.Items:
+                if not item.is_a("IfcTextLiteralWithExtent"):
+                    continue
+
+                literal      = item.Literal or ""
+                box_align    = (item.BoxAlignment or "bottom-left").lower()
+                attach_point = _BOX_ALIGN_TO_MTEXT.get(box_align, 7)  # default BL
+
+                # IfcTextLiteralWithExtent.Placement is local to the annotation;
+                # for Bonsai annotations it is always the identity so the insert
+                # point is just the ObjectPlacement origin projected to 2D.
+                px, py = _world_to_2d(0.0, 0.0)
+
+                mtext = msp.add_mtext(
+                    literal,
+                    dxfattribs={
+                        "layer":            _TXT_LAYER,
+                        "char_height":      txt_height,
+                        "insert":           (px, py),
+                        "attachment_point": attach_point,
+                        "rotation":         angle_deg,
+                    },
+                )
+
+
 # ── DXF writer ────────────────────────────────────────────────────────────────
 
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
@@ -1522,6 +1618,15 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         msp = doc.modelspace()
 
     doc.header["$LTSCALE"] = float(scale_factor)
+
+    # $CANNOSCALE: annotation scale string (e.g. "1:100") so the CAD program
+    # knows the intended annotation scale when opening the file.
+    # scale_factor = 0.01 → "1:100",  0.02 → "1:50",  0.005 → "1:200"
+    _denom = int(round(1.0 / scale_factor))
+    try:
+        doc.header["$CANNOSCALE"] = f"1:{_denom}"
+    except Exception:
+        pass
 
     # ── block definitions + inserts ──────────────────────────────────────────
     for block_name in block_order:
@@ -1630,6 +1735,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # ── Bucket D: annotations ─────────────────────────────────────────────────
     if annotations and cam_inv_np is not None:
         _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor)
+        _write_text_annotations(msp, annotations, cam_inv_np, scale_factor)
 
     doc.saveas(output_path)
 
