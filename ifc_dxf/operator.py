@@ -790,8 +790,9 @@ def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_np, cut_z, cam
     opening_polys = []
     for rel in getattr(element, 'HasOpenings', []):
         op = rel.RelatedOpeningElement
-        if not hasattr(op,'ObjectPlacement') or op.ObjectPlacement is None: continue
-        op_poly, _, _ = _opening_footprint_polygon(op, cam_inv_np)
+        if not hasattr(op, 'ObjectPlacement') or op.ObjectPlacement is None:
+            continue
+        op_poly, _zmin, _zmax = _opening_footprint_polygon(op, cam_inv_np)
         if op_poly is not None and op_poly.area > 1e-6:
             opening_polys.append(op_poly)
     if opening_polys:
@@ -937,6 +938,77 @@ def _setup_dxf_layers(doc, layer_styles):
             pass
 
 
+from collections import namedtuple as _namedtuple
+
+_ElementRecord = _namedtuple("_ElementRecord", [
+    "element", "bucket", "layer", "plan_repr", "from_type",
+])
+
+
+def _classify_elements(elements, cut_z, cam_inv_np, cam_dir, target_view,
+                       floor_slabs, section_classes):
+    """Classify every element into a bucket and assign its DXF layer.
+
+    All classification rules live here; no geometry is extracted.
+    Returns list[_ElementRecord].
+
+    Buckets:
+      B — section classes (walls …): layer = IfcWall_Section / _View
+      A — 2D native repr found: layer = IfcWindow / IfcWindow_Overhead / …
+      C — no usable repr or occluded: skipped
+    """
+    records      = []
+    overhead_ids = set()
+
+    # Pass 1: section classes → Bucket B, collect overhead fill IDs
+    for elem in elements:
+        cls = elem.is_a()
+        if cls not in section_classes:
+            continue
+        wm = _world_matrix_flat(elem)
+        z_min, z_max = _wall_z_range(elem, wm)
+        is_cut = z_min is None or (z_min <= cut_z <= z_max)
+        layer  = f"{cls}_Section" if is_cut else f"{cls}_View"
+
+        for rel in getattr(elem, 'HasOpenings', []):
+            op = rel.RelatedOpeningElement
+            if not hasattr(op, 'ObjectPlacement') or op.ObjectPlacement is None:
+                continue
+            wm_op = _world_matrix_flat(op)
+            z_min_op, _ = _wall_z_range(op, wm_op)
+            if z_min_op is None:
+                z_min_op = float(wm_op[14])
+            if z_min_op > cut_z + 1e-3:
+                for fill_rel in getattr(op, 'HasFillings', []):
+                    filling = getattr(fill_rel, 'RelatedBuildingElement', None)
+                    if filling is not None:
+                        overhead_ids.add(filling.id())
+
+        records.append(_ElementRecord(elem, "B", layer, None, False))
+
+    # Pass 2: everything else → Bucket A or C
+    for elem in elements:
+        cls = elem.is_a()
+        if cls in section_classes:
+            continue
+        wm = _world_matrix_flat(elem)
+
+        if floor_slabs:
+            x_w, y_w, z_w = float(wm[12]), float(wm[13]), float(wm[14])
+            if _is_occluded_by_slab(x_w, y_w, z_w, floor_slabs):
+                records.append(_ElementRecord(elem, "C", cls, None, False))
+                continue
+
+        plan_repr, from_type = _find_plan_repr(elem, target_view)
+        if plan_repr is not None:
+            layer = f"{cls}_Overhead" if elem.id() in overhead_ids else cls
+            records.append(_ElementRecord(elem, "A", layer, plan_repr, from_type))
+        else:
+            records.append(_ElementRecord(elem, "C", cls, None, False))
+
+    return records
+
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key, layer_styles, dxf_version="R2010"):
     import ezdxf
@@ -950,8 +1022,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     _setup_dxf_layers(doc, layer_styles)
 
     for block_name in block_order:
-        bd = block_defs[block_name]
-        insert_layer = bd["ifc_class"]
+        bd  = block_defs[block_name]
         blk = doc.blocks.new(name=block_name)
         for p0, p1 in bd["lines"]:
             blk.add_line(p0, p1, dxfattribs={"layer": "0"})
@@ -968,14 +1039,14 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 end_param=t2,
                 dxfattribs={"layer": "0"},
             )
-        for pos, rot in block_inserts.get(block_name, []):
+        for pos, rot, layer in block_inserts.get(block_name, []):
             msp.add_blockref(block_name, pos,
-                             dxfattribs={"rotation": rot, "layer": insert_layer})
+                             dxfattribs={"rotation": rot, "layer": layer})
 
     for p0, p1, layer in flat_edges:
         msp.add_line(p0, p1, dxfattribs={"layer": layer})
 
-    for (ifc_class, material, is_section), polys in wall_polys_by_key.items():
+    for (ifc_class, material, layer), polys in wall_polys_by_key.items():
         if not polys: continue
         try:
             expanded = [p.buffer(SNAP_TOL, join_style=2) for p in polys]
@@ -984,7 +1055,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             merged = polys[0] if len(polys) == 1 else None
         if merged is None: continue
 
-        outline_layer = f"{ifc_class}_Section" if is_section else f"{ifc_class}_View"
+        is_section    = layer.endswith("_Section")
+        outline_layer = layer
         hatch_layer   = f"{ifc_class}_Hatches"
         geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
 
@@ -1080,114 +1152,117 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             self.report({"ERROR"}, f"Could not get drawing elements: {exc}")
             return {"CANCELLED"}
 
-        # Classes processed in Bucket B-Approximate (section from 3D solid)
         _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
 
         block_defs    = {}
         block_order   = []
-        block_inserts = {}
+        block_inserts = {}   # name → [(pos_2d, rot_deg, layer), ...]
         flat_edges    = []
-        wall_polys_by_key = {}
+        wall_polys_by_key = {}  # (ifc_class, material, layer) → [Polygon, ...]
         seen_blocks   = {}
 
-        ifc = _get_ifc()
+        ifc       = _get_ifc()
         floor_slabs = _compute_floor_slabs(ifc, cut_z) if _SHAPELY else []
 
-        for element in elements:
+        records = _classify_elements(elements, cut_z, _cam_inv_np, cam_dir,
+                                     target_view, floor_slabs, _SECTION_CLASSES)
+
+        n_overhead = sum(1 for r in records if r.bucket == "A" and r.layer.endswith("_Overhead"))
+        if n_overhead:
+            print(f"  Overhead   : {n_overhead} elements fill openings above cut plane")
+
+        # ── Bucket B ──────────────────────────────────────────────────────────
+        for rec in (r for r in records if r.bucket == "B"):
+            element   = rec.element
+            ifc_class = element.is_a()
+            material  = _get_material_name(element)
+            wm        = _world_matrix_flat(element)
+            processed = False
+
+            if wall_mode == "shapely":
+                try:
+                    poly, _ = _extract_wall_polygon_with_openings(
+                        element, wm, _cam_inv_np, cut_z, cam_dir)
+                    if poly is not None:
+                        wall_polys_by_key.setdefault(
+                            (ifc_class, material, rec.layer), []).append(poly)
+                        processed = True
+                except Exception:
+                    pass
+            else:
+                plan_repr_b, _ = _find_plan_repr(element, target_view)
+                if plan_repr_b is not None:
+                    try:
+                        verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b)
+                        if verts and edges:
+                            wm_np = np.array(wm, dtype=float).reshape(4, 4, order='F')
+                            n  = len(verts) // 3
+                            va = np.array(verts[:n*3]).reshape(n, 3)
+                            pd = (_cam_inv_np @ np.hstack([va, np.ones((n,1))]).T).T[:, :2]
+                            for k in range(0, len(edges)-1, 2):
+                                i, j = int(edges[k]), int(edges[k+1])
+                                p0 = (float(pd[i,0]), float(pd[i,1]))
+                                p1 = (float(pd[j,0]), float(pd[j,1]))
+                                if (p0[0]-p1[0])**2+(p0[1]-p1[1])**2 > 1e-18:
+                                    flat_edges.append((p0, p1, rec.layer))
+                            processed = True
+                    except Exception:
+                        pass
+
+        # ── Bucket A ──────────────────────────────────────────────────────────
+        for rec in (r for r in records if r.bucket == "A"):
+            element   = rec.element
             ifc_class = element.is_a()
             material  = _get_material_name(element)
             gid       = element.GlobalId
             wm        = _world_matrix_flat(element)
 
-            # ── Bucket A: 2D native representation ───────────────────────────
-            # _SECTION_CLASSES always route to Bucket B for merged outlines + hatching.
-            plan_repr, from_type = _find_plan_repr(element, target_view)
-            if plan_repr is not None and ifc_class not in _SECTION_CLASSES:
-                # Slab occlusion: XY footprint + Z check
-                if floor_slabs:
-                    x_w, y_w, z_w = float(wm[12]), float(wm[13]), float(wm[14])
-                    if _is_occluded_by_slab(x_w, y_w, z_w, floor_slabs):
-                        continue
-                try:
-                    if from_type or _is_mapped_repr(plan_repr):
-                        _, block_name = _get_type_block_name(element)
-                        if block_name is None:
-                            block_name = gid
-                    else:
+            try:
+                if rec.from_type or _is_mapped_repr(rec.plan_repr):
+                    _, block_name = _get_type_block_name(element)
+                    if block_name is None:
                         block_name = gid
-
-                    if block_name not in seen_blocks:
-                        verts, edges, arcs, circles, ellipses = _extract_local_curves(element, plan_repr)
-                        if verts or edges or arcs or circles or ellipses:
-                            lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
-                            arcs_blk = []
-                            for cx_e, cy_e, r, a_s, a_e in arcs:
-                                c = _cam_R @ np.array([cx_e, cy_e, 0.])
-                                arcs_blk.append((float(c[0]), float(c[1]), r,
-                                                 (a_s+_cam_rot_deg)%360,
-                                                 (a_e+_cam_rot_deg)%360))
-                            circles_blk = []
-                            for cx_e, cy_e, r in circles:
-                                c = _cam_R @ np.array([cx_e, cy_e, 0.])
-                                circles_blk.append((float(c[0]), float(c[1]), r))
-                            ellipses_blk = []
-                            for cx_e, cy_e, maj_x, maj_y, ratio, t1, t2 in ellipses:
-                                c   = _cam_R @ np.array([cx_e, cy_e, 0.])
-                                maj = _cam_R @ np.array([maj_x, maj_y, 0.])
-                                ellipses_blk.append((float(c[0]), float(c[1]),
-                                                      float(maj[0]), float(maj[1]),
-                                                      ratio, t1, t2))
-                            block_defs[block_name] = {
-                                "ifc_class": ifc_class, "material": material,
-                                "lines": lines, "arcs": arcs_blk,
-                                "circles": circles_blk, "ellipses": ellipses_blk,
-                            }
-                            block_order.append(block_name)
-                            seen_blocks[block_name] = True
-
-                    if block_name in seen_blocks:
-                        pos, rot = _compute_insert(wm, _cam_inv_np)
-                        block_inserts.setdefault(block_name, []).append((pos, rot))
-                        continue
-                except Exception:
-                    pass
-
-            # ── Bucket B-Approximate: section from 3D solid (Shapely) ─────────
-            if ifc_class in _SECTION_CLASSES:
-                if wall_mode == "shapely":
-                    try:
-                        poly, is_section = _extract_wall_polygon_with_openings(
-                            element, wm, _cam_inv_np, cut_z, cam_dir)
-                        if poly is not None:
-                            wall_polys_by_key.setdefault(
-                                (ifc_class, material, is_section), []).append(poly)
-                            continue
-                    except Exception:
-                        pass
                 else:
-                    plan_repr_b, _ = _find_plan_repr(element, target_view)
-                    if plan_repr_b is not None:
-                        try:
-                            verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b)
-                            if verts and edges:
-                                wm_np = np.array(wm, dtype=float).reshape(4, 4, order='F')
-                                combined = _cam_inv_np @ wm_np
-                                n = len(verts) // 3
-                                va = np.array(verts[:n*3]).reshape(n, 3)
-                                ph = np.hstack([va, np.ones((n, 1))])
-                                pd = (combined @ ph.T).T[:, :2]
-                                layer = f"{ifc_class}_Section"
-                                for k in range(0, len(edges)-1, 2):
-                                    i, j = int(edges[k]), int(edges[k+1])
-                                    p0 = (float(pd[i,0]), float(pd[i,1]))
-                                    p1 = (float(pd[j,0]), float(pd[j,1]))
-                                    if (p0[0]-p1[0])**2+(p0[1]-p1[1])**2 > 1e-18:
-                                        flat_edges.append((p0, p1, layer))
-                                continue
-                        except Exception:
-                            pass
+                    block_name = gid
 
-            # ── Bucket C: no usable representation ───────────────────────────
+                if block_name not in seen_blocks:
+                    verts, edges, arcs, circles, ellipses = _extract_local_curves(
+                        element, rec.plan_repr)
+                    if verts or edges or arcs or circles or ellipses:
+                        lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
+                        arcs_blk = []
+                        for cx_e, cy_e, r, a_s, a_e in arcs:
+                            c = _cam_R @ np.array([cx_e, cy_e, 0.])
+                            arcs_blk.append((float(c[0]), float(c[1]), r,
+                                             (a_s+_cam_rot_deg)%360,
+                                             (a_e+_cam_rot_deg)%360))
+                        circles_blk = [
+                            (float((_cam_R @ np.array([cx,cy,0.]))[0]),
+                             float((_cam_R @ np.array([cx,cy,0.]))[1]), r)
+                            for cx, cy, r in circles
+                        ]
+                        ellipses_blk = []
+                        for cx, cy, maj_x, maj_y, ratio, t1, t2 in ellipses:
+                            c   = _cam_R @ np.array([cx, cy, 0.])
+                            maj = _cam_R @ np.array([maj_x, maj_y, 0.])
+                            ellipses_blk.append((float(c[0]), float(c[1]),
+                                                  float(maj[0]), float(maj[1]),
+                                                  ratio, t1, t2))
+                        block_defs[block_name] = {
+                            "ifc_class": ifc_class, "material": material,
+                            "lines": lines, "arcs": arcs_blk,
+                            "circles": circles_blk, "ellipses": ellipses_blk,
+                        }
+                        block_order.append(block_name)
+                        seen_blocks[block_name] = True
+
+                if block_name in seen_blocks:
+                    pos, rot = _compute_insert(wm, _cam_inv_np)
+                    block_inserts.setdefault(block_name, []).append((pos, rot, rec.layer))
+            except Exception:
+                pass
+
+        # ── Bucket C: counted only ─────────────────────────────────────────
 
         try:
             _write_dxf(output_path, block_defs, block_order, block_inserts,

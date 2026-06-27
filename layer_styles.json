@@ -20,7 +20,9 @@
   "IfcBeam_Hatches":          { "color": 254, "lineweight": 0.09,   "linetype": "Continuous" },
 
   "IfcDoor":                  { "color": 2,   "lineweight": 0.18,  "linetype": "Continuous" },
+  "IfcDoor_Overhead":         { "color": 2,   "lineweight": 0.13,  "linetype": "Dashed" },
   "IfcWindow":                { "color": 4,   "lineweight": 0.18,  "linetype": "Continuous" },
+  "IfcWindow_Overhead":       { "color": 4,   "lineweight": 0.13,  "linetype": "Dashed" },
 
   "IfcFurniture":             { "color": 8,   "lineweight": 0.13,  "linetype": "Continuous" },
   "IfcFurnishingElement":     { "color": 8,   "lineweight": 0.13,  "linetype": "Continuous" },
