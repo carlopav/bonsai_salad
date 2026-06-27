@@ -32,11 +32,8 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-# ── locate ifc_dxf.pyd ───────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(SCRIPT_DIR, "ifc_dxf"))
 
-import ifc_dxf
 import ifcopenshell
 import ifcopenshell.util.element
 import ifcopenshell.util.placement
@@ -962,16 +959,106 @@ def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_col_major,
     return wall_poly, is_section
 
 
-def _add_wall_polygons(req, wall_polys_by_key):
-    """Union per-wall polygons by (ifc_class, material, is_section), add WallPolygon to req.
 
-    wall_polys_by_key: {(ifc_class, material, is_section) → [shapely poly, ...]}
+# ── DXF writing helpers ───────────────────────────────────────────────────────
+
+def _project_local_to_lines(verts, edges, cam_R):
+    """Project element-local verts/edges to block-local 2D line segments."""
+    n = len(verts) // 3
+    if n == 0 or len(edges) < 2:
+        return []
+    verts_arr = np.array(verts[:n * 3], dtype=float).reshape(n, 3)
+    pts = (cam_R @ verts_arr.T).T[:, :2]
+    lines = []
+    for k in range(0, len(edges) - 1, 2):
+        i, j = int(edges[k]), int(edges[k + 1])
+        p0 = (float(pts[i, 0]), float(pts[i, 1]))
+        p1 = (float(pts[j, 0]), float(pts[j, 1]))
+        if (p0[0] - p1[0]) ** 2 + (p0[1] - p1[1]) ** 2 > 1e-18:
+            lines.append((p0, p1))
+    return lines
+
+
+def _compute_insert(wm_flat, cam_inv_np):
+    """Return (pos_2d, rotation_deg) for a DXF INSERT from a world matrix."""
+    wm = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
+    orig_h = np.array([0.0, 0.0, 0.0, 1.0])
+    pos_h  = cam_inv_np @ (wm @ orig_h)
+    local_x_world = wm[:3, :3] @ np.array([1.0, 0.0, 0.0])
+    rot_deg = float(np.degrees(np.arctan2(float(local_x_world[1]),
+                                          float(local_x_world[0]))))
+    return (float(pos_h[0]), float(pos_h[1])), rot_deg
+
+
+# Valid DXF lineweight values (hundredths of mm)
+_DXF_LW = (0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50,
+            53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211)
+
+
+def _setup_dxf_layers(doc, layer_styles):
+    """Add/configure layers from layer_styles list of (name, color, lw, linetype)."""
+    for name, color, lw_hundredths, linetype in layer_styles:
+        try:
+            layer = doc.layers.get(name)
+        except Exception:
+            layer = doc.layers.add(name)
+        layer.color = color
+        layer.lineweight = lw_hundredths
+        try:
+            if linetype and linetype.upper() != "CONTINUOUS":
+                if linetype not in doc.linetypes:
+                    doc.linetypes.add(linetype)
+            layer.dxf.linetype = linetype
+        except Exception:
+            pass
+
+
+def _write_dxf(output_path, block_defs, block_order, block_inserts,
+               flat_edges, wall_polys_by_key, layer_styles):
+    """Write all collected drawing data to a DXF file using ezdxf.
+
+    block_defs:    name → {ifc_class, material, lines, arcs, circles}
+    block_order:   list of block names in insertion order
+    block_inserts: name → [(pos_2d, rot_deg), ...]
+    flat_edges:    [(p0, p1, layer), ...] — for wall_mode='flat'
+    wall_polys_by_key: {(ifc_class, material, is_section) → [shapely Polygon, ...]}
     """
-    # Snap tolerance: expand each polygon by this amount before union so that
-    # walls with sub-mm gaps (IFC modelling tolerance) merge correctly, then
-    # shrink back to recover the original outline.
-    SNAP_TOL = 0.0005  # 0.5 mm in metres
+    import ezdxf
+    from ezdxf import units
 
+    SNAP_TOL = 0.0005  # 0.5 mm
+
+    doc = ezdxf.new("R2010")
+    doc.units = units.M
+    msp = doc.modelspace()
+
+    _setup_dxf_layers(doc, layer_styles)
+
+    # ── block definitions + inserts ──────────────────────────────────────────
+    for block_name in block_order:
+        bd    = block_defs[block_name]
+        # Layer for the INSERT: use the IFC class name directly.
+        # Wall-like elements that distinguish Section/View/Hatches go through
+        # the wall polygon path, not blocks, so no suffix is needed here.
+        insert_layer = bd["ifc_class"]
+
+        blk = doc.blocks.new(name=block_name)
+        for p0, p1 in bd["lines"]:
+            blk.add_line(p0, p1, dxfattribs={"layer": "0"})
+        for cx, cy, r, a_s, a_e in bd["arcs"]:
+            blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": "0"})
+        for cx, cy, r in bd["circles"]:
+            blk.add_circle((cx, cy), r, dxfattribs={"layer": "0"})
+
+        for pos, rot in block_inserts.get(block_name, []):
+            msp.add_blockref(block_name, pos,
+                             dxfattribs={"rotation": rot, "layer": insert_layer})
+
+    # ── flat wall edges (wall_mode='flat') ───────────────────────────────────
+    for p0, p1, layer in flat_edges:
+        msp.add_line(p0, p1, dxfattribs={"layer": layer})
+
+    # ── wall polygons (wall_mode='shapely') ──────────────────────────────────
     for (ifc_class, material, is_section), polys in wall_polys_by_key.items():
         if not polys:
             continue
@@ -983,22 +1070,31 @@ def _add_wall_polygons(req, wall_polys_by_key):
         if merged is None:
             continue
 
-        if merged.geom_type == 'MultiPolygon':
-            result_polys = list(merged.geoms)
-        elif merged.geom_type == 'Polygon':
-            result_polys = [merged]
-        else:
-            result_polys = [g for g in merged.geoms
-                            if g.geom_type == 'Polygon']
+        outline_layer = f"{ifc_class}_Section" if is_section else f"{ifc_class}_View"
+        hatch_layer   = f"{ifc_class}_Hatches"
 
-        for poly in result_polys:
-            outer = [[float(x), float(y)] for x, y in poly.exterior.coords[:-1]]
-            holes = [[[float(x), float(y)] for x, y in ring.coords[:-1]]
-                     for ring in poly.interiors]
-            try:
-                req.add_wall_polygon(ifc_class, material, outer, holes, is_section)
-            except Exception:
-                pass
+        geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
+        for poly in geoms:
+            if poly.geom_type != 'Polygon':
+                continue
+            exterior = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+            holes    = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
+                        for ring in poly.interiors]
+
+            msp.add_lwpolyline(exterior,
+                               dxfattribs={"closed": True, "layer": outline_layer})
+            for hole in holes:
+                msp.add_lwpolyline(hole,
+                                   dxfattribs={"closed": True, "layer": outline_layer})
+
+            if is_section and len(exterior) >= 3:
+                hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer})
+                hatch.set_pattern_fill("ANSI31", scale=0.05)
+                hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
+                for hole in holes:
+                    hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
+
+    doc.saveas(output_path)
 
 
 # ── export ────────────────────────────────────────────────────────────────────
@@ -1053,37 +1149,28 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     col_major        = camera_matrix_inv_col_major(drawing)
     cam_dir, cam_pos = camera_dir_pos(drawing)
 
-    # Camera rotation matrix (3×3) for projecting arc centres/angles to block-local space.
-    # project_local applies only the rotation part of matrix_inv; same here.
-    _cam_inv_np = np.array(col_major, dtype=float).reshape(4, 4, order='F')
-    _cam_R      = _cam_inv_np[:3, :3]
-    _cam_x_proj = _cam_R @ np.array([1.0, 0.0, 0.0])
-    _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]), float(_cam_x_proj[0]))))
-
-    proj = ifc_dxf.PyCameraProjection(col_major)
-    req  = ifc_dxf.PyDrawingRequest(
-        proj, cam_dir, cam_pos, target_view, output_path, "AC1027"
-    )
+    _cam_inv_np  = np.array(col_major, dtype=float).reshape(4, 4, order='F')
+    _cam_R       = _cam_inv_np[:3, :3]
+    _cam_x_proj  = _cam_R @ np.array([1.0, 0.0, 0.0])
+    _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]),
+                                               float(_cam_x_proj[0]))))
 
     layer_styles = load_layer_styles(styles_path)
     if layer_styles:
-        req.set_layer_styles(layer_styles)
         print(f"  Layer styles: {len(layer_styles)} overrides")
 
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")
 
-    settings_c = ifcopenshell.geom.settings()
-    settings_c.set('use-world-coords', True)
-    settings_c.set('iterator-output', 2)  # Serialization → brep_data
-
-    # IFC classes that bypass BLOCK/INSERT and go through wall-merge path.
     WALL_MERGE_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
 
-    # Track blocks already defined (type-shared or element-specific)
-    seen_blocks = {}   # block_name → True
-    # For shapely mode: per-wall polygon (polygonized in isolation), grouped by key
-    wall_polys_by_key = {}  # (ifc_class, material) → [shapely.Polygon, ...]
+    # Accumulated drawing data
+    block_defs    = {}   # name → {ifc_class, material, lines, arcs, circles}
+    block_order   = []   # insertion order
+    block_inserts = {}   # name → [(pos_2d, rot_deg), ...]
+    flat_edges    = []   # [(p0, p1, layer)] — wall_mode='flat' only
+    wall_polys_by_key = {}  # (ifc_class, material, is_section) → [Polygon, ...]
+    seen_blocks   = {}
 
     bucket_wall = bucket_b = bucket_c = skipped = 0
     skipped_classes = {}
@@ -1096,12 +1183,9 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         gid       = element.GlobalId
         wm        = world_matrix_col_major(element)
 
-        # ── Wall path (flat or shapely) ───────────────────────────────────────
+        # ── Wall path ────────────────────────────────────────────────────────
         if ifc_class in WALL_MERGE_CLASSES:
             if wall_mode == "shapely":
-                # Profile-based: IfcExtrudedAreaSolid + opening subtraction (2D).
-                # Falls through to Bucket B/C when extrusion is non-vertical or
-                # geometry is not IfcExtrudedAreaSolid (OCC path, not yet implemented).
                 try:
                     poly, is_section = _extract_wall_polygon_with_openings(
                         element, wm, col_major, cam_pos[2], cam_dir
@@ -1114,99 +1198,89 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                 except Exception:
                     pass
             else:
-                # flat mode: project edges as LINE entities
                 plan_repr, _ = find_plan_repr(element, target_view)
                 if plan_repr is not None:
                     try:
-                        verts, edges, _arcs, _circles = _extract_local_curves(element, plan_repr)
+                        verts, edges, _a, _c = _extract_local_curves(element, plan_repr)
                         if verts and edges:
-                            req.add_wall_flat(ifc_class, material, verts, edges, wm)
+                            wm_np = np.array(wm, dtype=float).reshape(4, 4, order='F')
+                            combined = _cam_inv_np @ wm_np
+                            n = len(verts) // 3
+                            va = np.array(verts[:n*3]).reshape(n, 3)
+                            ph = np.hstack([va, np.ones((n, 1))])
+                            pd = (combined @ ph.T).T[:, :2]
+                            layer = f"{ifc_class}_Section"
+                            for k in range(0, len(edges) - 1, 2):
+                                i, j = int(edges[k]), int(edges[k+1])
+                                p0 = (float(pd[i, 0]), float(pd[i, 1]))
+                                p1 = (float(pd[j, 0]), float(pd[j, 1]))
+                                if (p0[0]-p1[0])**2 + (p0[1]-p1[1])**2 > 1e-18:
+                                    flat_edges.append((p0, p1, layer))
                             bucket_wall += 1
                             continue
                     except Exception:
                         pass
-            # fall through to standard Bucket B/C if wall geometry unavailable
 
-        # ── Bucket B: 2D plan native representation ──────────────────────────
-        # find_plan_repr checks element first (override), then type (inherited).
+        # ── Bucket B: 2D native plan representation ──────────────────────────
         plan_repr, from_type = find_plan_repr(element, target_view)
         if plan_repr is not None:
             try:
-                # Block name: use type name when geometry comes from the type
-                # (either via IfcMappedItem on the element, or directly from the
-                # type's RepresentationMaps).  Element override → use GlobalId.
                 if from_type or is_mapped_repr(plan_repr):
                     _, block_name = get_type_block_name(element)
                     if block_name is None:
-                        block_name = gid  # no type assigned — shouldn't happen here
+                        block_name = gid
                 else:
                     block_name = gid
 
-                # Define block geometry once per block_name
                 if block_name not in seen_blocks:
                     verts, edges, arcs, circles = _extract_local_curves(element, plan_repr)
                     if verts or edges or arcs or circles:
-                        req.add_native_curves(block_name, ifc_class, material,
-                                              verts or [], edges or [])
-                        # Append true DXF ARC/CIRCLE entities to the block.
-                        # Arc centres and angles are projected to block-local space
-                        # (camera rotation applied; INSERT handles element rotation).
-                        for spec in arcs:
-                            cx_e, cy_e, r, a_s, a_e = spec
-                            c_blk = _cam_R @ np.array([cx_e, cy_e, 0.0])
-                            req.add_block_arc(
-                                block_name, ifc_class, material,
-                                float(c_blk[0]), float(c_blk[1]), r,
-                                (a_s + _cam_rot_deg) % 360,
-                                (a_e + _cam_rot_deg) % 360,
-                            )
-                        for spec in circles:
-                            cx_e, cy_e, r = spec
-                            c_blk = _cam_R @ np.array([cx_e, cy_e, 0.0])
-                            req.add_block_circle(
-                                block_name, ifc_class, material,
-                                float(c_blk[0]), float(c_blk[1]), r,
-                            )
+                        lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
+                        arcs_blk = []
+                        for cx_e, cy_e, r, a_s, a_e in arcs:
+                            c = _cam_R @ np.array([cx_e, cy_e, 0.0])
+                            arcs_blk.append((float(c[0]), float(c[1]), r,
+                                             (a_s + _cam_rot_deg) % 360,
+                                             (a_e + _cam_rot_deg) % 360))
+                        circles_blk = []
+                        for cx_e, cy_e, r in circles:
+                            c = _cam_R @ np.array([cx_e, cy_e, 0.0])
+                            circles_blk.append((float(c[0]), float(c[1]), r))
+                        block_defs[block_name] = {
+                            "ifc_class": ifc_class, "material": material,
+                            "lines": lines, "arcs": arcs_blk, "circles": circles_blk,
+                        }
+                        block_order.append(block_name)
                         seen_blocks[block_name] = True
 
-                # Add INSERT for this element instance
                 if block_name in seen_blocks:
-                    req.add_block_insert(block_name, ifc_class, wm)
+                    pos, rot = _compute_insert(wm, _cam_inv_np)
+                    block_inserts.setdefault(block_name, []).append((pos, rot))
                     bucket_b += 1
                     bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
                     continue
             except Exception:
-                pass  # fall through to Bucket C
+                pass
 
-        # ── Bucket C fallback: 3D body wireframe ─────────────────────────────
-        try:
-            shape = ifcopenshell.geom.create_shape(settings_c, element)
-            brep  = shape.geometry.brep_data
-            req.add_body_brep(gid, ifc_class, material, brep, tuple(wm))
-            bucket_c += 1
-            bucket_c_classes[ifc_class] = bucket_c_classes.get(ifc_class, 0) + 1
-        except Exception:
-            skipped += 1
-            skipped_classes[ifc_class] = skipped_classes.get(ifc_class, 0) + 1
+        # ── Bucket C: skip (no 3D body wireframe in pure-Python mode) ────────
+        skipped += 1
+        skipped_classes[ifc_class] = skipped_classes.get(ifc_class, 0) + 1
 
-    print(f"  Wall       : {bucket_wall}  Bucket B: {bucket_b}  Bucket C: {bucket_c}  Skipped: {skipped}")
+    print(f"  Wall       : {bucket_wall}  Bucket B: {bucket_b}  Skipped: {skipped}")
     if skipped_classes:
-        print(f"  Skipped by class : { {k: v for k, v in sorted(skipped_classes.items())} }")
+        print(f"  Skipped    : { {k: v for k, v in sorted(skipped_classes.items())} }")
     if bucket_b_classes:
-        print(f"  Bucket B by class: { {k: v for k, v in sorted(bucket_b_classes.items())} }")
-    if bucket_c_classes:
-        print(f"  Bucket C by class: { {k: v for k, v in sorted(bucket_c_classes.items())} }")
+        print(f"  Bucket B   : { {k: v for k, v in sorted(bucket_b_classes.items())} }")
 
     if wall_mode == "shapely" and wall_polys_by_key:
         n_polys = sum(len(v) for v in wall_polys_by_key.values())
         n_sec   = sum(len(v) for (_, _, s), v in wall_polys_by_key.items() if s)
-        n_view  = n_polys - n_sec
-        print(f"  Wall polys : {n_polys} total ({n_sec} section, {n_view} view)"
+        print(f"  Wall polys : {n_polys} total ({n_sec} section, {n_polys-n_sec} view)"
               f"  in {len(wall_polys_by_key)} groups")
-        _add_wall_polygons(req, wall_polys_by_key)
 
     t0 = time.perf_counter()
-    ifc_dxf.py_generate(req, None)
+    _write_dxf(output_path, block_defs, block_order, block_inserts,
+               flat_edges, wall_polys_by_key, layer_styles)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")
