@@ -1085,7 +1085,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             holes    = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
                         for ring in poly.interiors]
             if len(exterior) < 3: continue
-            hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer, "color": 254})
+            hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer, "color": 256})
             hatch.set_solid_fill()
             hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
             for hole in holes:
