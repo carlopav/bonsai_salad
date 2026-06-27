@@ -1062,6 +1062,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     for p0, p1, layer in flat_edges:
         msp.add_line(p0, p1, dxfattribs={"layer": layer})
 
+    wall_geom_groups = []
     for (ifc_class, material, layer), polys in wall_polys_by_key.items():
         if not polys: continue
         try:
@@ -1070,12 +1071,27 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         except Exception:
             merged = polys[0] if len(polys) == 1 else None
         if merged is None: continue
-
         is_section    = layer.endswith("_Section")
         outline_layer = layer
         hatch_layer   = f"{ifc_class}_Hatches"
         geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
+        wall_geom_groups.append((outline_layer, hatch_layer, is_section, geoms))
 
+    for outline_layer, hatch_layer, is_section, geoms in wall_geom_groups:
+        if not is_section: continue
+        for poly in geoms:
+            if poly.geom_type != 'Polygon': continue
+            exterior = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+            holes    = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
+                        for ring in poly.interiors]
+            if len(exterior) < 3: continue
+            hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer, "color": 254})
+            hatch.set_solid_fill()
+            hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
+            for hole in holes:
+                hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
+
+    for outline_layer, hatch_layer, is_section, geoms in wall_geom_groups:
         for poly in geoms:
             if poly.geom_type != 'Polygon': continue
             exterior = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
@@ -1084,12 +1100,24 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": outline_layer})
             for hole in holes:
                 msp.add_lwpolyline(hole, dxfattribs={"closed": True, "layer": outline_layer})
-            if is_section and len(exterior) >= 3:
-                hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer})
-                hatch.set_solid_fill()
-                hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
-                for hole in holes:
-                    hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
+
+    xs, ys = [], []
+    for _, _, _, geoms in wall_geom_groups:
+        for poly in geoms:
+            if poly.geom_type == 'Polygon':
+                xs.extend(x for x, y in poly.exterior.coords)
+                ys.extend(y for x, y in poly.exterior.coords)
+    for inserts in block_inserts.values():
+        for pos, _rot, _layer in inserts:
+            xs.append(float(pos[0])); ys.append(float(pos[1]))
+    if xs and ys:
+        pad = max((max(xs) - min(xs)) * 0.05, (max(ys) - min(ys)) * 0.05, 0.5)
+        xmin, xmax = min(xs) - pad, max(xs) + pad
+        ymin, ymax = min(ys) - pad, max(ys) + pad
+        doc.header["$EXTMIN"] = (xmin, ymin, 0)
+        doc.header["$EXTMAX"] = (xmax, ymax, 0)
+        cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+        doc.set_modelspace_vport(height=ymax - ymin, center=(cx, cy))
 
     doc.saveas(output_path)
 
