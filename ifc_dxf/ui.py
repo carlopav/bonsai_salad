@@ -3,7 +3,7 @@
 # GPL-3.0
 
 import bpy
-from .operator import _get_ifc, _get_ifc_dxf, _get_active_drawing
+from .operator import _get_ifc, _get_active_drawing
 
 
 class IfcDxfPanel(bpy.types.Panel):
@@ -21,13 +21,7 @@ class IfcDxfPanel(bpy.types.Panel):
             layout.label(text="No IFC file loaded.", icon="ERROR")
             return
 
-        if _get_ifc_dxf() is None:
-            col = layout.column()
-            col.label(text="ifc_dxf module not built.", icon="ERROR")
-            col.label(text="Run: cd ifc_dxf_rs && maturin develop --release")
-            return
-
-        drawing = _get_active_drawing(context)
+        drawing = _get_active_drawing()
         if drawing is None:
             layout.label(text="No active drawing.", icon="INFO")
         else:

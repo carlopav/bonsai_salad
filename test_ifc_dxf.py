@@ -393,8 +393,14 @@ def _trimmed_conic_spec(item):
                 return float(t)  # IFC practice: degrees, not radians
         return None
 
-    a1 = val_to_param_deg(item.Trim1) or pt_to_param_deg(item.Trim1)
-    a2 = val_to_param_deg(item.Trim2) or pt_to_param_deg(item.Trim2)
+    # Prefer CartesianPoint (unambiguous); fallback to ParameterValue.
+    # Do NOT use `or` — 0.0° is falsy but valid.
+    a1 = pt_to_param_deg(item.Trim1)
+    if a1 is None:
+        a1 = val_to_param_deg(item.Trim1)
+    a2 = pt_to_param_deg(item.Trim2)
+    if a2 is None:
+        a2 = val_to_param_deg(item.Trim2)
     if a1 is None or a2 is None:
         return None
 
@@ -411,6 +417,86 @@ def _trimmed_conic_spec(item):
         return (cx, cy, r, a1_world % 360, a2_world % 360)
     else:                    # CW arc: swap so DXF still goes CCW
         return (cx, cy, r, a2_world % 360, a1_world % 360)
+
+
+def _trimmed_ellipse_spec(item):
+    """Return DXF ELLIPSE spec for IfcTrimmedCurve with IfcEllipse (unequal axes).
+
+    Returns (cx, cy, maj_x, maj_y, ratio, t1_rad, t2_rad) or None.
+    DXF ELLIPSE draws CCW from t1_rad to t2_rad in the major-axis frame.
+    """
+    import math
+    basis = item.BasisCurve
+    if not basis.is_a("IfcEllipse"):
+        return None
+    ra = float(basis.SemiAxis1)  # along RefDirection (xax)
+    rb = float(basis.SemiAxis2)  # perpendicular (yax)
+
+    pos = basis.Position
+    loc = pos.Location.Coordinates
+    cx, cy = float(loc[0]), float(loc[1])
+    if hasattr(pos, 'RefDirection') and pos.RefDirection:
+        d  = pos.RefDirection.DirectionRatios
+        xn = math.sqrt(float(d[0])**2 + float(d[1])**2)
+        xax = [float(d[0])/xn, float(d[1])/xn]
+    else:
+        xax = [1.0, 0.0]
+    yax = [-xax[1], xax[0]]
+
+    # DXF requires ratio = minor/major <= 1; choose larger axis as major
+    if ra >= rb:
+        major = ra;  minor = rb
+        major_dir = xax;             minor_dir = yax
+    else:
+        major = rb;  minor = ra
+        major_dir = yax;             minor_dir = [-xax[0], -xax[1]]  # rotate_ccw(yax) = -xax
+
+    ratio = minor / major
+
+    def pt_to_param(trims):
+        for t in trims:
+            if hasattr(t, 'Coordinates'):
+                dx = float(t.Coordinates[0]) - cx
+                dy = float(t.Coordinates[1]) - cy
+                cos_t = (major_dir[0]*dx + major_dir[1]*dy) / major
+                sin_t = (minor_dir[0]*dx + minor_dir[1]*dy) / minor
+                return math.atan2(sin_t, cos_t)
+        return None
+
+    def val_to_param(trims):
+        """IFC ParameterValue (degrees) → DXF ellipse param (radians)."""
+        for t in trims:
+            if not hasattr(t, 'Coordinates'):
+                v = math.radians(float(t))
+                # IFC param v: P = ra*cos(v)*xax + rb*sin(v)*yax
+                if ra >= rb:
+                    return v  # DXF major=xax, same parameterization
+                else:
+                    # DXF major=yax, minor=-xax:
+                    # cos(t)=sin(v), sin(t)=-cos(v) → t=atan2(-cos(v), sin(v))
+                    return math.atan2(-math.cos(v), math.sin(v))
+        return None
+
+    t1 = pt_to_param(item.Trim1)
+    if t1 is None:
+        t1 = val_to_param(item.Trim1)
+    t2 = pt_to_param(item.Trim2)
+    if t2 is None:
+        t2 = val_to_param(item.Trim2)
+    if t1 is None or t2 is None:
+        return None
+
+    if item.SenseAgreement:
+        # CCW from t1 to t2; ensure end > start
+        if t2 <= t1:
+            t2 += 2 * math.pi
+    else:
+        # CW in IFC → swap for DXF CCW
+        t1, t2 = t2, t1
+        if t2 <= t1:
+            t2 += 2 * math.pi
+
+    return (cx, cy, major_dir[0]*major, major_dir[1]*major, ratio, t1, t2)
 
 
 def _trimmed_conic_flat(item, n_seg=16):
@@ -496,6 +582,34 @@ def _apply_arc_spec(spec, op):
         return (new_cx, new_cy, r * sc, (s + rot_deg) % 360, (e + rot_deg) % 360)
 
 
+def _apply_ellipse_spec(spec, op):
+    """Apply IfcCartesianTransformationOperator to a DXF ellipse spec.
+
+    spec = (cx, cy, maj_x, maj_y, ratio, t1_rad, t2_rad)
+    """
+    if op is None or spec is None:
+        return spec
+    import math
+    c = op.LocalOrigin.Coordinates
+    ox, oy = float(c[0]), float(c[1])
+    sc = float(op.Scale) if getattr(op, 'Scale', None) is not None else 1.0
+    if op.Axis1:
+        xd = op.Axis1.DirectionRatios
+        xa = [float(xd[0]), float(xd[1])]
+    else:
+        xa = [1.0, 0.0]
+    xn = math.sqrt(xa[0]**2 + xa[1]**2)
+    xa = [xa[0]/xn, xa[1]/xn]
+    ya = [-xa[1], xa[0]]
+
+    cx, cy, maj_x, maj_y, ratio, t1, t2 = spec
+    new_cx  = ox + (cx*xa[0] + cy*ya[0]) * sc
+    new_cy  = oy + (cx*xa[1] + cy*ya[1]) * sc
+    new_mjx = (maj_x*xa[0] + maj_y*ya[0]) * sc
+    new_mjy = (maj_x*xa[1] + maj_y*ya[1]) * sc
+    return (new_cx, new_cy, new_mjx, new_mjy, ratio, t1, t2)
+
+
 def _apply_cart_transform_op(verts_flat, op):
     """Apply IfcCartesianTransformationOperator3D to a flat vertex list."""
     if op is None:
@@ -527,19 +641,62 @@ def _apply_cart_transform_op(verts_flat, op):
     return result
 
 
+def _composite_curve_seg_endpoints(seg):
+    """Return (start_pt, end_pt) of an IfcCompositeCurveSegment as [x,y] lists, or (None,None)."""
+    import math
+    curve = seg.ParentCurve
+    sense = seg.SenseAgreement  # True = natural direction
+
+    def _rev(p0, p1):
+        return (p0, p1) if sense else (p1, p0)
+
+    if curve.is_a("IfcPolyline"):
+        pts = curve.Points
+        if len(pts) < 2:
+            return None, None
+        p0 = [float(pts[0].Coordinates[0]),  float(pts[0].Coordinates[1])]
+        p1 = [float(pts[-1].Coordinates[0]), float(pts[-1].Coordinates[1])]
+        return _rev(p0, p1)
+
+    if curve.is_a("IfcIndexedPolyCurve"):
+        cl = curve.Points.CoordList
+        if len(cl) < 2:
+            return None, None
+        p0 = [float(cl[0][0]),  float(cl[0][1])]
+        p1 = [float(cl[-1][0]), float(cl[-1][1])]
+        return _rev(p0, p1)
+
+    if curve.is_a("IfcTrimmedCurve"):
+        def _cart(trims):
+            for t in trims:
+                if hasattr(t, 'Coordinates'):
+                    return [float(t.Coordinates[0]), float(t.Coordinates[1])]
+            return None
+        p0 = _cart(curve.Trim1)
+        p1 = _cart(curve.Trim2)
+        if p0 is None or p1 is None:
+            return None, None
+        # TrimmedCurve.SenseAgreement tells the traversal direction of the basis curve;
+        # it does NOT swap the meaning of Trim1/Trim2 as endpoints.
+        return _rev(p0, p1)
+
+    return None, None
+
+
 def _extract_curves_from_items(items, mapping_target=None):
-    """Walk IFC shape items, return (verts_flat, edges_flat, arcs, circles).
+    """Walk IFC shape items, return (verts_flat, edges_flat, arcs, circles, ellipses).
 
-    arcs:    [(cx, cy, r, dxf_start_deg, dxf_end_deg), ...]  — true DXF ARC specs
-    circles: [(cx, cy, r), ...]                               — true DXF CIRCLE specs
-    IfcEllipse with unequal axes falls back to tessellated verts/edges.
+    arcs:     [(cx, cy, r, dxf_start_deg, dxf_end_deg), ...]  — true DXF ARC specs
+    circles:  [(cx, cy, r), ...]                               — true DXF CIRCLE specs
+    ellipses: [(cx, cy, maj_x, maj_y, ratio, t1_rad, t2_rad)] — true DXF ELLIPSE specs
     """
-    verts   = []   # flat [x0,y0,z0, ...]
-    edges   = []   # flat [i0,j0, ...]
-    arcs    = []   # arc specs
-    circles = []   # circle specs
+    verts    = []   # flat [x0,y0,z0, ...]
+    edges    = []   # flat [i0,j0, ...]
+    arcs     = []   # arc specs
+    circles  = []   # circle specs
+    ellipses = []   # ellipse specs
 
-    def _merge_sub(sub_v, sub_e, sub_arcs, sub_circles):
+    def _merge_sub(sub_v, sub_e, sub_arcs, sub_circles, sub_ellipses):
         if sub_v:
             base = len(verts) // 3
             verts.extend(sub_v)
@@ -547,6 +704,7 @@ def _extract_curves_from_items(items, mapping_target=None):
                 edges.extend([sub_e[k] + base, sub_e[k+1] + base])
         arcs.extend(sub_arcs)
         circles.extend(sub_circles)
+        ellipses.extend(sub_ellipses)
 
     for item in items:
         if item.is_a("IfcMappedItem"):
@@ -562,9 +720,46 @@ def _extract_curves_from_items(items, mapping_target=None):
         elif item.is_a("IfcGeometricCurveSet") or item.is_a("IfcGeometricSet"):
             _merge_sub(*_extract_curves_from_items(list(item.Elements)))
 
+
         elif item.is_a("IfcCompositeCurve"):
-            segs = [s.ParentCurve for s in item.Segments]
-            _merge_sub(*_extract_curves_from_items(segs))
+            # Collect segment endpoints first so bare IfcCircle segments
+            # can find their arc boundaries from adjacent segments.
+            import math
+            segs = list(item.Segments)
+            n_segs = len(segs)
+            seg_eps = [_composite_curve_seg_endpoints(s) for s in segs]
+
+            for idx, seg in enumerate(segs):
+                curve = seg.ParentCurve
+                sense = seg.SenseAgreement
+
+                if curve.is_a("IfcCircle"):
+                    # Arc endpoints come from the previous segment's end
+                    # and the next segment's start.
+                    prev_ep = seg_eps[(idx - 1) % n_segs][1]
+                    next_sp = seg_eps[(idx + 1) % n_segs][0]
+
+                    pos = curve.Position
+                    loc = pos.Location.Coordinates
+                    cx_c, cy_c = float(loc[0]), float(loc[1])
+                    r_c = float(curve.Radius)
+
+                    if prev_ep is not None and next_sp is not None:
+                        a1c = math.degrees(math.atan2(
+                            prev_ep[1] - cy_c, prev_ep[0] - cx_c)) % 360
+                        a2c = math.degrees(math.atan2(
+                            next_sp[1] - cy_c, next_sp[0] - cx_c)) % 360
+                        if abs((a1c - a2c) % 360) < 0.01:
+                            circles.append((cx_c, cy_c, r_c))
+                        elif sense:
+                            arcs.append((cx_c, cy_c, r_c, a1c, a2c))
+                        else:
+                            arcs.append((cx_c, cy_c, r_c, a2c, a1c))
+                    else:
+                        circles.append((cx_c, cy_c, r_c))
+                else:
+                    _merge_sub(*_extract_curves_from_items([curve]))
+
 
         elif item.is_a("IfcIndexedPolyCurve"):
             pts_ent = item.Points
@@ -616,8 +811,17 @@ def _extract_curves_from_items(items, mapping_target=None):
                     circles.append(spec)
                 else:
                     arcs.append(spec)
+            elif item.BasisCurve.is_a("IfcEllipse"):
+                espec = _trimmed_ellipse_spec(item)
+                if espec is not None:
+                    ellipses.append(espec)
+                else:
+                    tv, te = _trimmed_conic_flat(item)
+                    if tv:
+                        tb = len(verts) // 3
+                        verts.extend(tv)
+                        edges.extend([tb + i for i in te])
             else:
-                # Fallback: tessellate (IfcEllipse with unequal axes)
                 tv, te = _trimmed_conic_flat(item)
                 if tv:
                     tb = len(verts) // 3
@@ -632,24 +836,25 @@ def _extract_curves_from_items(items, mapping_target=None):
     if mapping_target is not None:
         if verts:
             verts = _apply_cart_transform_op(verts, mapping_target)
-        arcs    = [_apply_arc_spec(s, mapping_target) for s in arcs]
-        circles = [_apply_arc_spec(s, mapping_target) for s in circles]
+        arcs     = [_apply_arc_spec(s, mapping_target) for s in arcs]
+        circles  = [_apply_arc_spec(s, mapping_target) for s in circles]
+        ellipses = [_apply_ellipse_spec(s, mapping_target) for s in ellipses]
 
-    return verts, edges, arcs, circles
+    return verts, edges, arcs, circles, ellipses
 
 
 def _extract_local_curves(element, plan_repr):
     """Extract plan curves in element-local coords.
 
-    Returns (verts_flat, edges_flat, arcs, circles).
+    Returns (verts_flat, edges_flat, arcs, circles, ellipses).
     Tries manual item walking first; falls back to ifcopenshell geometry engine
-    (which produces tessellated lines only, no arc/circle specs).
+    (which produces tessellated lines only, no arc/circle/ellipse specs).
     """
     items = plan_repr.Items
     if items:
-        v, e, arcs, circles = _extract_curves_from_items(list(items))
-        if v or e or arcs or circles:
-            return v, e, arcs, circles
+        v, e, arcs, circles, ellipses = _extract_curves_from_items(list(items))
+        if v or e or arcs or circles or ellipses:
+            return v, e, arcs, circles, ellipses
 
     # Fallback: ifcopenshell geometry engine with the specific context
     ctx_id = plan_repr.ContextOfItems.id()
@@ -657,7 +862,7 @@ def _extract_local_curves(element, plan_repr):
     s.set('use-world-coords', False)
     s.set('context-ids', [ctx_id])
     shape = ifcopenshell.geom.create_shape(s, element)
-    return list(shape.geometry.verts), list(shape.geometry.edges), [], []
+    return list(shape.geometry.verts), list(shape.geometry.edges), [], [], []
 
 
 # ── wall section modes ────────────────────────────────────────────────────────
@@ -960,6 +1165,83 @@ def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_col_major,
 
 
 
+# ── Bucket A: slab occlusion helpers ─────────────────────────────────────────
+
+def _slab_footprint_world(elem, wm_flat):
+    """Return Shapely Polygon of slab footprint in world XY, or None.
+
+    Extracts the IfcExtrudedAreaSolid profile and transforms it to world space.
+    Only the XY plane projection is used (footprint from above).
+    """
+    if not hasattr(elem, 'Representation') or elem.Representation is None:
+        return None
+    world_m = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
+    for repr_ in elem.Representation.Representations:
+        for item in repr_.Items:
+            cur, depth = item, 0
+            while (cur.is_a("IfcBooleanClippingResult") or
+                   cur.is_a("IfcBooleanResult")):
+                cur = cur.FirstOperand
+                depth += 1
+                if depth > 8:
+                    break
+            if not cur.is_a("IfcExtrudedAreaSolid"):
+                continue
+            pts_2d = _profile_to_pts_2d(cur.SweptArea)
+            if not pts_2d:
+                continue
+            pts_3d = _apply_axis2placement3d(pts_2d, cur.Position)
+            pts_h = np.hstack([pts_3d, np.ones((len(pts_3d), 1))])
+            pts_world = (world_m @ pts_h.T).T[:, :2]
+            try:
+                poly = shapely.Polygon(pts_world.tolist())
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.area > 1e-4:
+                    return poly
+            except Exception:
+                continue
+    return None
+
+
+def _compute_floor_slabs(ifc, cut_z):
+    """Return list of (z_top, Shapely Polygon) for IfcSlab/IfcCovering(FLOOR) below cut_z.
+
+    Only slabs whose footprint can be extracted as a polygon are included.
+    """
+    slabs = []
+    for cls in ("IfcSlab", "IfcCovering"):
+        for elem in ifc.by_type(cls):
+            if cls == "IfcCovering":
+                if getattr(elem, "PredefinedType", None) != "FLOOR":
+                    continue
+            try:
+                wm = world_matrix_col_major(elem)
+                _, z_max = _wall_z_range(elem, wm)
+                if z_max is None or z_max > cut_z:
+                    continue
+                poly = _slab_footprint_world(elem, wm)
+                if poly is not None:
+                    slabs.append((z_max, poly))
+            except Exception:
+                pass
+    return slabs
+
+
+def _is_occluded_by_slab(x_world, y_world, z_origin, floor_slabs):
+    """Return True if (x_world, y_world) at z_origin lies under any floor slab.
+
+    Uses XY footprint containment: element must be spatially below the slab
+    (z_origin < z_top) AND its XY origin must fall within the slab polygon.
+    Elements outside the slab footprint (courtyards, atria) are never excluded.
+    """
+    pt = shapely.Point(x_world, y_world)
+    for z_top, poly in floor_slabs:
+        if z_origin < z_top - 1e-3 and poly.covers(pt):
+            return True
+    return False
+
+
 # ── DXF writing helpers ───────────────────────────────────────────────────────
 
 def _project_local_to_lines(verts, edges, cam_R):
@@ -1017,7 +1299,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key, layer_styles):
     """Write all collected drawing data to a DXF file using ezdxf.
 
-    block_defs:    name → {ifc_class, material, lines, arcs, circles}
+    block_defs:    name → {ifc_class, material, lines, arcs, circles, ellipses}
     block_order:   list of block names in insertion order
     block_inserts: name → [(pos_2d, rot_deg), ...]
     flat_edges:    [(p0, p1, layer), ...] — for wall_mode='flat'
@@ -1049,6 +1331,15 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": "0"})
         for cx, cy, r in bd["circles"]:
             blk.add_circle((cx, cy), r, dxfattribs={"layer": "0"})
+        for cx, cy, maj_x, maj_y, ratio, t1, t2 in bd.get("ellipses", []):
+            blk.add_ellipse(
+                center=(cx, cy, 0),
+                major_axis=(maj_x, maj_y, 0),
+                ratio=ratio,
+                start_param=t1,
+                end_param=t2,
+                dxfattribs={"layer": "0"},
+            )
 
         for pos, rot in block_inserts.get(block_name, []):
             msp.add_blockref(block_name, pos,
@@ -1089,7 +1380,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
 
             if is_section and len(exterior) >= 3:
                 hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer})
-                hatch.set_pattern_fill("ANSI31", scale=0.05)
+                hatch.set_solid_fill()
                 hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
                 for hole in holes:
                     hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
@@ -1162,20 +1453,26 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")
 
-    WALL_MERGE_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
+    # Classes processed in Bucket B-Approximate (section from 3D solid)
+    _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
 
     # Accumulated drawing data
-    block_defs    = {}   # name → {ifc_class, material, lines, arcs, circles}
+    block_defs    = {}   # name → {ifc_class, material, lines, arcs, circles, ellipses}
     block_order   = []   # insertion order
     block_inserts = {}   # name → [(pos_2d, rot_deg), ...]
     flat_edges    = []   # [(p0, p1, layer)] — wall_mode='flat' only
     wall_polys_by_key = {}  # (ifc_class, material, is_section) → [Polygon, ...]
     seen_blocks   = {}
 
-    bucket_wall = bucket_b = bucket_c = skipped = 0
-    skipped_classes = {}
+    bucket_a = bucket_b = bucket_c = 0
+    bucket_a_classes = {}
     bucket_b_classes = {}
     bucket_c_classes = {}
+
+    cut_z = cam_pos[2]
+    floor_slabs = _compute_floor_slabs(ifc, cut_z) if SHAPELY_AVAILABLE else []
+    if floor_slabs:
+        print(f"  Floor slabs: {len(floor_slabs)} footprints for slab occlusion")
 
     for element in elements:
         ifc_class = element.is_a()
@@ -1183,25 +1480,85 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         gid       = element.GlobalId
         wm        = world_matrix_col_major(element)
 
-        # ── Wall path ────────────────────────────────────────────────────────
-        if ifc_class in WALL_MERGE_CLASSES:
+        # ── Bucket A: 2D native representation ───────────────────────────────
+        # _SECTION_CLASSES are always routed to Bucket B regardless of whether
+        # they have a plan repr — Bucket B produces merged outlines + hatching.
+        plan_repr, from_type = find_plan_repr(element, target_view)
+        if plan_repr is not None and ifc_class not in _SECTION_CLASSES:
+            # Slab occlusion: exclude elements whose XY origin falls inside a
+            # slab footprint that is above them (Z check + footprint containment).
+            if floor_slabs:
+                x_w, y_w, z_w = float(wm[12]), float(wm[13]), float(wm[14])
+                if _is_occluded_by_slab(x_w, y_w, z_w, floor_slabs):
+                    bucket_c += 1
+                    bucket_c_classes[ifc_class] = bucket_c_classes.get(ifc_class, 0) + 1
+                    continue
+            try:
+                if from_type or is_mapped_repr(plan_repr):
+                    _, block_name = get_type_block_name(element)
+                    if block_name is None:
+                        block_name = gid
+                else:
+                    block_name = gid
+
+                if block_name not in seen_blocks:
+                    verts, edges, arcs, circles, ellipses = _extract_local_curves(element, plan_repr)
+                    if verts or edges or arcs or circles or ellipses:
+                        lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
+                        arcs_blk = []
+                        for cx_e, cy_e, r, a_s, a_e in arcs:
+                            c = _cam_R @ np.array([cx_e, cy_e, 0.0])
+                            arcs_blk.append((float(c[0]), float(c[1]), r,
+                                             (a_s + _cam_rot_deg) % 360,
+                                             (a_e + _cam_rot_deg) % 360))
+                        circles_blk = []
+                        for cx_e, cy_e, r in circles:
+                            c = _cam_R @ np.array([cx_e, cy_e, 0.0])
+                            circles_blk.append((float(c[0]), float(c[1]), r))
+                        ellipses_blk = []
+                        for cx_e, cy_e, maj_x, maj_y, ratio, t1, t2 in ellipses:
+                            c   = _cam_R @ np.array([cx_e, cy_e, 0.0])
+                            maj = _cam_R @ np.array([maj_x, maj_y, 0.0])
+                            ellipses_blk.append((float(c[0]), float(c[1]),
+                                                  float(maj[0]), float(maj[1]),
+                                                  ratio, t1, t2))
+                        block_defs[block_name] = {
+                            "ifc_class": ifc_class, "material": material,
+                            "lines": lines, "arcs": arcs_blk,
+                            "circles": circles_blk, "ellipses": ellipses_blk,
+                        }
+                        block_order.append(block_name)
+                        seen_blocks[block_name] = True
+
+                if block_name in seen_blocks:
+                    pos, rot = _compute_insert(wm, _cam_inv_np)
+                    block_inserts.setdefault(block_name, []).append((pos, rot))
+                    bucket_a += 1
+                    bucket_a_classes[ifc_class] = bucket_a_classes.get(ifc_class, 0) + 1
+                    continue
+            except Exception:
+                pass
+
+        # ── Bucket B-Approximate: section from 3D solid (Shapely) ────────────
+        if ifc_class in _SECTION_CLASSES:
             if wall_mode == "shapely":
                 try:
                     poly, is_section = _extract_wall_polygon_with_openings(
-                        element, wm, col_major, cam_pos[2], cam_dir
+                        element, wm, col_major, cut_z, cam_dir
                     )
                     if poly is not None:
                         key = (ifc_class, material, is_section)
                         wall_polys_by_key.setdefault(key, []).append(poly)
-                        bucket_wall += 1
+                        bucket_b += 1
+                        bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
                         continue
                 except Exception:
                     pass
             else:
-                plan_repr, _ = find_plan_repr(element, target_view)
-                if plan_repr is not None:
+                plan_repr_b, _ = find_plan_repr(element, target_view)
+                if plan_repr_b is not None:
                     try:
-                        verts, edges, _a, _c = _extract_local_curves(element, plan_repr)
+                        verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b)
                         if verts and edges:
                             wm_np = np.array(wm, dtype=float).reshape(4, 4, order='F')
                             combined = _cam_inv_np @ wm_np
@@ -1216,61 +1573,23 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                                 p1 = (float(pd[j, 0]), float(pd[j, 1]))
                                 if (p0[0]-p1[0])**2 + (p0[1]-p1[1])**2 > 1e-18:
                                     flat_edges.append((p0, p1, layer))
-                            bucket_wall += 1
+                            bucket_b += 1
+                            bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
                             continue
                     except Exception:
                         pass
 
-        # ── Bucket B: 2D native plan representation ──────────────────────────
-        plan_repr, from_type = find_plan_repr(element, target_view)
-        if plan_repr is not None:
-            try:
-                if from_type or is_mapped_repr(plan_repr):
-                    _, block_name = get_type_block_name(element)
-                    if block_name is None:
-                        block_name = gid
-                else:
-                    block_name = gid
+        # ── Bucket C: no usable representation ───────────────────────────────
+        bucket_c += 1
+        bucket_c_classes[ifc_class] = bucket_c_classes.get(ifc_class, 0) + 1
 
-                if block_name not in seen_blocks:
-                    verts, edges, arcs, circles = _extract_local_curves(element, plan_repr)
-                    if verts or edges or arcs or circles:
-                        lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
-                        arcs_blk = []
-                        for cx_e, cy_e, r, a_s, a_e in arcs:
-                            c = _cam_R @ np.array([cx_e, cy_e, 0.0])
-                            arcs_blk.append((float(c[0]), float(c[1]), r,
-                                             (a_s + _cam_rot_deg) % 360,
-                                             (a_e + _cam_rot_deg) % 360))
-                        circles_blk = []
-                        for cx_e, cy_e, r in circles:
-                            c = _cam_R @ np.array([cx_e, cy_e, 0.0])
-                            circles_blk.append((float(c[0]), float(c[1]), r))
-                        block_defs[block_name] = {
-                            "ifc_class": ifc_class, "material": material,
-                            "lines": lines, "arcs": arcs_blk, "circles": circles_blk,
-                        }
-                        block_order.append(block_name)
-                        seen_blocks[block_name] = True
-
-                if block_name in seen_blocks:
-                    pos, rot = _compute_insert(wm, _cam_inv_np)
-                    block_inserts.setdefault(block_name, []).append((pos, rot))
-                    bucket_b += 1
-                    bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
-                    continue
-            except Exception:
-                pass
-
-        # ── Bucket C: skip (no 3D body wireframe in pure-Python mode) ────────
-        skipped += 1
-        skipped_classes[ifc_class] = skipped_classes.get(ifc_class, 0) + 1
-
-    print(f"  Wall       : {bucket_wall}  Bucket B: {bucket_b}  Skipped: {skipped}")
-    if skipped_classes:
-        print(f"  Skipped    : { {k: v for k, v in sorted(skipped_classes.items())} }")
+    print(f"  Bucket A   : {bucket_a}  Bucket B: {bucket_b}  Bucket C: {bucket_c}")
+    if bucket_a_classes:
+        print(f"  Bucket A   : { {k: v for k, v in sorted(bucket_a_classes.items())} }")
     if bucket_b_classes:
         print(f"  Bucket B   : { {k: v for k, v in sorted(bucket_b_classes.items())} }")
+    if bucket_c_classes:
+        print(f"  Bucket C   : { {k: v for k, v in sorted(bucket_c_classes.items())} }")
 
     if wall_mode == "shapely" and wall_polys_by_key:
         n_polys = sum(len(v) for v in wall_polys_by_key.values())

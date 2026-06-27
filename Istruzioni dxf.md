@@ -1,87 +1,62 @@
 # bonsai_salad — ifc_dxf: Regole di Generazione DXF
 
+> Implementazione: Python puro (`ezdxf` + `shapely` + `ifcopenshell`). Nessuna dipendenza Rust/OCC lato ifc_dxf.
+
+---
+
 ## Compatibilità IFC
-- La libreria deve funzionare con tutte le versioni IFC disponibili in IfcOpenShell.
-- Recuperare i `RepresentationContext` disponibili tramite IfcOpenShell a runtime (ogni file IFC dichiara i propri sub-context), senza hardcode di versione.
 
-### RepresentationIdentifier disponibili in IFC4
+- Funziona con tutte le versioni IFC disponibili in IfcOpenShell.
+- I `RepresentationContext` disponibili vengono recuperati a runtime (ogni file IFC dichiara i propri sub-context), senza hardcode di versione.
 
-Ogni `IfcShapeRepresentation` ha un campo `RepresentationIdentifier` (stringa) che indica il ruolo della rappresentazione. Valori standard IFC4:
+---
+
+## RepresentationIdentifier (IFC4)
+
+Ogni `IfcShapeRepresentation` ha un campo `RepresentationIdentifier` che indica il ruolo della rappresentazione:
 
 | Identifier | Tipo | Uso per ifc_dxf |
 |---|---|---|
-| `Body` | 3D solido / swept solid / BRep | **Bucket A** (se IfcExtrudedAreaSolid ‖ camera) o **Bucket C** |
-| `FootPrint` | Proiezione planimetrica 2D | **Bucket B** (preferito per plan view) |
-| `Axis` | Asse o linea centrale | **Bucket B** (es. travi, pilastri) |
-| `Profile` | Sezione trasversale 3D | **Bucket A** (se estrusione ‖ camera) |
-| `Reference` | Geometria di riferimento (clash/interferenza) | Ignorato / Bucket D |
-| `Surface` | Superficie esterna (pelle) | Bucket C |
-| `Annotation` | Annotazioni 2D | Gestito da modulo `annotations` |
+| `Body` | 3D solido / swept solid / BRep | Bucket B (se IfcExtrudedAreaSolid ‖ camera) o Bucket C |
+| `FootPrint` | Proiezione planimetrica 2D | **Bucket A** (preferito per plan view) |
+| `Axis` | Asse o linea centrale | **Bucket A** (es. travi, pilastri) |
+| `Profile` | Sezione trasversale 3D | Bucket B (se estrusione ‖ camera) |
+| `Reference` | Geometria di riferimento | Ignorato |
+| `Surface` | Superficie esterna | Bucket C |
+| `Annotation` | Annotazioni 2D | **Bucket D** (modulo `annotations`, future) |
 | `Box` | Bounding box | Ignorato |
-| `CoG` | Centro di gravità (punto) | Ignorato |
-| `Clearance` | Spazio di manovra / ingombro | Ignorato (opzionale) |
-| `Lighting` | Geometria per render illuminazione | Ignorato |
+| `CoG` | Centro di gravità | Ignorato |
+| `Clearance` | Spazio di manovra | Ignorato |
+| `Lighting` | Geometria per render | Ignorato |
 
-**Priorità di selezione per plan view** (in ordine decrescente):
-1. `FootPrint` — contesto 2D nativo, Bucket B
-2. `Axis` — se FootPrint assente, Bucket B
-3. `Body` con `IfcExtrudedAreaSolid` ‖ camera — Bucket A
-4. `Body` generico — Bucket C
-5. Qualsiasi altra rappresentazione — Bucket D
+**Priorità di selezione per plan view** (ordine decrescente):
+1. `Plan / Body / PLAN_VIEW` → **Bucket A**
+2. `Plan / Body / MODEL_VIEW` → **Bucket A**
+3. `Model / Body / PLAN_VIEW` → **Bucket A**
+4. `Model / Body / MODEL_VIEW` → **Bucket A**
+5. `FootPrint / PLAN_VIEW` → **Bucket A**
+6. Nessuna repr 2D → **Bucket B** o **C**
 
-> In IFC4.3 (Infrastructure) sono presenti ulteriori identifier (`SurveyPoints`, `Alignment`, …) non rilevanti per gli usi edilizi correnti.
+---
 
-### Sub-context: TargetView (`IfcGeometricProjectionEnum`)
+## Sub-context: TargetView (`IfcGeometricProjectionEnum`)
 
-La struttura è gerarchica:
 ```
 IfcGeometricRepresentationContext   (ContextType = "Model" | "Plan")
   └─ IfcGeometricRepresentationSubContext
-         ├─ ContextIdentifier  →  "Body", "FootPrint", "Axis", …  (tabella sopra)
+         ├─ ContextIdentifier  →  "Body", "FootPrint", "Axis", …
          └─ TargetView         →  IfcGeometricProjectionEnum
 ```
 
-Valori di `TargetView` in IFC4 (`IfcGeometricProjectionEnum`):
-
-| TargetView | Descrizione | Tipo di vista ifc_dxf |
+| TargetView | Descrizione | Vista ifc_dxf |
 |---|---|---|
-| `MODEL_VIEW` | Vista 3D del modello | Axonometric / 3D generico |
 | `PLAN_VIEW` | Vista in pianta (dall'alto) | **Plan view** |
-| `REFLECTED_PLAN_VIEW` | Pianta riflessa (dal basso, per soffitti) | **RCP** |
-| `SECTION_VIEW` | Sezione verticale | **Section view** |
-| `ELEVATION_VIEW` | Prospetto esterno | **Elevation** |
-| `GRAPH_VIEW` | Rappresentazione schematica / grafo | Asse, riferimento |
+| `REFLECTED_PLAN_VIEW` | Pianta riflessa (soffitti) | RCP |
+| `SECTION_VIEW` | Sezione verticale | Section view |
+| `ELEVATION_VIEW` | Prospetto esterno | Elevation |
+| `MODEL_VIEW` | Vista 3D generica | Axonometric |
+| `GRAPH_VIEW` | Rappresentazione schematica | Asse, riferimento |
 | `SKETCH_VIEW` | Schizzo approssimativo | Non usato |
-| `USERDEFINED` | Definito dall'utente (accompagnato da `UserDefinedTargetView`) | Caso per caso |
-| `NOTDEFINED` | Non definito | Fallback a `MODEL_VIEW` |
-
-**Come interrogare a runtime con IfcOpenShell:**
-```python
-contexts = ifc_file.by_type("IfcGeometricRepresentationSubContext")
-for ctx in contexts:
-    print(ctx.ContextIdentifier, ctx.TargetView)
-    # es. "FootPrint"  "PLAN_VIEW"
-    # es. "Body"       "MODEL_VIEW"
-    # es. "Axis"       "GRAPH_VIEW"
-```
-
-**Selezione del sub-context** — allineata a Bonsai SVG, con estensioni per elementi non-OCC.
-
-Per elementi con sezione calcolata via OCC (es. IfcWall, IfcSlab, …):
-1. `Plan / Body / PLAN_VIEW`
-2. `Plan / Body / MODEL_VIEW`
-3. `Model / Body / PLAN_VIEW`
-4. `Model / Body / MODEL_VIEW`
-5. `Facetation` — caso degradato, solo wireframe tessellato
-
-Per elementi senza sezione OCC (es. IfcFurniture, IfcSanitaryTerminal, …):
-1. `Plan / Body / PLAN_VIEW`
-2. `Plan / Body / MODEL_VIEW`
-3. `Model / Body / PLAN_VIEW`
-4. `Model / Body / MODEL_VIEW`
-5. `FootPrint / PLAN_VIEW`
-6. `Axis / PLAN_VIEW`
-7. `Facetation` — caso degradato, solo wireframe tessellato
 
 ---
 
@@ -91,18 +66,20 @@ Riprodurre la struttura IFC nelle entità DXF nel modo più fedele possibile:
 
 | IFC | DXF |
 |-----|-----|
-| Tipo IFC (`IfcWindow`, `IfcFurnitureType`, …) | Un **BLOCK** (nome = nome del tipo) |
+| Tipo IFC (`IfcDoorType`, `IfcFurnitureType`, …) | Un **BLOCK** (nome = nome del tipo) |
 | Istanza di elemento IFC | Un **INSERT** |
-| Elemento senza tipo condiviso (geometria diretta) | BLOCK con nome = `GlobalId` dell'elemento |
+| Elemento senza tipo condiviso | BLOCK con nome = `GlobalId` dell'elemento |
 
 ### Regole di posizionamento
-- **Geometria del BLOCK**: in coordinate locali dell'elemento/tipo. Entità su layer `"0"`, proprietà BYBLOCK (colore, lineweight, linetype ereditati dall'INSERT).
+
+- **Geometria del BLOCK**: in coordinate locali dell'elemento/tipo. Entità su layer `"0"` (proprietà ereditate dall'INSERT via BYBLOCK).
 - **INSERT position**: proiezione dell'origine world-space dell'`ObjectPlacement` dell'elemento.
-- **INSERT rotation**: angolo (radianti, CCW) che l'asse X locale dell'elemento forma con l'asse X del disegno, dopo proiezione nel piano camera.
-- **INSERT layer**: nome esatto della classe IFC (es. `IfcWall`, `IfcFurniture`).
+- **INSERT rotation**: angolo (gradi, CCW) che l'asse X locale dell'elemento forma con l'asse X del disegno, nel world XY (non in camera space — la geometria del BLOCK ha già R_cam baked in).
+- **INSERT layer**: nome esatto della classe IFC (es. `IfcDoor`, `IfcFurniture`).
 - **MAI** mettere la geometria del block in coordinate world con INSERT a (0,0,0).
 
 ### Coordinate
+
 - Sistema: metri reali 1:1. `$INSUNITS = 6` (Metres), `$MEASUREMENT = 1` (Metric).
 - Il centro camera corrisponde a (0, 0) nello spazio disegno.
 - Y crescente verso l'alto (convenzione DXF/matematica standard).
@@ -111,162 +88,158 @@ Riprodurre la struttura IFC nelle entità DXF nel modo più fedele possibile:
 
 ## Classificazione a Bucket (A → D, priorità decrescente)
 
-Per ogni elemento, il classificatore Python sceglie il bucket più alto applicabile.
+Per ogni elemento, il classificatore sceglie il bucket più alto applicabile.
 
-### Bucket A — Profilo estruso (esatto)
-**Condizione:** `IfcExtrudedAreaSolid` senza operazioni booleane, con direzione di estrusione parallela alla direzione della camera (dot product > cos(15°) ≈ 0.966).
+### Bucket A — Rappresentazione 2D nativa ✓ implementato
 
-**Geometria prodotta:** profilo 2D esatto.
-- `IfcArbitraryClosedProfileDef` / `IfcPolyline` → `LWPOLYLINE` chiusa
-- `IfcArbitraryClosedProfileDef` / `IfcCompositeCurve` → segmenti LINE + ARC
-- `IfcRectangleProfileDef` → `LWPOLYLINE` chiusa (4 vertici)
-- `IfcCircleProfileDef` → `CIRCLE`
-- `IfcCircleHollowProfileDef` → 2 × `CIRCLE` (esterna + interna)
-- `IfcEllipseProfileDef` → `ELLIPSE`
-- Profili parametrici (I, L, T, U, …) → punti calcolati in Python → `LWPOLYLINE`
+**Condizione:** esiste una rappresentazione `Plan/Body/PLAN_VIEW` (o equivalente) nell'elemento o nel suo tipo IFC.
 
-### Bucket B — Rappresentazione 2D nativa
+**Pre-filtro occlusione solaio:** prima di processare un elemento in Bucket A, verificare che non sia occultato da un solaio soprastante. Il filtro combina check Z e verifica del footprint XY del solaio in Shapely, così elementi in corti, atri o a quota diversa non vengono esclusi erroneamente.
 
-I vertici vengono estratti in **coordinate locali dell'elemento**:
-- geometria diretta → ifcopenshell/OCC (C++) via `geom.create_shape(..., use-world-coords=False)`
-- `IfcMappedItem` → traversal Python dell'albero IFC + applicazione manuale di `MappingTarget`
+```
+Per ogni IfcSlab / IfcCovering(FLOOR) con Z_top ≤ cut_z:
+  - estrai footprint 2D in world XY (IfcExtrudedAreaSolid → Shapely Polygon)
+  - elemento escluso se: z_element_origin < z_top  AND  origin_XY ∈ footprint
+```
 
-Rust separa geometria e posizionamento:
-- **BLOCK geometry**: vertici proiettati con sola rotazione camera (`project_local`) → centrati su (0,0)
-- **INSERT position**: proiezione completa (rotazione + traslazione) dell'origine world-space dell'`ObjectPlacement`
-- **INSERT rotation**: angolo dell'asse X locale nel world XY (`atan2(local_x_world.y, local_x_world.x)`)
+**Sorgente geometria:** traversal Python diretto dell'albero IFC (`IfcMappedItem`, `IfcCompositeCurve`, `IfcTrimmedCurve`, `IfcIndexedPolyCurve`, ecc.). Fallback: `ifcopenshell.geom.create_shape` con `use-world-coords=False`.
 
-La rotazione INSERT è calcolata nel world XY, **non** in camera space. La geometria del BLOCK ha già R_cam^T baked in tramite `project_local`; per plan view (rotazioni tutte intorno a Z) R_cam e R_elem commutano, quindi R_insert = R_elem. Usare R_cam^T * R_elem causerebbe una doppia rotazione camera su tutti gli INSERT.
+**Entità DXF prodotte** (esatte, non tessellate):
+- `IfcPolyline`, `IfcIndexedPolyCurve` (IfcLineIndex) → `LINE`
+- `IfcIndexedPolyCurve` (IfcArcIndex) → `ARC`
+- `IfcTrimmedCurve` (IfcCircle) → `ARC` o `CIRCLE`
+- `IfcTrimmedCurve` (IfcEllipse, assi uguali) → `ARC`
+- `IfcTrimmedCurve` (IfcEllipse, assi diversi) → `ELLIPSE`
+- `IfcCircle` → `CIRCLE`
 
-Assunzione: l'origine dei vertici locali coincide con l'origine dell'`ObjectPlacement`. Vale per file Bonsai; potrebbe non valere per IFC da Revit/ArchiCAD se `MappingOrigin` è non nullo.
+**Nota bug Bonsai:** gli archi di apertura delle porte vengono esportati come `IfcEllipse` invece di `IfcCircle`. Workaround attivo (`_trimmed_ellipse_spec`). Da segnalare come PR upstream.
 
-### Bucket W — Muri (no BLOCK/INSERT)
+**Principio di fedeltà IFC:** massima aderenza alla geometria come descritta in IFC. Non si fondono mai archi separati anche se contigui — due `IfcTrimmedCurve` → due `DXF ARC`.
 
-**Classi**: `IfcWall`, `IfcWallStandardCase`.
+**Output:** BLOCK + INSERT (uno per tipo/elemento, molti INSERT per le istanze).
 
-**Regola fondamentale**: i muri non usano mai la struttura BLOCK/INSERT.
-
-**Modalità di sezione** (`wall_mode`):
-
-#### Mode `flat` (fallback)
-- Python chiama `req.add_wall_flat(ifc_class, material, verts_local, edges, world_matrix)`.
-- Rust proietta ogni edge con `project(world_matrix * v_local)` → entità `LINE` in model space.
-- Nessuna hatch.
-
-#### Mode `shapely` (default)
-1. Python proietta gli edge locali in 2D drawing space con numpy (matrice `cam_inv @ world_m`).
-2. Python usa `shapely.polygonize` + `unary_union` per ricostruire i poligoni di pianta, raggruppati per `(ifc_class, material)`.
-3. Python chiama `req.add_wall_polygon(ifc_class, material, outer_pts_2d, holes_2d)`.
-4. Rust scrive:
-   - LWPOLYLINE chiusa per il contorno esterno → layer `IfcWall_Section`
-   - LWPOLYLINE chiuse per ogni hole (apertura) → layer `IfcWall_Section`
-   - `HatchRegion` con esterno + holes → layer `IfcWall_Hatches`
-
-**Sorgente geometria attuale**: `geom.create_shape` su `Model/Body/MODEL_VIEW` con `IfcExtrudedAreaSolid` — mesh 3D tessellata con boolean (aperture già applicate da IfcOpenShell). In proiezione pianta:
-- Edge orizzontali (top+bottom face) → contorno del muro ✓
-- Edge verticali (angoli, stipiti) → proiettano a punti → filtrati ✓
-- Edge header/davanzale → segmenti isolati non chiusi → ignorati da polygonize ✓
-
-**Layers**:
-- `IfcWall_Section`: contorno della sezione di taglio (outer ring + holes)
-- `IfcWall_View`: facce visibili sotto il piano di taglio (da implementare con OCC)
-- `IfcWall_Hatches`: campitura delle aree muro
-
-**Wall union**: i poligoni dei muri adiacenti dello stesso `(ifc_class, material)` vengono uniti in Python con `shapely.unary_union` prima di essere passati a Rust.
-
-### Bucket C — Body 3D (wireframe provvisorio)
-**Condizione:** rappresentazione Body 3D disponibile; HLR (Hidden Line Removal via OCC) non ancora implementato.
-- Geometria in coordinate world-space, proiettata tramite camera completa.
-- INSERT fisso a (0, 0) nel disegno (nessun posizionamento utile senza HLR).
-- Feature flag `occ` prevista per attivare HLR in futuro.
-
-### Bucket D — Wireframe fallback
-Ultimo resort: BRep grezzo proiettato. Stessa logica di C.
+**Limitazione:** richiede un modello IFC geometricamente corretto con quote Z proprie. Senza OCC, l'occlusione parziale (es. sedia parzialmente coperta da solaio) non è gestita — l'elemento è mostrato interamente o escluso interamente.
 
 ---
 
-## Naming dei Layer
+### Bucket B — Sezione generata dal 3D ✓ parzialmente implementato
 
-| Tipo di layer | Formato | Esempio |
+**Condizione:** nessuna rappresentazione 2D nativa trovata dal Bucket A.
+
+**Classi tipiche:** `IfcWall`, `IfcWallStandardCase`, (futuri: `IfcSlab`, `IfcColumn`, `IfcStairFlight`, …).
+
+**Output:** entità direttamente in model space (no BLOCK/INSERT). Layer con suffisso semantico.
+
+#### B-Approximate — Shapely ✓ implementato
+
+Usato per elementi con `IfcExtrudedAreaSolid` e profilo 2D estraibile.
+
+**Algoritmo per muri:**
+1. Estrae il profilo 2D del muro (`IfcArbitraryClosedProfileDef`, `IfcRectangleProfileDef`).
+2. Proietta il profilo in drawing space (camera matrix).
+3. Sottrae i footprint delle aperture (`IfcOpeningElement`).
+4. Raggruppa i poligoni per `(ifc_class, material)`.
+5. Union Shapely con snap tolerance 0.5 mm → contorni puliti.
+6. Scrive `LWPOLYLINE` chiusa → layer `IfcWall_Section` o `IfcWall_View`.
+7. Scrive `HATCH` solid → layer `IfcWall_Hatches` (solo per elementi sezionati).
+
+**Layers:**
+- `IfcWall_Section`: taglio (cut) → linea grossa + hatch
+- `IfcWall_View`: elementi visti sotto il piano di taglio → linea sottile, no hatch
+- `IfcWall_Hatches`: campitura solid delle aree sezionate
+
+**Nota:** B-Approximate richiede un modello IFC ben costruito. Non gestisce BRep, boolean complesse, muri non verticali.
+
+#### B-Accurate — OCC/HLR ✗ future work
+
+Usa `ifcopenshell.geom` con HLR (Hidden Line Removal) per generare linework preciso. Equivalente al path OCC di Bonsai SVG. Richiede OCC disponibile in ifcopenshell.
+
+---
+
+### Bucket C — Fallback ✗ skippato (future work)
+
+**Condizione:** nessun bucket superiore applicabile.
+
+Attualmente gli elementi in Bucket C vengono registrati ma non disegnati. In futuro: wireframe dal Body 3D proiettato (senza HLR).
+
+---
+
+### Bucket D — Annotazioni ✗ non implementato
+
+Annotazioni 2D: quote, testi, simboli. Modulo `annotations` separato.
+
+---
+
+## Layer naming
+
+| Tipo | Formato | Esempio |
 |---|---|---|
-| Classe IFC (INSERT) | Nome esatto classe IFC | `IfcWall` |
-| Spigolo di taglio (cut) | `BBIM_<CLASSE>_CUT` | `BBIM_IFCWALL_CUT` |
-| Spigolo proiettato (proj) | `BBIM_<CLASSE>_PROJ` | `BBIM_IFCWINDOW_PROJ` |
-| Hatch materiale (non muri) | `BBIM_HATCH_<MATERIALE>` | `BBIM_HATCH_CONCRETE` |
-| Hatch muri uniti | `<CLASSE>_Hatches` | `IfcWall_Hatches` |
+| INSERT elementi (Bucket A) | nome classe IFC | `IfcDoor`, `IfcFurniture` |
+| Sezione muri (Bucket B) | `<Classe>_Section` | `IfcWall_Section` |
+| Vista muri (Bucket B) | `<Classe>_View` | `IfcWall_View` |
+| Hatch muri (Bucket B) | `<Classe>_Hatches` | `IfcWall_Hatches` |
+| Geometria nei BLOCK | `"0"` | `0` (ereditato dall'INSERT) |
 
-- `<CLASSE>` = nome classe IFC tutto maiuscolo.
-- `<MATERIALE>` = nome materiale, solo alfanumerici + `_`, maiuscolo, troncato a 24 caratteri.
-- Layer INSERT: color index 7 (bianco/nero AutoCAD), lineweight 0.35 mm.
-- Layer hatch: color index 254 (grigio chiaro), lineweight 0.13 mm.
+Stili per layer configurabili in `layer_styles.json` (color ACI, lineweight mm, linetype).
 
 ---
 
-## Entità DXF prodotte (esatte, non tessellate)
+## Entità DXF prodotte
 
-`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE` (chiusa o aperta), `SPLINE` (approssimata come `LWPOLYLINE`).
-
----
-
-## Hatch (campiture)
-
-- Costruite da loop chiusi di spigoli.
-- Raggruppate per materiale (layer `BBIM_HATCH_<MATERIALE>`).
-- Scritte direttamente nel model space (non dentro BLOCK).
-- Pattern e scala definiti per materiale.
-- Supporto fori (exterior boundary + interior holes) tramite union poligoni (`geo` crate).
-
----
-
-## Problemi noti / TODO
-
-### Sorgente geometria muri
-`geom.create_shape` su `Model/Body/MODEL_VIEW` con `IfcExtrudedAreaSolid` (non una repr 2D pre-calcolata). IfcOpenShell applica già le boolean delle aperture nella tessellazione del solido 3D. In proiezione pianta: edge orizzontali → contorno muro; edge verticali → zero-length → filtrati; header/davanzale → segmenti isolati non chiusi → ignorati da polygonize.
-
-### Wall union — mode shapely
-`shapely.polygonize + unary_union` per `(ifc_class, material)`. Funziona per contorni regolari. Non produce holes per le aperture (i bordi verticali vengono filtrati prima della proiezione). Risultato: LWPOLYLINE outline + hatch fill per la superficie dei muri uniti.
-
-### Layers muri
-- `IfcWall_Section`: contorno esterno + bordi aperture orizzontali
-- `IfcWall_View`: facce visibili sotto il piano di taglio (da implementare con OCC)
-- `IfcWall_Hatches`: campitura aree muro (solo mode shapely)
+`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `HATCH` (solid fill).
 
 ---
 
 ## Tipo di vista (primo discriminante)
 
-Il tipo di vista determina quali elementi includere, quale representazione scegliere e le regole view-specific.
-
-Tipi previsti (terminologia da verificare con IfcOpenShell/Bonsai):
-- **Plan view** (pianta) — implementato per primo
-- Axonometric projection
-- Reflected Ceiling Plan (RCP)
-- Elevation (prospetto)
-- Section view (sezione)
-- Detail (dettaglio)
-
----
-
-## Regole view-specific
-
-### Plan View
-- `IfcFurniture`, `IfcSanitaryTerminal`, `IfcDoor`, `IfcWindow`: sempre inclusi e sempre in primo piano (sopra gli elementi strutturali).
-- Usare il contesto `FootPrint` o `Plan` se disponibile (Bucket B), altrimenti Bucket A o C.
-- I muri (`IfcWall`, `IfcWallStandardCase`): geometria diretta (raramente hanno tipo condiviso) — trattati separatamente dagli elementi con tipo.
+| Vista | Stato |
+|---|---|
+| Plan view (pianta) | ✓ implementato |
+| Section view (sezione verticale) | future work |
+| Elevation (prospetto) | future work |
+| Reflected Ceiling Plan | future work |
+| Axonometric | future work |
 
 ---
 
 ## Include / Exclude
 
-- Bonsai mantiene regole di inclusione/esclusione per classe o per elemento.
-- ifc_dxf deve rispettare queste regole: leggere la lista di elementi da Bonsai (già filtrata) anziché iterare autonomamente tutti gli elementi IFC.
-- Implementazione: `tool.Drawing.get_drawing_elements()` restituisce solo gli elementi attivi per il drawing corrente.
+ifc_dxf non itera autonomamente tutti gli elementi IFC. Legge la lista filtrata da Bonsai via `tool.Drawing.get_drawing_elements()`. In modalità standalone (`test_ifc_dxf.py`), la lista viene costruita tramite frustum Z + filtro classi skippate.
 
 ---
 
-## Note architetturali
+## TODO / Roadmap
 
-- Il classificatore bucket risiede in Python (`ifc_dxf/operator.py`); il Rust riceve dati già classificati.
-- La proiezione camera è ortografica. La matrice inversa della camera trasforma punti world → camera-local; X e Y camera = X e Y del disegno.
-- `project()`: trasformazione completa (rotazione + traslazione) — per punti world-space (origini INSERT).
-- `project_local()`: solo rotazione — per vettori/offset in coordinate locali (geometria nei BLOCK).
+1. **Slab occlusion pre-filter** (Bucket A): escludere elementi con Z_origin < Z_top del solaio/pavimento corrente.
+2. **Estensione B-Approximate**: aggiungere `IfcSlab`, `IfcColumn`, `IfcStairFlight` al path Shapely.
+3. **B-Accurate (OCC/HLR)**: linework preciso via ifcopenshell geom serializer.
+4. **Bucket C**: wireframe fallback dal Body 3D.
+5. **Bucket D**: annotazioni (quote, testi, simboli).
+6. **PR upstream Bonsai**: fix esportazione archi porta come `IfcCircle` invece di `IfcEllipse`.
+7. **Test data**: file IFC ridotto in `test_data/` per test riproducibili senza Dropbox.
+8. **Section view / Elevation**: logica camera non-zenitale.
+
+---
+
+## Note implementative
+
+### Proiezione camera
+
+Ortografica. La matrice inversa della camera trasforma punti world → camera-local; X e Y camera = X e Y del disegno.
+
+- `project()`: rotazione + traslazione — per origini INSERT (world-space).
+- `project_local()`: solo rotazione (`_cam_R`) — per geometria BLOCK (coordinate locali).
+
+### Rotazione INSERT
+
+Calcolata nel world XY (`atan2(local_x_world.y, local_x_world.x)`), **non** in camera space. La geometria del BLOCK ha già `R_cam` baked in; usare `R_cam^T * R_elem` causerebbe doppia rotazione camera su tutti gli INSERT.
+
+### Qualità del modello IFC richiesta
+
+Il B-Approximate e il filtro di occlusione solaio assumono:
+- Quote Z corrette per ogni elemento (ObjectPlacement accurato).
+- Assegnazione storey corretta.
+- Profili `IfcExtrudedAreaSolid` con estrusione verticale.
+- Solai (`IfcSlab`) e pavimenti (`IfcCovering FLOOR`) con Z corretti.
+
+Senza OCC, un modello IFC non preciso produce risultati errati senza messaggi di errore espliciti.

@@ -2,27 +2,17 @@
 # Copyright (C) 2026 Carlo Pavan <carlopav@gmail.com>
 # GPL-3.0
 #
-# Export a Bonsai drawing to DXF/DWG using the native ifc_dxf Rust engine.
+# Export a Bonsai drawing to DXF using ezdxf (pure Python, no Rust).
 # Designed to be eventually proposed for upstream integration into
 # IfcOpenShell / Bonsai (bonsai/bim/module/drawing/).
-#
-# Architecture mirrors Bonsai's existing SVG export pipeline:
-#   DrawingExporter (operator.py) → camera params + element iterator
-#   → ifc_dxf Rust engine (bucket classify + project + write DXF)
-#
-# Bucket classification:
-#   B — 2D native Plan context (Plan/Body, Plan/Axis) → NativeCurves
-#   C — 3D Body → wireframe BRep (HLR/cut pending OCC feature)
-#   A — IfcExtrudedAreaSolid, extrusion ∥ camera → TODO
-#
-# DXF output: 1:1 real-world metres, $INSUNITS = 6.
-# Each IFC element → DXF BLOCK (GlobalId name) + INSERT on IFC class layer.
 
 import os
 import sys
+import math
+import json
 
 import bpy
-import mathutils
+import numpy as np
 
 try:
     import shapely
@@ -32,6 +22,10 @@ except ImportError:
     _SHAPELY = False
 
 
+# ---------------------------------------------------------------------------
+# Bonsai / IFC helpers
+# ---------------------------------------------------------------------------
+
 def _get_ifc():
     try:
         from bonsai import tool
@@ -40,20 +34,7 @@ def _get_ifc():
         return None
 
 
-def _get_ifc_dxf():
-    """Import the compiled ifc_dxf Rust extension (.pyd / .so)."""
-    pkg_dir = os.path.dirname(__file__)
-    if pkg_dir not in sys.path:
-        sys.path.insert(0, pkg_dir)
-    try:
-        import ifc_dxf
-        return ifc_dxf
-    except ImportError:
-        return None
-
-
 def _get_active_drawing():
-    """Return the IFC IfcAnnotation entity for the active Bonsai drawing."""
     try:
         from bonsai import tool
         item = tool.Drawing.get_active_drawing_item()
@@ -65,36 +46,11 @@ def _get_active_drawing():
 
 
 def _get_camera_obj(drawing):
-    """Return the Blender camera object for a Bonsai drawing."""
     try:
         from bonsai import tool
         return tool.Ifc.get_object(drawing)
     except Exception:
         return None
-
-
-def _build_camera_projection(ifc_dxf_mod, camera_obj):
-    """Build PyCameraProjection (1:1 metres) from a Blender camera object.
-
-    Uses Bonsai's get_camera_matrix which normalises the matrix and handles
-    inversely-scaled RCP cameras.
-    """
-    from bonsai import tool
-
-    m = tool.Drawing.get_camera_matrix(camera_obj)
-    m_inv = m.inverted()
-    col_major = [v for col in m_inv.col for v in col]
-
-    return ifc_dxf_mod.PyCameraProjection(col_major)
-
-
-def _camera_dir_pos(camera_obj):
-    """Return (camera_dir, camera_pos) consistent with the projection matrix."""
-    from bonsai import tool
-    m = tool.Drawing.get_camera_matrix(camera_obj)
-    cam_dir = (-m.col[2]).xyz.normalized()
-    cam_pos = m.col[3].xyz
-    return list(cam_dir), list(cam_pos)
 
 
 def _get_target_view(drawing):
@@ -105,8 +61,23 @@ def _get_target_view(drawing):
         return "PLAN_VIEW"
 
 
+def _camera_matrices(camera_obj):
+    """Return (col_major_inv, cam_dir, cam_pos) from Blender camera object.
+
+    col_major_inv: flat 16-float column-major inverse of the camera world matrix.
+    cam_dir: camera look direction [-Z in world space].
+    cam_pos: camera world position.
+    """
+    from bonsai import tool
+    m = tool.Drawing.get_camera_matrix(camera_obj)  # mathutils.Matrix
+    m_inv = m.inverted()
+    col_major = [v for col in m_inv.col for v in col]
+    cam_dir = list(-m.col[2].xyz.normalized())
+    cam_pos = list(m.col[3].xyz)
+    return col_major, cam_dir, cam_pos
+
+
 def _get_material_name(element):
-    """Return a material name string for hatch grouping."""
     try:
         import ifcopenshell.util.element as ifc_elem
         mats = ifc_elem.get_materials(element, should_inherit=True)
@@ -117,34 +88,23 @@ def _get_material_name(element):
     return ""
 
 
-def _identity_matrix():
-    return [1, 0, 0, 0,
-            0, 1, 0, 0,
-            0, 0, 1, 0,
-            0, 0, 0, 1]
-
-
-def _world_matrix(element):
-    """Return the element world placement as a flat 16-float column-major list."""
+def _world_matrix_flat(element):
+    """Column-major flat 16-float world placement matrix of the element."""
     try:
         import ifcopenshell.util.placement as ifc_place
         placement = getattr(element, "ObjectPlacement", None)
         if placement is None:
-            return _identity_matrix()
+            return list(np.eye(4).flatten(order="F"))
         return list(ifc_place.get_local_placement(placement).flatten(order="F"))
     except Exception:
-        return _identity_matrix()
+        return list(np.eye(4).flatten(order="F"))
 
 
 # ---------------------------------------------------------------------------
-# Bucket B: 2D plan native representation
+# Plan representation search
 # ---------------------------------------------------------------------------
 
-# Each entry: (ContextType, ContextIdentifier, TargetView).
-# Order = priority: first match wins.
-# Mirrors Bonsai SVG context selection for Body/Facetation tiers;
-# adds FootPrint/Axis as fallback for elements without an OCC section.
-_PLAN_CONTEXT_SEARCH = {
+_PLAN_SEARCH = {
     "PLAN_VIEW": [
         ("Plan",  "Body",        "PLAN_VIEW"),
         ("Plan",  "Body",        "MODEL_VIEW"),
@@ -152,7 +112,6 @@ _PLAN_CONTEXT_SEARCH = {
         ("Model", "Body",        "MODEL_VIEW"),
         ("Model", "FootPrint",   "PLAN_VIEW"),
         ("Model", "Axis",        "PLAN_VIEW"),
-        # Facetation — degraded (tessellated mesh), last resort
         ("Plan",  "Facetation",  "PLAN_VIEW"),
         ("Plan",  "Facetation",  "MODEL_VIEW"),
         ("Model", "Facetation",  "PLAN_VIEW"),
@@ -171,42 +130,32 @@ _PLAN_CONTEXT_SEARCH = {
 }
 
 
-def _find_repr_in_representations(representations, target_view):
-    # Outer loop = priority tier; inner loop = representations.
-    # This guarantees a higher-priority (ctx_type, ctx_id, tv) wins over
-    # a lower-priority entry even if the repr list order differs.
-    search = _PLAN_CONTEXT_SEARCH.get(target_view, [])
-    for ctx_type, ctx_id, tv in search:
-        for shape_repr in representations:
-            ctx = shape_repr.ContextOfItems
-            if (ctx.ContextType == ctx_type
-                    and ctx.ContextIdentifier == ctx_id
-                    and getattr(ctx, "TargetView", None) == tv):
-                return shape_repr
-    return None
-
-
 def _find_plan_repr(element, target_view):
-    """Find Plan representation: element override first, then type fallback.
-
-    Returns (repr, from_type): from_type=True means geometry is from the type.
-    """
+    """Return (IfcShapeRepresentation, from_type). from_type=True = inherited from type."""
     import ifcopenshell.util.element as ifc_elem
 
-    # 1. Element override
+    search = _PLAN_SEARCH.get(target_view, [])
+
+    def _search(reprs):
+        for ctx_type, ctx_id, tv in search:
+            for r in reprs:
+                ctx = r.ContextOfItems
+                if (ctx.ContextType == ctx_type
+                        and ctx.ContextIdentifier == ctx_id
+                        and getattr(ctx, "TargetView", None) == tv):
+                    return r
+        return None
+
     if hasattr(element, "Representation") and element.Representation is not None:
-        r = _find_repr_in_representations(
-            element.Representation.Representations, target_view
-        )
+        r = _search(element.Representation.Representations)
         if r is not None:
             return r, False
 
-    # 2. Type fallback
     ifc_type = ifc_elem.get_type(element)
     if ifc_type is not None:
-        rep_maps = getattr(ifc_type, "RepresentationMaps", None) or []
-        type_reprs = [rm.MappedRepresentation for rm in rep_maps]
-        r = _find_repr_in_representations(type_reprs, target_view)
+        type_reprs = [rm.MappedRepresentation
+                      for rm in (getattr(ifc_type, "RepresentationMaps", None) or [])]
+        r = _search(type_reprs)
         if r is not None:
             return r, True
 
@@ -214,14 +163,24 @@ def _find_plan_repr(element, target_view):
 
 
 def _is_mapped_repr(plan_repr):
-    """True if all items in the repr are IfcMappedItem (geometry from type)."""
     items = plan_repr.Items
     return bool(items) and all(item.is_a("IfcMappedItem") for item in items)
 
 
+def _get_type_block_name(element):
+    import ifcopenshell.util.element as ifc_elem
+    ifc_type = ifc_elem.get_type(element)
+    if ifc_type is None:
+        return None, None
+    name = getattr(ifc_type, "Name", None) or ifc_type.GlobalId
+    return ifc_type, name
+
+
+# ---------------------------------------------------------------------------
+# IFC curve extraction — returns (verts, edges, arcs, circles)
+# ---------------------------------------------------------------------------
+
 def _apply_cart_transform_op(verts_flat, op):
-    """Apply IfcCartesianTransformationOperator3D to a flat vertex list."""
-    import numpy as np
     if op is None:
         return verts_flat
     c = op.LocalOrigin.Coordinates
@@ -250,47 +209,357 @@ def _apply_cart_transform_op(verts_flat, op):
     return result
 
 
-def _extract_curves_from_items(items, mapping_target=None):
-    """Walk IFC shape items and return (verts_flat, edges_flat) for plan curves."""
+def _arc_3pts_spec(p1, p2, p3):
+    """(cx, cy, r, dxf_start_deg, dxf_end_deg) for arc through 3 2D points, or None."""
+    ax, ay = float(p1[0]), float(p1[1])
+    bx, by = float(p2[0]), float(p2[1])
+    cx, cy = float(p3[0]), float(p3[1])
+    D = 2 * (ax*(by-cy) + bx*(cy-ay) + cx*(ay-by))
+    if abs(D) < 1e-12:
+        return None
+    a2b = ax*ax+ay*ay; b2b = bx*bx+by*by; c2b = cx*cx+cy*cy
+    ux = (a2b*(by-cy) + b2b*(cy-ay) + c2b*(ay-by)) / D
+    uy = (a2b*(cx-bx) + b2b*(ax-cx) + c2b*(bx-ax)) / D
+    r   = math.sqrt((ax-ux)**2 + (ay-uy)**2)
+    a1  = math.degrees(math.atan2(ay-uy, ax-ux)) % 360
+    a2  = math.degrees(math.atan2(cy-uy, cx-ux)) % 360
+    am  = math.degrees(math.atan2(by-uy, bx-ux)) % 360
+    ccw = (a1 < a2 and a1 <= am <= a2) or (a1 >= a2 and (am >= a1 or am <= a2))
+    return (ux, uy, r, a1, a2) if ccw else (ux, uy, r, a2, a1)
+
+
+def _trimmed_conic_spec(item):
+    """Arc spec (cx,cy,r,s,e) or circle spec (cx,cy,r) for IfcTrimmedCurve, or None."""
+    basis = item.BasisCurve
+    if basis.is_a("IfcCircle"):
+        r = ra = rb = float(basis.Radius)
+    elif basis.is_a("IfcEllipse"):
+        ra = float(basis.SemiAxis1)
+        rb = float(basis.SemiAxis2)
+        if abs(ra - rb) > 0.001 * max(ra, rb):
+            return None  # true ellipse → tessellate
+        r = (ra + rb) / 2
+    else:
+        return None
+
+    pos = basis.Position
+    loc = pos.Location.Coordinates
+    cx, cy = float(loc[0]), float(loc[1])
+    if hasattr(pos, 'RefDirection') and pos.RefDirection:
+        d  = pos.RefDirection.DirectionRatios
+        xn = math.sqrt(float(d[0])**2 + float(d[1])**2)
+        xax = [float(d[0])/xn, float(d[1])/xn]
+    else:
+        xax = [1.0, 0.0]
+    yax = [-xax[1], xax[0]]
+    ref_ang = math.degrees(math.atan2(xax[1], xax[0]))
+
+    def _pt(trims):
+        for t in trims:
+            if hasattr(t, 'Coordinates'):
+                dx = float(t.Coordinates[0]) - cx
+                dy = float(t.Coordinates[1]) - cy
+                return math.degrees(math.atan2(
+                    (dx*yax[0] + dy*yax[1]) / rb,
+                    (dx*xax[0] + dy*xax[1]) / ra))
+        return None
+
+    def _val(trims):
+        for t in trims:
+            if not hasattr(t, 'Coordinates'):
+                return float(t)
+        return None
+
+    # Prefer CartesianPoint (unambiguous); fallback to ParameterValue.
+    # Do NOT use `or` — 0.0° is falsy but valid.
+    a1 = _pt(item.Trim1)
+    if a1 is None:
+        a1 = _val(item.Trim1)
+    a2 = _pt(item.Trim2)
+    if a2 is None:
+        a2 = _val(item.Trim2)
+    if a1 is None or a2 is None:
+        return None
+
+    a1w = a1 + ref_ang
+    a2w = a2 + ref_ang
+    if abs((a1w % 360) - (a2w % 360)) < 0.01:
+        return (cx, cy, r)  # full circle
+    if item.SenseAgreement:
+        return (cx, cy, r, a1w % 360, a2w % 360)
+    else:
+        return (cx, cy, r, a2w % 360, a1w % 360)
+
+
+def _trimmed_conic_flat(item, n_seg=16):
+    """Tessellated fallback for IfcTrimmedCurve (true IfcEllipse with unequal axes)."""
+    basis = item.BasisCurve
+    if not (basis.is_a("IfcCircle") or basis.is_a("IfcEllipse")):
+        return [], []
+    pos = basis.Position
+    loc = pos.Location.Coordinates
+    cx, cy = float(loc[0]), float(loc[1])
+    if hasattr(pos, 'RefDirection') and pos.RefDirection:
+        d  = pos.RefDirection.DirectionRatios
+        xn = math.sqrt(float(d[0])**2 + float(d[1])**2)
+        xax = [float(d[0])/xn, float(d[1])/xn]
+    else:
+        xax = [1.0, 0.0]
+    yax = [-xax[1], xax[0]]
+    ra = float(basis.Radius if basis.is_a("IfcCircle") else basis.SemiAxis1)
+    rb = float(basis.Radius if basis.is_a("IfcCircle") else basis.SemiAxis2)
+
+    def _pt(trims):
+        for t in trims:
+            if hasattr(t, 'Coordinates'):
+                dx, dy = float(t.Coordinates[0]) - cx, float(t.Coordinates[1]) - cy
+                return math.atan2((dx*yax[0]+dy*yax[1])/rb, (dx*xax[0]+dy*xax[1])/ra)
+        return None
+
+    def _val(trims):
+        for t in trims:
+            if not hasattr(t, 'Coordinates'):
+                return math.radians(float(t))
+        return None
+
+    a1 = _pt(item.Trim1)
+    if a1 is None:
+        a1 = _val(item.Trim1)
+    a2 = _pt(item.Trim2)
+    if a2 is None:
+        a2 = _val(item.Trim2)
+    if a1 is None or a2 is None:
+        return [], []
+    if item.SenseAgreement:
+        if a2 <= a1: a2 += 2*math.pi
+    else:
+        if a2 >= a1: a2 -= 2*math.pi
     verts = []
-    edges = []
+    for i in range(n_seg + 1):
+        a = a1 + (a2 - a1) * i / n_seg
+        xl, yl = ra*math.cos(a), rb*math.sin(a)
+        verts.extend([cx + xl*xax[0] + yl*yax[0], cy + xl*xax[1] + yl*yax[1], 0.0])
+    return verts, [k for k in range(n_seg) for k in (k, k+1)]
+
+
+def _apply_arc_spec(spec, op):
+    """Apply IfcCartesianTransformationOperator to an arc/circle spec."""
+    if op is None or spec is None:
+        return spec
+    c = op.LocalOrigin.Coordinates
+    ox, oy = float(c[0]), float(c[1])
+    sc = float(op.Scale) if getattr(op, 'Scale', None) is not None else 1.0
+    xa = [float(op.Axis1.DirectionRatios[0]), float(op.Axis1.DirectionRatios[1])] \
+         if op.Axis1 else [1.0, 0.0]
+    xn = math.sqrt(xa[0]**2 + xa[1]**2)
+    xa = [xa[0]/xn, xa[1]/xn]
+    ya = [-xa[1], xa[0]]
+    rot = math.degrees(math.atan2(xa[1], xa[0]))
+    if len(spec) == 3:
+        cx, cy, r = spec
+        return (ox+(cx*xa[0]+cy*ya[0])*sc, oy+(cx*xa[1]+cy*ya[1])*sc, r*sc)
+    cx, cy, r, s, e = spec
+    return (ox+(cx*xa[0]+cy*ya[0])*sc, oy+(cx*xa[1]+cy*ya[1])*sc,
+            r*sc, (s+rot)%360, (e+rot)%360)
+
+
+def _apply_ellipse_spec(spec, op):
+    """Apply IfcCartesianTransformationOperator to a DXF ellipse spec.
+
+    spec = (cx, cy, maj_x, maj_y, ratio, t1_rad, t2_rad)
+    """
+    if op is None or spec is None:
+        return spec
+    c = op.LocalOrigin.Coordinates
+    ox, oy = float(c[0]), float(c[1])
+    sc = float(op.Scale) if getattr(op, 'Scale', None) is not None else 1.0
+    xa = [float(op.Axis1.DirectionRatios[0]), float(op.Axis1.DirectionRatios[1])] \
+         if op.Axis1 else [1.0, 0.0]
+    xn = math.sqrt(xa[0]**2 + xa[1]**2)
+    xa = [xa[0]/xn, xa[1]/xn]
+    ya = [-xa[1], xa[0]]
+    cx, cy, maj_x, maj_y, ratio, t1, t2 = spec
+    new_cx  = ox + (cx*xa[0] + cy*ya[0]) * sc
+    new_cy  = oy + (cx*xa[1] + cy*ya[1]) * sc
+    new_mjx = (maj_x*xa[0] + maj_y*ya[0]) * sc
+    new_mjy = (maj_x*xa[1] + maj_y*ya[1]) * sc
+    return (new_cx, new_cy, new_mjx, new_mjy, ratio, t1, t2)
+
+
+def _trimmed_ellipse_spec(item):
+    """Return DXF ELLIPSE spec for IfcTrimmedCurve with IfcEllipse (unequal axes).
+
+    Returns (cx, cy, maj_x, maj_y, ratio, t1_rad, t2_rad) or None.
+    DXF ELLIPSE draws CCW from t1_rad to t2_rad in the major-axis frame.
+
+    NOTE: Bonsai exports door swings as IfcEllipse even when ra≈rb (both axes
+    differ only due to door thickness). This should be reported upstream as a
+    bug — door arcs should be IfcCircle. This function is a workaround.
+    """
+    basis = item.BasisCurve
+    if not basis.is_a("IfcEllipse"):
+        return None
+    ra = float(basis.SemiAxis1)  # along RefDirection (xax)
+    rb = float(basis.SemiAxis2)  # perpendicular (yax)
+
+    pos = basis.Position
+    loc = pos.Location.Coordinates
+    cx, cy = float(loc[0]), float(loc[1])
+    if hasattr(pos, 'RefDirection') and pos.RefDirection:
+        d  = pos.RefDirection.DirectionRatios
+        xn = math.sqrt(float(d[0])**2 + float(d[1])**2)
+        xax = [float(d[0])/xn, float(d[1])/xn]
+    else:
+        xax = [1.0, 0.0]
+    yax = [-xax[1], xax[0]]
+
+    # DXF requires ratio = minor/major <= 1
+    if ra >= rb:
+        major = ra;  minor = rb
+        major_dir = xax;             minor_dir = yax
+    else:
+        major = rb;  minor = ra
+        major_dir = yax;             minor_dir = [-xax[0], -xax[1]]
+
+    ratio = minor / major
+
+    def pt_to_param(trims):
+        for t in trims:
+            if hasattr(t, 'Coordinates'):
+                dx = float(t.Coordinates[0]) - cx
+                dy = float(t.Coordinates[1]) - cy
+                cos_t = (major_dir[0]*dx + major_dir[1]*dy) / major
+                sin_t = (minor_dir[0]*dx + minor_dir[1]*dy) / minor
+                return math.atan2(sin_t, cos_t)
+        return None
+
+    def val_to_param(trims):
+        for t in trims:
+            if not hasattr(t, 'Coordinates'):
+                v = math.radians(float(t))
+                if ra >= rb:
+                    return v
+                else:
+                    return math.atan2(-math.cos(v), math.sin(v))
+        return None
+
+    t1 = pt_to_param(item.Trim1)
+    if t1 is None:
+        t1 = val_to_param(item.Trim1)
+    t2 = pt_to_param(item.Trim2)
+    if t2 is None:
+        t2 = val_to_param(item.Trim2)
+    if t1 is None or t2 is None:
+        return None
+
+    if item.SenseAgreement:
+        if t2 <= t1:
+            t2 += 2 * math.pi
+    else:
+        t1, t2 = t2, t1
+        if t2 <= t1:
+            t2 += 2 * math.pi
+
+    return (cx, cy, major_dir[0]*major, major_dir[1]*major, ratio, t1, t2)
+
+
+def _composite_curve_seg_endpoints(seg):
+    """Return (start_pt, end_pt) as [x,y] lists for an IfcCompositeCurveSegment, or (None,None)."""
+    curve = seg.ParentCurve
+    sense = seg.SenseAgreement
+
+    def _rev(p0, p1):
+        return (p0, p1) if sense else (p1, p0)
+
+    if curve.is_a("IfcPolyline"):
+        pts = curve.Points
+        if len(pts) < 2:
+            return None, None
+        p0 = [float(pts[0].Coordinates[0]),  float(pts[0].Coordinates[1])]
+        p1 = [float(pts[-1].Coordinates[0]), float(pts[-1].Coordinates[1])]
+        return _rev(p0, p1)
+
+    if curve.is_a("IfcIndexedPolyCurve"):
+        cl = curve.Points.CoordList
+        if len(cl) < 2:
+            return None, None
+        p0 = [float(cl[0][0]),  float(cl[0][1])]
+        p1 = [float(cl[-1][0]), float(cl[-1][1])]
+        return _rev(p0, p1)
+
+    if curve.is_a("IfcTrimmedCurve"):
+        def _cart(trims):
+            for t in trims:
+                if hasattr(t, 'Coordinates'):
+                    return [float(t.Coordinates[0]), float(t.Coordinates[1])]
+            return None
+        p0 = _cart(curve.Trim1)
+        p1 = _cart(curve.Trim2)
+        if p0 is None or p1 is None:
+            return None, None
+        return _rev(p0, p1)
+
+    return None, None
+
+
+def _extract_curves_from_items(items, mapping_target=None):
+    """Walk IFC items, return (verts_flat, edges_flat, arcs, circles, ellipses)."""
+    verts, edges, arcs, circles, ellipses = [], [], [], [], []
+
+    def _merge(sv, se, sa, sc_, sel):
+        if sv:
+            base = len(verts) // 3
+            verts.extend(sv)
+            for k in range(0, len(se), 2):
+                edges.extend([se[k]+base, se[k+1]+base])
+        arcs.extend(sa); circles.extend(sc_); ellipses.extend(sel)
 
     for item in items:
         if item.is_a("IfcMappedItem"):
             src = item.MappingSource
-            sub_v, sub_e = _extract_curves_from_items(
-                src.MappedRepresentation.Items, mapping_target=item.MappingTarget
-            )
-            if sub_v:
-                base = len(verts) // 3
-                verts.extend(sub_v)
-                for k in range(0, len(sub_e), 2):
-                    edges.extend([sub_e[k] + base, sub_e[k+1] + base])
+            _merge(*_extract_curves_from_items(
+                src.MappedRepresentation.Items,
+                mapping_target=item.MappingTarget))
 
         elif item.is_a("IfcAnnotationFillArea"):
-            sub_v, sub_e = _extract_curves_from_items([item.OuterBoundary])
-            if sub_v:
-                base = len(verts) // 3
-                verts.extend(sub_v)
-                for k in range(0, len(sub_e), 2):
-                    edges.extend([sub_e[k] + base, sub_e[k+1] + base])
+            _merge(*_extract_curves_from_items([item.OuterBoundary]))
 
         elif item.is_a("IfcGeometricCurveSet") or item.is_a("IfcGeometricSet"):
-            sub_v, sub_e = _extract_curves_from_items(list(item.Elements))
-            if sub_v:
-                base = len(verts) // 3
-                verts.extend(sub_v)
-                for k in range(0, len(sub_e), 2):
-                    edges.extend([sub_e[k] + base, sub_e[k+1] + base])
+            _merge(*_extract_curves_from_items(list(item.Elements)))
 
         elif item.is_a("IfcCompositeCurve"):
-            segs = [s.ParentCurve for s in item.Segments]
-            sub_v, sub_e = _extract_curves_from_items(segs)
-            if sub_v:
-                base = len(verts) // 3
-                verts.extend(sub_v)
-                for k in range(0, len(sub_e), 2):
-                    edges.extend([sub_e[k] + base, sub_e[k+1] + base])
+            # Collect segment endpoints so bare IfcCircle segments can find their
+            # arc boundaries from adjacent segments (connected-curve semantics).
+            segs_cc = list(item.Segments)
+            n_cc = len(segs_cc)
+            seg_eps = [_composite_curve_seg_endpoints(s) for s in segs_cc]
+
+            for idx_cc, seg_cc in enumerate(segs_cc):
+                curve_cc = seg_cc.ParentCurve
+                sense_cc = seg_cc.SenseAgreement
+
+                if curve_cc.is_a("IfcCircle"):
+                    prev_ep = seg_eps[(idx_cc - 1) % n_cc][1]
+                    next_sp = seg_eps[(idx_cc + 1) % n_cc][0]
+                    pos_cc = curve_cc.Position
+                    loc_cc = pos_cc.Location.Coordinates
+                    cx_cc, cy_cc = float(loc_cc[0]), float(loc_cc[1])
+                    r_cc = float(curve_cc.Radius)
+                    if prev_ep is not None and next_sp is not None:
+                        a1_cc = math.degrees(math.atan2(
+                            prev_ep[1] - cy_cc, prev_ep[0] - cx_cc)) % 360
+                        a2_cc = math.degrees(math.atan2(
+                            next_sp[1] - cy_cc, next_sp[0] - cx_cc)) % 360
+                        if abs((a1_cc - a2_cc) % 360) < 0.01:
+                            circles.append((cx_cc, cy_cc, r_cc))
+                        elif sense_cc:
+                            arcs.append((cx_cc, cy_cc, r_cc, a1_cc, a2_cc))
+                        else:
+                            arcs.append((cx_cc, cy_cc, r_cc, a2_cc, a1_cc))
+                    else:
+                        circles.append((cx_cc, cy_cc, r_cc))
+                else:
+                    _merge(*_extract_curves_from_items([curve_cc]))
 
         elif item.is_a("IfcIndexedPolyCurve"):
             pts_ent = item.Points
@@ -306,16 +575,18 @@ def _extract_curves_from_items(items, mapping_target=None):
             segs = item.Segments
             if segs:
                 for seg in segs:
-                    idxs = [int(i) for i in seg]
+                    idxs = [int(i) for i in seg[0]]  # seg[0] = actual index tuple
                     if seg.is_a("IfcLineIndex"):
                         for k in range(len(idxs) - 1):
-                            edges.extend([base + idxs[k]-1, base + idxs[k+1]-1])
+                            edges.extend([base+idxs[k]-1, base+idxs[k+1]-1])
                     elif seg.is_a("IfcArcIndex"):
-                        edges.extend([base + idxs[0]-1, base + idxs[-1]-1])
+                        spec = _arc_3pts_spec(pts[idxs[0]-1], pts[idxs[1]-1], pts[idxs[2]-1])
+                        if spec:
+                            arcs.append(spec)
             else:
                 n = len(pts)
                 for k in range(n):
-                    edges.extend([base + k, base + (k+1) % n])
+                    edges.extend([base+k, base+(k+1)%n])
 
         elif item.is_a("IfcPolyline"):
             base = len(verts) // 3
@@ -324,208 +595,161 @@ def _extract_curves_from_items(items, mapping_target=None):
                 verts.extend([float(c[0]), float(c[1]),
                                float(c[2]) if len(c) > 2 else 0.0])
             n = len(item.Points)
-            for k in range(n - 1):
-                edges.extend([base + k, base + k + 1])
+            for k in range(n-1):
+                edges.extend([base+k, base+k+1])
 
-    if mapping_target is not None and verts:
-        verts = _apply_cart_transform_op(verts, mapping_target)
+        elif item.is_a("IfcTrimmedCurve"):
+            spec = _trimmed_conic_spec(item)
+            if spec is not None:
+                (circles if len(spec) == 3 else arcs).append(spec)
+            elif item.BasisCurve.is_a("IfcEllipse"):
+                espec = _trimmed_ellipse_spec(item)
+                if espec is not None:
+                    ellipses.append(espec)
+                else:
+                    tv, te = _trimmed_conic_flat(item)
+                    if tv:
+                        tb = len(verts) // 3
+                        verts.extend(tv)
+                        edges.extend([tb+i for i in te])
+            else:
+                tv, te = _trimmed_conic_flat(item)
+                if tv:
+                    tb = len(verts) // 3
+                    verts.extend(tv)
+                    edges.extend([tb+i for i in te])
 
-    return verts, edges
+        elif item.is_a("IfcCircle"):
+            c2d = item.Position.Location.Coordinates
+            circles.append((float(c2d[0]), float(c2d[1]), float(item.Radius)))
+
+    if mapping_target is not None:
+        if verts:
+            verts = _apply_cart_transform_op(verts, mapping_target)
+        arcs     = [_apply_arc_spec(s, mapping_target) for s in arcs]
+        circles  = [_apply_arc_spec(s, mapping_target) for s in circles]
+        ellipses = [_apply_ellipse_spec(s, mapping_target) for s in ellipses]
+
+    return verts, edges, arcs, circles, ellipses
 
 
 def _extract_local_curves(element, plan_repr):
-    """Extract plan curves in element-local coords.
-
-    For IfcMappedItem reprs: walks the chain manually — reliable regardless
-    of ifcopenshell context-ids filtering behaviour.
-    For direct geometry: falls back to ifcopenshell geometry engine.
-    """
+    """Extract plan curves in element-local coords. Returns (verts, edges, arcs, circles, ellipses)."""
     import ifcopenshell.geom as geom
     items = plan_repr.Items
-
-    if items and any(i.is_a("IfcMappedItem") for i in items):
-        v, e = _extract_curves_from_items(list(items))
-        if v and e:
-            return v, e
-
+    if items:
+        v, e, a, c, el = _extract_curves_from_items(list(items))
+        if v or e or a or c or el:
+            return v, e, a, c, el
     ctx_id = plan_repr.ContextOfItems.id()
     s = geom.settings()
     s.set('use-world-coords', False)
     s.set('context-ids', [ctx_id])
     shape = geom.create_shape(s, element)
-    return list(shape.geometry.verts), list(shape.geometry.edges)
-
-
-def _get_type_block_name(element):
-    """Return (type_entity, block_name) if element has an IFC type, else (None, None)."""
-    import ifcopenshell.util.element as ifc_elem
-    ifc_type = ifc_elem.get_type(element)
-    if ifc_type is None:
-        return None, None
-    name = getattr(ifc_type, "Name", None) or ifc_type.GlobalId
-    return ifc_type, name
-
-
-# IFC classes that go through the wall-merge path instead of BLOCK/INSERT.
-_WALL_MERGE_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
-
-# Wall section modes
-# flat    — project edges to model space as LINE entities (no hatch)
-# shapely — shapely.polygonize + union → LWPOLYLINE + hatch
-WALL_MODES = ("flat", "shapely")
+    return list(shape.geometry.verts), list(shape.geometry.edges), [], [], []
 
 
 # ---------------------------------------------------------------------------
-# Wall profile extraction helpers (IfcExtrudedAreaSolid → 2D polygon)
+# Wall profile extraction helpers
 # ---------------------------------------------------------------------------
+
 
 def _profile_to_pts_2d(profile):
-    """Return list of (x, y) from an IFC profile definition, or None."""
-    import math
     if profile.is_a("IfcRectangleProfileDef"):
-        x, y = float(profile.XDim) / 2, float(profile.YDim) / 2
-        return [(-x, -y), (x, -y), (x, y), (-x, y)]
+        x, y = float(profile.XDim)/2, float(profile.YDim)/2
+        return [(-x,-y),(x,-y),(x,y),(-x,y)]
     if profile.is_a("IfcArbitraryClosedProfileDef"):
         curve = profile.OuterCurve
         if curve.is_a("IfcPolyline"):
-            pts = [(float(p.Coordinates[0]), float(p.Coordinates[1]))
-                   for p in curve.Points]
-            if len(pts) > 1 and pts[0] == pts[-1]:
-                pts = pts[:-1]
+            pts = [(float(p.Coordinates[0]), float(p.Coordinates[1])) for p in curve.Points]
+            if len(pts) > 1 and pts[0] == pts[-1]: pts = pts[:-1]
             return pts if len(pts) >= 3 else None
         if curve.is_a("IfcIndexedPolyCurve"):
-            cl = curve.Points.CoordList
-            pts = [(float(c[0]), float(c[1])) for c in cl]
-            if len(pts) > 1 and pts[0] == pts[-1]:
-                pts = pts[:-1]
+            pts = [(float(c[0]), float(c[1])) for c in curve.Points.CoordList]
+            if len(pts) > 1 and pts[0] == pts[-1]: pts = pts[:-1]
             return pts if len(pts) >= 3 else None
     if profile.is_a("IfcCircleProfileDef"):
         r = float(profile.Radius)
-        return [(r * math.cos(2 * math.pi * i / 32),
-                 r * math.sin(2 * math.pi * i / 32)) for i in range(32)]
+        return [(r*math.cos(2*math.pi*i/32), r*math.sin(2*math.pi*i/32)) for i in range(32)]
     return None
 
 
 def _apply_axis2placement3d(pts_2d, placement):
-    """Apply IfcAxis2Placement3D to 2D profile points → 3D element-local array."""
-    import numpy as np
     pts = np.array(pts_2d, dtype=float)
     if placement is None:
-        return np.hstack([pts, np.zeros((len(pts), 1))])
-
+        return np.hstack([pts, np.zeros((len(pts),1))])
     loc = placement.Location.Coordinates
     origin = np.array([float(loc[0]), float(loc[1]),
                        float(loc[2]) if len(loc) > 2 else 0.0])
-
-    if placement.RefDirection:
-        rd = placement.RefDirection.DirectionRatios
-        x_ax = np.array([float(rd[0]), float(rd[1]),
-                         float(rd[2]) if len(rd) > 2 else 0.0])
-    else:
-        x_ax = np.array([1.0, 0.0, 0.0])
-    x_ax = x_ax / (np.linalg.norm(x_ax) or 1.0)
-
-    if placement.Axis:
-        ax = placement.Axis.DirectionRatios
-        z_ax = np.array([float(ax[0]), float(ax[1]),
-                         float(ax[2]) if len(ax) > 2 else 0.0])
-    else:
-        z_ax = np.array([0.0, 0.0, 1.0])
-    z_ax = z_ax / (np.linalg.norm(z_ax) or 1.0)
-
+    x_ax = np.array([float(v) for v in (placement.RefDirection.DirectionRatios
+                     if placement.RefDirection else [1,0,0])])
+    x_ax = x_ax[:3] / (np.linalg.norm(x_ax[:3]) or 1.0)
+    z_ax = np.array([float(v) for v in (placement.Axis.DirectionRatios
+                     if placement.Axis else [0,0,1])])
+    z_ax = z_ax[:3] / (np.linalg.norm(z_ax[:3]) or 1.0)
     y_ax = np.cross(z_ax, x_ax)
     n = np.linalg.norm(y_ax)
-    y_ax = y_ax / n if n > 1e-9 else np.array([0.0, 1.0, 0.0])
-
-    xs = pts[:, 0:1]
-    ys = pts[:, 1:2]
-    return origin + xs * x_ax + ys * y_ax
+    y_ax = y_ax/n if n > 1e-9 else np.array([0.,1.,0.])
+    return origin + pts[:,0:1]*x_ax + pts[:,1:2]*y_ax
 
 
 def _extrusion_parallel_to_camera(item, wm_flat, camera_dir):
-    """Return True if item's extrusion is within ~15° of camera direction."""
-    import numpy as np
     if not item.is_a("IfcExtrudedAreaSolid"):
         return False
     ed = item.ExtrudedDirection.DirectionRatios
     local_dir = np.array([float(ed[0]), float(ed[1]),
                           float(ed[2]) if len(ed) > 2 else 0.0])
     world_m = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
-    world_dir = world_m[:3, :3] @ local_dir
+    world_dir = world_m[:3,:3] @ local_dir
     n = np.linalg.norm(world_dir)
-    if n < 1e-9:
-        return False
-    world_dir = world_dir / n
+    if n < 1e-9: return False
     cam = np.array(camera_dir, dtype=float)
     cn = np.linalg.norm(cam)
-    if cn < 1e-9:
-        return False
-    return abs(float(np.dot(world_dir, cam / cn))) > 0.966
+    if cn < 1e-9: return False
+    return abs(float(np.dot(world_dir/n, cam/cn))) > 0.966
 
 
-def _extruded_plan_polygon(item, wm_flat, cam_inv_col_major, camera_dir):
-    """Convert IfcExtrudedAreaSolid to plan 2D polygon; rejects non-vertical extrusions."""
-    import numpy as np
+def _extruded_plan_polygon(item, wm_flat, cam_inv_np, camera_dir):
     depth = 0
     while item.is_a("IfcBooleanClippingResult") or item.is_a("IfcBooleanResult"):
-        item = item.FirstOperand
-        depth += 1
-        if depth > 8:
-            return None
-    if not item.is_a("IfcExtrudedAreaSolid"):
-        return None
-    if not _extrusion_parallel_to_camera(item, wm_flat, camera_dir):
-        return None
-
+        item = item.FirstOperand; depth += 1
+        if depth > 8: return None
+    if not item.is_a("IfcExtrudedAreaSolid"): return None
+    if not _extrusion_parallel_to_camera(item, wm_flat, camera_dir): return None
     pts_2d = _profile_to_pts_2d(item.SweptArea)
-    if not pts_2d:
-        return None
+    if not pts_2d: return None
     pts_3d = _apply_axis2placement3d(pts_2d, item.Position)
-
     world_m = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
-    cam_inv = np.array(cam_inv_col_major, dtype=float).reshape(4, 4, order='F')
-    combined = cam_inv @ world_m
-    pts_h = np.hstack([pts_3d, np.ones((len(pts_3d), 1))])
-    pts_draw = (combined @ pts_h.T).T[:, :2]
-
+    combined = cam_inv_np @ world_m
+    pts_h = np.hstack([pts_3d, np.ones((len(pts_3d),1))])
+    pts_draw = (combined @ pts_h.T).T[:,:2]
     try:
         poly = shapely.Polygon(pts_draw.tolist())
-        if not poly.is_valid:
-            poly = poly.buffer(0)
+        if not poly.is_valid: poly = poly.buffer(0)
         return poly if poly.area > 1e-6 else None
     except Exception:
         return None
 
 
-def _wall_profile_polygon(element, wm_flat, cam_inv_col_major, camera_dir):
-    """Extract wall plan polygon from the first usable IfcExtrudedAreaSolid."""
-    if not hasattr(element, 'Representation') or element.Representation is None:
+def _wall_profile_polygon(element, wm_flat, cam_inv_np, camera_dir):
+    if not hasattr(element,'Representation') or element.Representation is None:
         return None
     for repr_ in element.Representation.Representations:
         for item in repr_.Items:
-            poly = _extruded_plan_polygon(item, wm_flat, cam_inv_col_major, camera_dir)
-            if poly is not None:
-                return poly
+            poly = _extruded_plan_polygon(item, wm_flat, cam_inv_np, camera_dir)
+            if poly is not None: return poly
     return None
 
 
-def _opening_footprint_polygon(opening, cam_inv_col_major):
-    """Get plan footprint + world Z extents of an IfcOpeningElement.
-
-    Returns (polygon_2d, z_min, z_max) or (None, None, None).
-    """
-    import numpy as np
+def _opening_footprint_polygon(opening, cam_inv_np):
     import ifcopenshell.geom as geom
     try:
         s = geom.settings()
         s.set('use-world-coords', True)
         shape = geom.create_shape(s, opening)
         verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
-        z_min = float(verts[:, 2].min())
-        z_max = float(verts[:, 2].max())
-        cam_inv = np.array(cam_inv_col_major, dtype=float).reshape(4, 4, order='F')
-        ones = np.ones((len(verts), 1))
-        pts_2d = (cam_inv @ np.hstack([verts, ones]).T).T[:, :2]
+        z_min, z_max = float(verts[:,2].min()), float(verts[:,2].max())
+        pts_2d = (cam_inv_np @ np.hstack([verts, np.ones((len(verts),1))]).T).T[:,:2]
         hull = shapely.convex_hull(shapely.MultiPoint(pts_2d.tolist()))
         if hull.geom_type == 'Polygon' and hull.area > 1e-6:
             return hull, z_min, z_max
@@ -535,186 +759,251 @@ def _opening_footprint_polygon(opening, cam_inv_col_major):
 
 
 def _wall_z_range(element, wm_flat):
-    """Return (z_min, z_max) in world space from IfcExtrudedAreaSolid, or (None, None)."""
-    import numpy as np
-    if not hasattr(element, 'Representation') or element.Representation is None:
+    if not hasattr(element,'Representation') or element.Representation is None:
         return None, None
     world_m = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
     for repr_ in element.Representation.Representations:
         for item in repr_.Items:
             cur, d = item, 0
             while cur.is_a("IfcBooleanClippingResult") or cur.is_a("IfcBooleanResult"):
-                cur = cur.FirstOperand
-                d += 1
+                cur = cur.FirstOperand; d += 1
                 if d > 8: break
-            if not cur.is_a("IfcExtrudedAreaSolid"):
-                continue
-            pos_z = 0.0
-            if cur.Position and cur.Position.Location:
-                loc = cur.Position.Location.Coordinates
-                if len(loc) > 2:
-                    pos_z = float(loc[2])
-            solid_depth = float(cur.Depth)
+            if not cur.is_a("IfcExtrudedAreaSolid"): continue
+            pos_z = float(cur.Position.Location.Coordinates[2]) \
+                    if cur.Position and cur.Position.Location and len(cur.Position.Location.Coordinates) > 2 \
+                    else 0.0
             ed = cur.ExtrudedDirection.DirectionRatios
             local_dir = np.array([float(ed[0]), float(ed[1]),
-                                  float(ed[2]) if len(ed) > 2 else 0.0])
-            dz = float((world_m[:3, :3] @ local_dir)[2]) * solid_depth
-            z_base = float((world_m @ np.array([0.0, 0.0, pos_z, 1.0]))[2])
-            return min(z_base, z_base + dz), max(z_base, z_base + dz)
+                                   float(ed[2]) if len(ed) > 2 else 0.0])
+            dz = float((world_m[:3,:3] @ local_dir)[2]) * float(cur.Depth)
+            z_base = float((world_m @ np.array([0.,0.,pos_z,1.]))[2])
+            return min(z_base, z_base+dz), max(z_base, z_base+dz)
     return None, None
 
 
-def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_col_major,
-                                         cut_z, camera_dir):
-    """Wall plan polygon = profile minus ALL openings.
-
-    All openings are subtracted regardless of height (standard 2D drafting convention).
-    Returns (wall_poly, is_section):
-        is_section=True  → wall straddles cut_z → Section layer + hatch
-        is_section=False → wall below cut_z    → View layer, no hatch
-    """
-    wall_poly = _wall_profile_polygon(element, wm_flat, cam_inv_col_major, camera_dir)
+def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_np, cut_z, camera_dir):
+    wall_poly = _wall_profile_polygon(element, wm_flat, cam_inv_np, camera_dir)
     if wall_poly is None or wall_poly.area < 1e-4:
         return None, True
-
     z_min, z_max = _wall_z_range(element, wm_flat)
     is_section = True if z_min is None else (z_min <= cut_z <= z_max)
-
     opening_polys = []
     for rel in getattr(element, 'HasOpenings', []):
         op = rel.RelatedOpeningElement
-        if not hasattr(op, 'ObjectPlacement') or op.ObjectPlacement is None:
-            continue
-        op_poly, _zmin, _zmax = _opening_footprint_polygon(op, cam_inv_col_major)
+        if not hasattr(op,'ObjectPlacement') or op.ObjectPlacement is None: continue
+        op_poly, _, _ = _opening_footprint_polygon(op, cam_inv_np)
         if op_poly is not None and op_poly.area > 1e-6:
             opening_polys.append(op_poly)
-
     if opening_polys:
         try:
-            openings = shapely.ops.unary_union(opening_polys)
-            result = wall_poly.difference(openings)
+            result = wall_poly.difference(shapely.ops.unary_union(opening_polys))
             if not result.is_empty and result.area > 1e-6:
                 wall_poly = result
         except Exception:
             pass
-
     return wall_poly, is_section
 
 
-def _add_wall_polygons(req, wall_polys_by_key):
-    """Union per-wall polygons by (ifc_class, material, is_section), add WallPolygon to req."""
-    for (ifc_class, material, is_section), polys in wall_polys_by_key.items():
-        if not polys:
-            continue
-        try:
-            merged = shapely.ops.unary_union(polys)
-        except Exception:
-            merged = polys[0] if len(polys) == 1 else None
-        if merged is None:
-            continue
+# ---------------------------------------------------------------------------
+# DXF writing helpers
+# ---------------------------------------------------------------------------
 
-        if merged.geom_type == 'MultiPolygon':
-            result_polys = list(merged.geoms)
-        elif merged.geom_type == 'Polygon':
-            result_polys = [merged]
-        else:
-            result_polys = [g for g in merged.geoms if g.geom_type == 'Polygon']
+_DXF_LW = (0,5,9,13,15,18,20,25,30,35,40,50,53,60,70,80,90,100,106,120,140,158,200,211)
 
-        for poly in result_polys:
-            outer = [[float(x), float(y)] for x, y in poly.exterior.coords[:-1]]
-            holes = [[[float(x), float(y)] for x, y in ring.coords[:-1]]
-                     for ring in poly.interiors]
+
+def _snap_lw(mm):
+    hundredths = round(float(mm) * 100)
+    return min(_DXF_LW, key=lambda v: abs(v - hundredths))
+
+
+def _load_layer_styles(styles_path):
+    if not os.path.isfile(styles_path):
+        return []
+    try:
+        with open(styles_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return [(k, int(v.get("color",7)), _snap_lw(v.get("lineweight",0.25)),
+                 str(v.get("linetype","Continuous")))
+                for k, v in data.items() if not k.startswith("_")]
+    except Exception:
+        return []
+
+
+def _slab_footprint_world(elem, wm_flat):
+    """Return Shapely Polygon of slab footprint in world XY, or None."""
+    if not hasattr(elem, 'Representation') or elem.Representation is None:
+        return None
+    world_m = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
+    for repr_ in elem.Representation.Representations:
+        for item in repr_.Items:
+            cur, depth = item, 0
+            while (cur.is_a("IfcBooleanClippingResult") or
+                   cur.is_a("IfcBooleanResult")):
+                cur = cur.FirstOperand
+                depth += 1
+                if depth > 8:
+                    break
+            if not cur.is_a("IfcExtrudedAreaSolid"):
+                continue
+            pts_2d = _profile_to_pts_2d(cur.SweptArea)
+            if not pts_2d:
+                continue
+            pts_3d = _apply_axis2placement3d(pts_2d, cur.Position)
+            pts_h = np.hstack([pts_3d, np.ones((len(pts_3d), 1))])
+            pts_world = (world_m @ pts_h.T).T[:, :2]
             try:
-                req.add_wall_polygon(ifc_class, material, outer, holes, is_section)
+                poly = shapely.Polygon(pts_world.tolist())
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.area > 1e-4:
+                    return poly
             except Exception:
-                pass
+                continue
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Element classifier (stateful: caller must pass seen_blocks dict)
-# ---------------------------------------------------------------------------
+def _compute_floor_slabs(ifc, cut_z):
+    """Return list of (z_top, Shapely Polygon) for IfcSlab/IfcCovering(FLOOR) below cut_z.
 
-def _classify_and_add(
-    req, ifc_dxf_mod, element, target_view, seen_blocks,
-    wall_mode="shapely", cam_inv_col_major=None, wall_lines_by_key=None,
-    cut_z=0.0, camera_dir=None,
-):
-    """Classify one IFC element and add it to the drawing request.
-
-    seen_blocks: dict[block_name → True] shared across all elements.
-    wall_lines_by_key: dict[(ifc_class, material) → list] for shapely mode.
-    cut_z: world-space Z of the section cut plane (cam_pos[2] for PLAN_VIEW).
-    camera_dir: camera look direction [x, y, z] — used for extrusion parallel check.
+    Only slabs whose footprint can be extracted as a polygon are included.
     """
-    import ifcopenshell.geom as geom
-
-    ifc_class = element.is_a()
-    material  = _get_material_name(element)
-    gid       = element.GlobalId
-    wm        = _world_matrix(element)
-
-    # ── Wall path ──────────────────────────────────────────────────────────────
-    if ifc_class in _WALL_MERGE_CLASSES:
-        if wall_mode == "shapely" and _SHAPELY and cam_inv_col_major is not None:
-            # Profile-based: IfcExtrudedAreaSolid + 2D opening subtraction.
-            # Falls through to Bucket B/C for non-vertical / non-extruded walls.
+    slabs = []
+    for cls in ("IfcSlab", "IfcCovering"):
+        for elem in ifc.by_type(cls):
+            if cls == "IfcCovering":
+                if getattr(elem, "PredefinedType", None) != "FLOOR":
+                    continue
             try:
-                poly, is_section = _extract_wall_polygon_with_openings(
-                    element, wm, cam_inv_col_major, cut_z,
-                    camera_dir or [0.0, 0.0, -1.0]
-                )
+                wm = _world_matrix_flat(elem)
+                _, z_max = _wall_z_range(elem, wm)
+                if z_max is None or z_max > cut_z:
+                    continue
+                poly = _slab_footprint_world(elem, wm)
                 if poly is not None:
-                    key = (ifc_class, material, is_section)
-                    wall_lines_by_key.setdefault(key, []).append(poly)
-                    return
+                    slabs.append((z_max, poly))
             except Exception:
                 pass
-        else:
-            # flat mode: project edges as LINE entities
-            plan_repr, _ = _find_plan_repr(element, target_view)
-            if plan_repr is not None:
-                try:
-                    verts, edges = _extract_local_curves(element, plan_repr)
-                    if verts and edges:
-                        req.add_wall_flat(ifc_class, material, verts, edges, wm)
-                        return
-                except Exception:
-                    pass
-        # fall through to standard Bucket B/C if wall geometry unavailable
+    return slabs
 
-    # ── Bucket B: 2D plan native representation ──────────────────────────────
-    plan_repr, from_type = _find_plan_repr(element, target_view)
-    if plan_repr is not None:
+
+def _is_occluded_by_slab(x_world, y_world, z_origin, floor_slabs):
+    """Return True if (x_world, y_world) at z_origin lies under any floor slab.
+
+    Combines Z check (element below slab top) with XY footprint containment.
+    Elements outside all slab footprints are never excluded.
+    """
+    pt = shapely.Point(x_world, y_world)
+    for z_top, poly in floor_slabs:
+        if z_origin < z_top - 1e-3 and poly.covers(pt):
+            return True
+    return False
+
+
+def _project_local_to_lines(verts, edges, cam_R):
+    n = len(verts) // 3
+    if n == 0 or len(edges) < 2:
+        return []
+    va = np.array(verts[:n*3], dtype=float).reshape(n, 3)
+    pts = (cam_R @ va.T).T[:, :2]
+    lines = []
+    for k in range(0, len(edges)-1, 2):
+        i, j = int(edges[k]), int(edges[k+1])
+        p0 = (float(pts[i,0]), float(pts[i,1]))
+        p1 = (float(pts[j,0]), float(pts[j,1]))
+        if (p0[0]-p1[0])**2 + (p0[1]-p1[1])**2 > 1e-18:
+            lines.append((p0, p1))
+    return lines
+
+
+def _compute_insert(wm_flat, cam_inv_np):
+    wm = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
+    pos_h = cam_inv_np @ (wm @ np.array([0.,0.,0.,1.]))
+    lx = wm[:3,:3] @ np.array([1.,0.,0.])
+    rot = float(np.degrees(np.arctan2(float(lx[1]), float(lx[0]))))
+    return (float(pos_h[0]), float(pos_h[1])), rot
+
+
+def _setup_dxf_layers(doc, layer_styles):
+    for name, color, lw, linetype in layer_styles:
         try:
-            if from_type or _is_mapped_repr(plan_repr):
-                _, block_name = _get_type_block_name(element)
-                if block_name is None:
-                    block_name = gid
-            else:
-                block_name = gid
-
-            if block_name not in seen_blocks:
-                verts, edges = _extract_local_curves(element, plan_repr)
-                if verts and edges:
-                    req.add_native_curves(block_name, ifc_class, material, verts, edges)
-                    seen_blocks[block_name] = True
-
-            if block_name in seen_blocks:
-                req.add_block_insert(block_name, ifc_class, wm)
-                return
+            layer = doc.layers.get(name)
+        except Exception:
+            layer = doc.layers.add(name)
+        layer.color = color
+        layer.lineweight = lw
+        try:
+            layer.dxf.linetype = linetype
         except Exception:
             pass
 
-    # ── Bucket C fallback: 3D Body BRep wireframe ────────────────────────────
-    try:
-        settings = geom.settings()
-        settings.set('use-world-coords', True)
-        settings.set('iterator-output', 2)
-        shape     = geom.create_shape(settings, element)
-        brep_text = shape.geometry.brep_data
-        req.add_body_brep(gid, ifc_class, material, brep_text, tuple(wm))
-    except Exception:
-        pass
+
+def _write_dxf(output_path, block_defs, block_order, block_inserts,
+               flat_edges, wall_polys_by_key, layer_styles, dxf_version="R2010"):
+    import ezdxf
+    from ezdxf import units
+
+    SNAP_TOL = 0.0005
+
+    doc = ezdxf.new(dxf_version)
+    doc.units = units.M
+    msp = doc.modelspace()
+    _setup_dxf_layers(doc, layer_styles)
+
+    for block_name in block_order:
+        bd = block_defs[block_name]
+        insert_layer = bd["ifc_class"]
+        blk = doc.blocks.new(name=block_name)
+        for p0, p1 in bd["lines"]:
+            blk.add_line(p0, p1, dxfattribs={"layer": "0"})
+        for cx, cy, r, a_s, a_e in bd["arcs"]:
+            blk.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": "0"})
+        for cx, cy, r in bd["circles"]:
+            blk.add_circle((cx, cy), r, dxfattribs={"layer": "0"})
+        for cx, cy, maj_x, maj_y, ratio, t1, t2 in bd.get("ellipses", []):
+            blk.add_ellipse(
+                center=(cx, cy, 0),
+                major_axis=(maj_x, maj_y, 0),
+                ratio=ratio,
+                start_param=t1,
+                end_param=t2,
+                dxfattribs={"layer": "0"},
+            )
+        for pos, rot in block_inserts.get(block_name, []):
+            msp.add_blockref(block_name, pos,
+                             dxfattribs={"rotation": rot, "layer": insert_layer})
+
+    for p0, p1, layer in flat_edges:
+        msp.add_line(p0, p1, dxfattribs={"layer": layer})
+
+    for (ifc_class, material, is_section), polys in wall_polys_by_key.items():
+        if not polys: continue
+        try:
+            expanded = [p.buffer(SNAP_TOL, join_style=2) for p in polys]
+            merged   = shapely.ops.unary_union(expanded).buffer(-SNAP_TOL, join_style=2)
+        except Exception:
+            merged = polys[0] if len(polys) == 1 else None
+        if merged is None: continue
+
+        outline_layer = f"{ifc_class}_Section" if is_section else f"{ifc_class}_View"
+        hatch_layer   = f"{ifc_class}_Hatches"
+        geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
+
+        for poly in geoms:
+            if poly.geom_type != 'Polygon': continue
+            exterior = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+            holes    = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
+                        for ring in poly.interiors]
+            msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": outline_layer})
+            for hole in holes:
+                msp.add_lwpolyline(hole, dxfattribs={"closed": True, "layer": outline_layer})
+            if is_section and len(exterior) >= 3:
+                hatch = msp.add_hatch(dxfattribs={"layer": hatch_layer})
+                hatch.set_solid_fill()
+                hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
+                for hole in holes:
+                    hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
+
+    doc.saveas(output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -722,51 +1011,35 @@ def _classify_and_add(
 # ---------------------------------------------------------------------------
 
 class ExportDrawingToDxfOperator(bpy.types.Operator):
-    """Export the active Bonsai drawing to DXF using the native ifc_dxf engine."""
+    """Export the active Bonsai drawing to DXF (ezdxf, pure Python)."""
 
     bl_idname = "bim.export_drawing_to_dxf"
-    bl_label = "Export Drawing to DXF"
+    bl_label  = "Export Drawing to DXF"
     bl_options = {"REGISTER"}
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     dxf_version: bpy.props.EnumProperty(
         name="DXF Version",
         items=[
-            ("AC1027", "R2013 (AC1027)", ""),
-            ("AC1032", "R2018 (AC1032)", ""),
-            ("AC1021", "R2007 (AC1021)", ""),
-            ("AC1015", "R2000 (AC1015)", ""),
+            ("R2010", "R2010 (AC1024)", ""),
+            ("R2013", "R2013 (AC1027)", ""),
+            ("R2018", "R2018 (AC1032)", ""),
         ],
-        default="AC1027",
+        default="R2010",
     )
 
     @classmethod
     def poll(cls, context):
-        if _get_ifc() is None:
-            return False
-        if _get_ifc_dxf() is None:
-            return False
-        return _get_active_drawing() is not None
+        return _get_ifc() is not None and _get_active_drawing() is not None
 
     def invoke(self, context, event):
-        ifc = _get_ifc()
-        if ifc:
-            ifc_path    = bpy.data.filepath or ""
-            default_dir = os.path.dirname(ifc_path) if ifc_path else ""
-            self.filepath = os.path.join(default_dir, "drawing.dxf")
+        ifc_path = bpy.data.filepath or ""
+        self.filepath = os.path.join(os.path.dirname(ifc_path) if ifc_path else "",
+                                     "drawing.dxf")
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        ifc_dxf_mod = _get_ifc_dxf()
-        if ifc_dxf_mod is None:
-            self.report(
-                {"ERROR"},
-                "ifc_dxf native module not found. "
-                "Build it with: python build_ifc_dxf.py",
-            )
-            return {"CANCELLED"}
-
         drawing = _get_active_drawing()
         if drawing is None:
             self.report({"ERROR"}, "No active Bonsai drawing found.")
@@ -777,51 +1050,28 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             self.report({"ERROR"}, "Drawing has no camera object.")
             return {"CANCELLED"}
 
-        try:
-            proj = _build_camera_projection(ifc_dxf_mod, camera_obj)
-        except Exception as exc:
-            self.report({"ERROR"}, f"Could not build camera projection: {exc}")
-            return {"CANCELLED"}
-
-        # Raw camera inverse for Python-side wall projection (Shapely mode)
-        from bonsai import tool as _tool
-        _m = _tool.Drawing.get_camera_matrix(camera_obj)
-        cam_inv_col_major = [v for col in _m.inverted().col for v in col]
-
-        camera_dir, camera_pos = _camera_dir_pos(camera_obj)
-        target_view = _get_target_view(drawing)
-
         output_path = bpy.path.abspath(self.filepath)
         if not output_path.lower().endswith((".dxf", ".dwg")):
             output_path += ".dxf"
 
-        req = ifc_dxf_mod.PyDrawingRequest(
-            proj,
-            camera_dir,
-            camera_pos,
-            target_view,
-            output_path,
-            self.dxf_version,
-        )
-
-        # Load layer styles from JSON next to the addon package
-        _styles_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                    "layer_styles.json")
         try:
-            import json as _json
-            _DXF_LW = (0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50,
-                       53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211)
-            def _snap(mm): return min(_DXF_LW, key=lambda v: abs(v - round(float(mm) * 100)))
-            with open(_styles_path, encoding="utf-8") as _f:
-                _data = _json.load(_f)
-            _styles = [(k, int(v.get("color", 7)),
-                        _snap(v.get("lineweight", 0.25)),
-                        str(v.get("linetype", "Continuous")))
-                       for k, v in _data.items() if not k.startswith("_")]
-            if _styles:
-                req.set_layer_styles(_styles)
-        except Exception:
-            pass
+            col_major, cam_dir, cam_pos = _camera_matrices(camera_obj)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Camera matrix error: {exc}")
+            return {"CANCELLED"}
+
+        _cam_inv_np  = np.array(col_major, dtype=float).reshape(4, 4, order='F')
+        _cam_R       = _cam_inv_np[:3, :3]
+        _cam_x_proj  = _cam_R @ np.array([1., 0., 0.])
+        _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]),
+                                                    float(_cam_x_proj[0]))))
+        target_view  = _get_target_view(drawing)
+        wall_mode    = "shapely" if _SHAPELY else "flat"
+        cut_z        = cam_pos[2]
+
+        styles_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                   "layer_styles.json")
+        layer_styles = _load_layer_styles(styles_path)
 
         try:
             from bonsai import tool
@@ -830,30 +1080,124 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             self.report({"ERROR"}, f"Could not get drawing elements: {exc}")
             return {"CANCELLED"}
 
-        seen_blocks = {}
+        # Classes processed in Bucket B-Approximate (section from 3D solid)
+        _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
+
+        block_defs    = {}
+        block_order   = []
+        block_inserts = {}
+        flat_edges    = []
         wall_polys_by_key = {}
-        wall_mode = "shapely" if _SHAPELY else "flat"
+        seen_blocks   = {}
+
+        ifc = _get_ifc()
+        floor_slabs = _compute_floor_slabs(ifc, cut_z) if _SHAPELY else []
 
         for element in elements:
-            _classify_and_add(
-                req, ifc_dxf_mod, element, target_view, seen_blocks,
-                wall_mode=wall_mode,
-                cam_inv_col_major=cam_inv_col_major,
-                wall_lines_by_key=wall_polys_by_key,
-                cut_z=camera_pos[2],
-                camera_dir=camera_dir,
-            )
+            ifc_class = element.is_a()
+            material  = _get_material_name(element)
+            gid       = element.GlobalId
+            wm        = _world_matrix_flat(element)
 
-        if wall_mode == "shapely" and wall_polys_by_key:
-            _add_wall_polygons(req, wall_polys_by_key)
+            # ── Bucket A: 2D native representation ───────────────────────────
+            # _SECTION_CLASSES always route to Bucket B for merged outlines + hatching.
+            plan_repr, from_type = _find_plan_repr(element, target_view)
+            if plan_repr is not None and ifc_class not in _SECTION_CLASSES:
+                # Slab occlusion: XY footprint + Z check
+                if floor_slabs:
+                    x_w, y_w, z_w = float(wm[12]), float(wm[13]), float(wm[14])
+                    if _is_occluded_by_slab(x_w, y_w, z_w, floor_slabs):
+                        continue
+                try:
+                    if from_type or _is_mapped_repr(plan_repr):
+                        _, block_name = _get_type_block_name(element)
+                        if block_name is None:
+                            block_name = gid
+                    else:
+                        block_name = gid
+
+                    if block_name not in seen_blocks:
+                        verts, edges, arcs, circles, ellipses = _extract_local_curves(element, plan_repr)
+                        if verts or edges or arcs or circles or ellipses:
+                            lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
+                            arcs_blk = []
+                            for cx_e, cy_e, r, a_s, a_e in arcs:
+                                c = _cam_R @ np.array([cx_e, cy_e, 0.])
+                                arcs_blk.append((float(c[0]), float(c[1]), r,
+                                                 (a_s+_cam_rot_deg)%360,
+                                                 (a_e+_cam_rot_deg)%360))
+                            circles_blk = []
+                            for cx_e, cy_e, r in circles:
+                                c = _cam_R @ np.array([cx_e, cy_e, 0.])
+                                circles_blk.append((float(c[0]), float(c[1]), r))
+                            ellipses_blk = []
+                            for cx_e, cy_e, maj_x, maj_y, ratio, t1, t2 in ellipses:
+                                c   = _cam_R @ np.array([cx_e, cy_e, 0.])
+                                maj = _cam_R @ np.array([maj_x, maj_y, 0.])
+                                ellipses_blk.append((float(c[0]), float(c[1]),
+                                                      float(maj[0]), float(maj[1]),
+                                                      ratio, t1, t2))
+                            block_defs[block_name] = {
+                                "ifc_class": ifc_class, "material": material,
+                                "lines": lines, "arcs": arcs_blk,
+                                "circles": circles_blk, "ellipses": ellipses_blk,
+                            }
+                            block_order.append(block_name)
+                            seen_blocks[block_name] = True
+
+                    if block_name in seen_blocks:
+                        pos, rot = _compute_insert(wm, _cam_inv_np)
+                        block_inserts.setdefault(block_name, []).append((pos, rot))
+                        continue
+                except Exception:
+                    pass
+
+            # ── Bucket B-Approximate: section from 3D solid (Shapely) ─────────
+            if ifc_class in _SECTION_CLASSES:
+                if wall_mode == "shapely":
+                    try:
+                        poly, is_section = _extract_wall_polygon_with_openings(
+                            element, wm, _cam_inv_np, cut_z, cam_dir)
+                        if poly is not None:
+                            wall_polys_by_key.setdefault(
+                                (ifc_class, material, is_section), []).append(poly)
+                            continue
+                    except Exception:
+                        pass
+                else:
+                    plan_repr_b, _ = _find_plan_repr(element, target_view)
+                    if plan_repr_b is not None:
+                        try:
+                            verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b)
+                            if verts and edges:
+                                wm_np = np.array(wm, dtype=float).reshape(4, 4, order='F')
+                                combined = _cam_inv_np @ wm_np
+                                n = len(verts) // 3
+                                va = np.array(verts[:n*3]).reshape(n, 3)
+                                ph = np.hstack([va, np.ones((n, 1))])
+                                pd = (combined @ ph.T).T[:, :2]
+                                layer = f"{ifc_class}_Section"
+                                for k in range(0, len(edges)-1, 2):
+                                    i, j = int(edges[k]), int(edges[k+1])
+                                    p0 = (float(pd[i,0]), float(pd[i,1]))
+                                    p1 = (float(pd[j,0]), float(pd[j,1]))
+                                    if (p0[0]-p1[0])**2+(p0[1]-p1[1])**2 > 1e-18:
+                                        flat_edges.append((p0, p1, layer))
+                                continue
+                        except Exception:
+                            pass
+
+            # ── Bucket C: no usable representation ───────────────────────────
 
         try:
-            ifc_dxf_mod.py_generate(req, None)
+            _write_dxf(output_path, block_defs, block_order, block_inserts,
+                       flat_edges, wall_polys_by_key, layer_styles,
+                       dxf_version=self.dxf_version)
         except Exception as exc:
-            self.report({"ERROR"}, f"DXF generation failed: {exc}")
+            self.report({"ERROR"}, f"DXF export failed: {exc}")
             return {"CANCELLED"}
 
-        self.report({"INFO"}, f"DXF exported to {output_path}")
+        self.report({"INFO"}, f"Exported to {output_path}")
         return {"FINISHED"}
 
 
