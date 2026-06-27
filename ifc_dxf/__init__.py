@@ -10,21 +10,32 @@ from .ui import classes as _ui_classes
 classes = _op_classes + _ui_classes
 class_register, class_unregister = bpy.utils.register_classes_factory(classes)
 
-_ADDON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DEFAULT_TEMPLATE = os.path.join(_ADDON_DIR, "ifc_dxf_template.dxf")
+
+def get_template_path() -> str | None:
+    """Return the absolute path to ifc_dxf_template.dxf.
+
+    The template lives next to bonsai_salad/__init__.py, one level above this
+    file (bonsai_salad/ifc_dxf/__init__.py).  This works for both a Blender
+    addon installed from ZIP (extracted as a directory) and a dev checkout.
+    """
+    candidate = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "ifc_dxf_template.dxf",
+    )
+    return candidate if os.path.isfile(candidate) else None
 
 
 def register():
     class_register()
     bpy.types.Scene.ifc_dxf = bpy.props.PointerProperty(type=IfcDxfProperties)
-    # Set default template path on first registration if file exists
-    import bpy as _bpy
-    try:
-        for scene in _bpy.data.scenes:
-            if not scene.ifc_dxf.template_path:
-                scene.ifc_dxf.template_path = _DEFAULT_TEMPLATE
-    except Exception:
-        pass
+    tpl = get_template_path()
+    if tpl:
+        try:
+            for scene in bpy.data.scenes:
+                if not scene.ifc_dxf.template_path:
+                    scene.ifc_dxf.template_path = tpl
+        except Exception:
+            pass
 
 
 def unregister():

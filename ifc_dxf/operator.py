@@ -1202,8 +1202,11 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
 
         import bpy as _bpy
         _tpl = getattr(getattr(_bpy.context.scene, "ifc_dxf", None), "template_path", "") or ""
-        template_path = _bpy.path.abspath(_tpl) if _tpl else os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "ifc_dxf_template.dxf")
+        if _tpl:
+            template_path = _bpy.path.abspath(_tpl)
+        else:
+            from . import get_template_path
+            template_path = get_template_path() or ""
 
         try:
             from bonsai import tool
