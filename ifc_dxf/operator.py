@@ -1366,6 +1366,31 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SelectDxfTemplateOperator(bpy.types.Operator):
+    """Browse for a DXF template file, starting in the default template folder."""
+
+    bl_idname  = "bim.select_dxf_template"
+    bl_label   = "Select DXF Template"
+    bl_options = {"REGISTER"}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.dxf;*.DXF", options={"HIDDEN"})
+
+    def invoke(self, context, event):
+        # Start the browser at the current template location (or the built-in default).
+        current = bpy.path.abspath(context.scene.ifc_dxf.template_path or "")
+        if not current or not os.path.isfile(current):
+            from . import get_template_path
+            current = get_template_path() or ""
+        self.filepath = current
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        context.scene.ifc_dxf.template_path = self.filepath
+        return {"FINISHED"}
+
+
 class IfcDxfProperties(bpy.types.PropertyGroup):
     template_path: bpy.props.StringProperty(
         name="DXF Template",
@@ -1375,4 +1400,4 @@ class IfcDxfProperties(bpy.types.PropertyGroup):
     )
 
 
-classes = [IfcDxfProperties, ExportDrawingToDxfOperator]
+classes = [IfcDxfProperties, SelectDxfTemplateOperator, ExportDrawingToDxfOperator]

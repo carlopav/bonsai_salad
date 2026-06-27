@@ -30,10 +30,10 @@ class IfcDxfPanel(bpy.types.Panel):
         props = context.scene.ifc_dxf
         import os
         tpl = props.template_path
-        tpl_name = os.path.basename(tpl) if tpl else "(no template)"
+        tpl_name = os.path.basename(tpl) if tpl else "(default)"
         row = layout.row(align=True)
-        row.prop(props, "template_path", text="", icon="FILE")
-        row.label(text=tpl_name)
+        row.label(text=tpl_name, icon="FILE")
+        row.operator("bim.select_dxf_template", text="", icon="FILEBROWSER")
 
         layout.operator("bim.export_drawing_to_dxf", icon="EXPORT")
 
