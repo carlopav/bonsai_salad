@@ -1,6 +1,7 @@
-# bonsai_salad — ifc_dxf: DXF Generation Rules
+# ifc_dxf: DXF Generation Rules
 
-> Implementation: pure Python (`ezdxf` + `shapely` + `ifcopenshell`). No Rust/OCC dependency in ifc_dxf.
+A tool to export an IFC drawing view to DXF, aiming for maximum structural and geometric fidelity.
+> Implementation: pure Python (`ezdxf` + `shapely` + `ifcopenshell`). No OCC dependency in ifc_dxf.
 
 ---
 
@@ -146,7 +147,7 @@ For each IfcSlab / IfcCovering(FLOOR) with Z_top ≤ cut_z:
 
 **Condition:** no native 2D representation found by Bucket A.
 
-**Typical classes:** `IfcWall`, `IfcWallStandardCase`, (future: `IfcSlab`, `IfcColumn`, `IfcStairFlight`, …).
+**Typical classes:** `IfcWall`, `IfcWallStandardCase` (future: `IfcSlab`, `IfcColumn`, `IfcStairFlight`, …).
 
 **Output:** entities written directly to model space (no BLOCK/INSERT). Layer with semantic suffix.
 
@@ -172,7 +173,7 @@ Used for elements with `IfcExtrudedAreaSolid` and an extractable 2D profile.
 
 #### B-Accurate — OCC/HLR ✗ future work
 
-Uses `ifcopenshell.geom` with HLR (Hidden Line Removal) to generate precise linework. Equivalent to the OCC path in Bonsai SVG. Requires OCC available in ifcopenshell.
+Uses `ifcopenshell.geom` with HLR (Hidden Line Removal) to generate precise linework. Equivalent to the OCC path in Bonsai SVG. Requires OCC to be available in ifcopenshell.
 
 ---
 
@@ -291,7 +292,7 @@ In Blender (via operator), ifc_dxf reads the filtered element list from Bonsai v
 
 ### Camera Projection
 
-Orthographic. The camera inverse matrix transforms world points → camera-local; camera X and Y = drawing X and Y.
+Orthographic. The camera inverse matrix transforms world points → camera-local; camera X and Y map to drawing X and Y.
 
 - `project()`: rotation + translation — for INSERT origins (world-space).
 - `project_local()`: rotation only (`_cam_R`) — for BLOCK geometry (local coordinates).
