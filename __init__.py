@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Bonsai Salad",
     "author": "carlopav",
-    "version": (0, 0, 3),
+    "version": (0, 0, 4),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Bonsai Salad",
     "description": "A collection of miscellaneous scripts and tools",
