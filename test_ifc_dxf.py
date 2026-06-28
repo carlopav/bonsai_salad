@@ -1493,21 +1493,23 @@ _TEXT_STYLES_MM = {
 }
 _DEFAULT_TEXT_MM = 2.5  # "regular"
 
-# IFC BoxAlignment → MTEXT attachment_point (ezdxf const)
-# MTEXT: 1=TL 2=TC 3=TR  4=ML 5=MC 6=MR  7=BL 8=BC 9=BR
-_BOX_ALIGN_TO_MTEXT = {
-    "top-left":     1, "top-center":    2, "top-right":    3,
-    "middle-left":  4, "center":        5, "middle-right": 6,
-    "bottom-left":  7, "bottom-center": 8, "bottom-right": 9,
+# IFC BoxAlignment → TEXT (halign, valign)
+# halign: 0=left 1=center 2=right
+# valign: 0=baseline 1=bottom 2=middle 3=top
+_BOX_ALIGN_TO_TEXT = {
+    "top-left":     (0, 3), "top-center":    (1, 3), "top-right":    (2, 3),
+    "middle-left":  (0, 2), "center":        (1, 2), "middle-right": (2, 2),
+    "bottom-left":  (0, 1), "bottom-center": (1, 1), "bottom-right": (2, 1),
 }
 
 
-def _write_text_annotations(msp, annotations, cam_inv_np, scale_factor):
-    """Write TEXT annotations as DXF MTEXT entities.
+def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
+                            current_scale_handle):
+    """Write TEXT annotations as annotative DXF TEXT entities.
 
-    Text height is resolved from EPset_Annotation.Classes (style name) or
-    falls back to "regular" (2.5 mm paper).  All heights are stored in
-    model-space metres: paper_mm * 0.001 / scale_factor.
+    Text height: paper_mm * 0.001 / scale_factor (model-space metres).
+    Each entity gets a single annotative scale representation for the current
+    drawing scale via _make_text_annotative().
     """
     _TXT_LAYER = "IfcAnnotation_Text"
 
@@ -1540,7 +1542,6 @@ def _write_text_annotations(msp, annotations, cam_inv_np, scale_factor):
             return float(cx), float(cy)
 
         # ── rotation from ObjectPlacement X-axis ──────────────────────────
-        # Local X = (1,0,0) → project to see how it rotates in drawing space
         ox, oy = _world_to_2d(0.0, 0.0)
         x1, y1 = _world_to_2d(1.0, 0.0)
         angle_deg = float(np.degrees(np.arctan2(y1 - oy, x1 - ox)))
@@ -1553,25 +1554,224 @@ def _write_text_annotations(msp, annotations, cam_inv_np, scale_factor):
                 if not item.is_a("IfcTextLiteralWithExtent"):
                     continue
 
-                literal      = item.Literal or ""
-                box_align    = (item.BoxAlignment or "bottom-left").lower()
-                attach_point = _BOX_ALIGN_TO_MTEXT.get(box_align, 7)  # default BL
+                literal = item.Literal or ""
+                px, py  = _world_to_2d(0.0, 0.0)
 
-                # IfcTextLiteralWithExtent.Placement is local to the annotation;
-                # for Bonsai annotations it is always the identity so the insert
-                # point is just the ObjectPlacement origin projected to 2D.
-                px, py = _world_to_2d(0.0, 0.0)
+                # Use left-baseline (DXF TEXT default) — matches what BricsCAD
+                # writes for native annotative text and avoids align_point issues.
+                # BoxAlignment from IFC is ignored for DXF (SVG-only concept).
+                text = msp.add_text(literal, dxfattribs={
+                    "layer":    _TXT_LAYER,
+                    "style":    style,
+                    "height":   txt_height,
+                    "rotation": angle_deg,
+                    "insert":   (px, py),
+                })
 
-                mtext = msp.add_mtext(
-                    literal,
-                    dxfattribs={
-                        "layer":            _TXT_LAYER,
-                        "char_height":      txt_height,
-                        "insert":           (px, py),
-                        "attachment_point": attach_point,
-                        "rotation":         angle_deg,
-                    },
-                )
+                if current_scale_handle:
+                    _make_text_annotative(doc, text, (px, py),
+                                          current_scale_handle, angle_deg)
+
+
+# ── font resolution ───────────────────────────────────────────────────────────
+
+# Same priority order as Bonsai's SVG CSS font-family stack.
+_FONT_FALLBACKS = [
+    "OpenGost Type B TT.ttf",
+    "DejaVuSansCondensed.ttf",
+    "LiberationSansNarrow-Regular.ttf",
+    "arialn.ttf",
+    "arial.ttf",
+]
+
+
+def _system_font_dirs():
+    dirs = []
+    if sys.platform == "win32":
+        dirs.append(r"C:\Windows\Fonts")
+        local = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Microsoft\Windows\Fonts")
+        if os.path.isdir(local):
+            dirs.append(local)
+    elif sys.platform == "darwin":
+        dirs += ["/Library/Fonts", "/System/Library/Fonts",
+                 os.path.expanduser("~/Library/Fonts")]
+    else:
+        dirs += ["/usr/share/fonts", "/usr/local/share/fonts",
+                 os.path.expanduser("~/.fonts"),
+                 os.path.expanduser("~/.local/share/fonts")]
+    return dirs
+
+
+def _font_available(filename):
+    name_lower = filename.lower()
+    for d in _system_font_dirs():
+        for root, _, files in os.walk(d):
+            if any(f.lower() == name_lower for f in files):
+                return True
+    return False
+
+
+def _resolve_text_font(doc):
+    """Pick the best available font for DXF text styles.
+
+    Reads the preferred font from the template's text styles, then walks the
+    Bonsai CSS fallback list until a font present on this system is found.
+    Updates all named text styles in doc to use that font.
+    """
+    # Detect the font currently set in the template (any named style).
+    preferred = next(
+        (s.dxf.font for s in doc.styles if s.dxf.name not in ("Standard", "") and s.dxf.font),
+        None,
+    )
+
+    # Build candidate list: template preference first, then standard fallbacks.
+    candidates = []
+    if preferred and preferred not in _FONT_FALLBACKS:
+        candidates.append(preferred)
+    candidates += _FONT_FALLBACKS
+
+    resolved = candidates[-1]  # last-resort fallback (arial.ttf)
+    for font in candidates:
+        if _font_available(font):
+            resolved = font
+            break
+
+    for style in doc.styles:
+        if style.dxf.name not in ("Standard", ""):
+            style.dxf.font = resolved
+
+    return resolved
+
+
+# BricsCAD/AutoCAD SCALE entity format (verified from BricsCAD-saved DXF):
+#   entity type: SCALE  (not ACDBSCALE)
+#   subclass AcDbScale group codes: 70=flags, 300=name, 140=paper, 141=drawing, 290=is_1:1
+_ARCH_SCALES = [
+    ("1:1",    1,   1,   1),   # 290=1 marks the paper-space 1:1 base scale
+    ("1:2",    1,   2,   0),
+    ("1:4",    1,   4,   0),
+    ("1:5",    1,   5,   0),
+    ("1:8",    1,   8,   0),
+    ("1:10",   1,   10,  0),
+    ("1:20",   1,   20,  0),
+    ("1:25",   1,   25,  0),
+    ("1:50",   1,   50,  0),
+    ("1:100",  1,   100, 0),
+    ("1:200",  1,   200, 0),
+    ("1:500",  1,   500, 0),
+    ("1:1000", 1,   1000,0),
+    ("2:1",    2,   1,   0),
+    ("5:1",    5,   1,   0),
+    ("10:1",   10,  1,   0),
+    ("100:1",  100, 1,   0),
+]
+
+
+def _populate_scale_list(doc, scale_factor):
+    """Fill ACAD_SCALELIST with SCALE objects and set the current annotation scale.
+
+    BricsCAD/AutoCAD store the current scale in AcDbVariableDictionary →
+    DictionaryVariables entry 'CANNOSCALE', NOT in the $CANNOSCALE header
+    variable (which ezdxf doesn't support anyway).
+
+    Verified entity format from BricsCAD ASCII DXF:
+      entity type 'SCALE', subclass 'AcDbScale', group codes 300=name,
+      140=paper units, 141=drawing units, 290=1 only for the 1:1 base scale.
+    """
+    from ezdxf.lldxf.types import DXFTag
+    from ezdxf.lldxf.tags import Tags
+
+    # ── 1. populate ACAD_SCALELIST ────────────────────────────────────────────
+    scale_dict = doc.rootdict["ACAD_SCALELIST"]
+    existing = set(scale_dict.keys())
+
+    for name, paper, drawing, flag290 in _ARCH_SCALES:
+        if name in existing:
+            continue
+        obj = doc.objects.new_entity("SCALE", dxfattribs={})
+        obj.__class__ = type("SCALE", (obj.__class__,), {"DXFTYPE": "SCALE"})
+        obj.xtags.subclasses = [Tags(), Tags([
+            DXFTag(100, "AcDbScale"),
+            DXFTag(70, 0),
+            DXFTag(300, name),
+            DXFTag(140, float(paper)),
+            DXFTag(141, float(drawing)),
+            DXFTag(290, flag290),
+        ])]
+        obj.dxf.owner = scale_dict.dxf.handle
+        scale_dict.add(key=name, entity=obj)
+
+    # ── 2. set current annotation scale via AcDbVariableDictionary ───────────
+    denom = int(round(1.0 / scale_factor))
+    scale_name = f"1:{denom}"
+
+    if "AcDbVariableDictionary" not in doc.rootdict:
+        var_dict = doc.rootdict.add_new_dict("AcDbVariableDictionary")
+    else:
+        var_dict = doc.rootdict["AcDbVariableDictionary"]
+
+    var_dict.discard("CANNOSCALE")
+    var_dict.add_dict_var("CANNOSCALE", scale_name)
+
+    # ── 3. return {scale_name: handle} map for annotative entity creation ────
+    scale_dict = doc.rootdict["ACAD_SCALELIST"]
+    return {k: scale_dict.get(k).dxf.handle for k in scale_dict.keys()}
+
+
+def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0.0):
+    """Add a single annotative scale representation to a TEXT entity.
+
+    Creates the extension-dict chain:
+      entity → AcDbContextDataManager → ACDB_ANNOTATIONSCALES → *A1
+    where *A1 is an ACDB_TEXTOBJECTCONTEXTDATA_CLASS referencing the given
+    SCALE entity handle.  Only one representation (current drawing scale) is
+    written; BricsCAD/AutoCAD accept this and will add more when the user
+    changes CANNOSCALE interactively.
+    """
+    import math
+    from ezdxf.lldxf.types import DXFTag
+    from ezdxf.lldxf.tags import Tags
+
+    if text_entity.has_extension_dict:
+        ext_dict = text_entity.get_extension_dict()
+    else:
+        ext_dict = text_entity.new_extension_dict()
+
+    # ExtensionDict wraps the actual Dictionary object
+    d = ext_dict.dictionary
+    ctx_mgr     = d.add_new_dict("AcDbContextDataManager")
+    anno_scales = ctx_mgr.add_new_dict("ACDB_ANNOTATIONSCALES")
+
+    ctx = doc.objects.new_entity("ACDB_TEXTOBJECTCONTEXTDATA_CLASS", dxfattribs={})
+    ctx.__class__ = type("CTX", (ctx.__class__,), {"DXFTYPE": "ACDB_TEXTOBJECTCONTEXTDATA_CLASS"})
+    px, py = float(insert_pt[0]), float(insert_pt[1])
+    ctx.xtags.subclasses = [Tags(), Tags([
+        DXFTag(100, "AcDbObjectContextData"),
+        DXFTag(70, 4),
+        DXFTag(290, 1),   # 1 = active / current scale
+    ]), Tags([
+        DXFTag(100, "AcDbAnnotScaleObjectContextData"),
+        DXFTag(340, scale_handle),
+        DXFTag(70, 0),
+        DXFTag(50, math.radians(angle_deg)),
+        # Coordinates must be written as separate group codes (10/20/30),
+        # not as a tuple — DXFTagStorage writes raw tags without expansion.
+        DXFTag(10, px), DXFTag(20, py), DXFTag(30, 0.0),
+        DXFTag(11, 0.0), DXFTag(21, 0.0), DXFTag(31, 0.0),
+    ])]
+    anno_scales.add(key="*A1", entity=ctx)
+
+    # BricsCAD/AutoCAD check for the AcadAnnotative XDATA block on the entity
+    # to recognise it as annotative — the extension dict alone is not enough.
+    if "AcadAnnotative" not in doc.appids:
+        doc.appids.new("AcadAnnotative")
+    text_entity.set_xdata("AcadAnnotative", [
+        DXFTag(1000, "AnnotativeData"),
+        DXFTag(1002, "{"),
+        DXFTag(1070, 1),
+        DXFTag(1070, 1),
+        DXFTag(1002, "}"),
+    ])
 
 
 # ── DXF writer ────────────────────────────────────────────────────────────────
@@ -1612,21 +1812,16 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         doc = ezdxf.readfile(template_path)
         msp = doc.modelspace()
         msp.delete_all_entities()
+        _resolve_text_font(doc)
     else:
         doc = ezdxf.new("R2010")
         doc.units = units.M
         msp = doc.modelspace()
 
     doc.header["$LTSCALE"] = float(scale_factor)
-
-    # $CANNOSCALE: annotation scale string (e.g. "1:100") so the CAD program
-    # knows the intended annotation scale when opening the file.
-    # scale_factor = 0.01 → "1:100",  0.02 → "1:50",  0.005 → "1:200"
-    _denom = int(round(1.0 / scale_factor))
-    try:
-        doc.header["$CANNOSCALE"] = f"1:{_denom}"
-    except Exception:
-        pass
+    scale_handles = _populate_scale_list(doc, scale_factor)
+    denom = int(round(1.0 / scale_factor))
+    current_scale_handle = scale_handles.get(f"1:{denom}")
 
     # ── block definitions + inserts ──────────────────────────────────────────
     for block_name in block_order:
@@ -1735,7 +1930,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # ── Bucket D: annotations ─────────────────────────────────────────────────
     if annotations and cam_inv_np is not None:
         _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor)
-        _write_text_annotations(msp, annotations, cam_inv_np, scale_factor)
+        _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
+                                current_scale_handle)
 
     doc.saveas(output_path)
 

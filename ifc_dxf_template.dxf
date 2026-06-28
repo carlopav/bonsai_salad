@@ -489,7 +489,7 @@ $SKPOLY
   9
 $TDCREATE
  40
-2461219.7192824073
+2461220.064976852
   9
 $TDUCREATE
  40
@@ -497,7 +497,7 @@ $TDUCREATE
   9
 $TDUPDATE
  40
-2461219.7192824073
+2461220.064976852
   9
 $TDUUPDATE
  40
@@ -549,7 +549,7 @@ $SPLINESEGS
   9
 $HANDSEED
   5
-59
+60
   9
 $SURFTAB1
  70
@@ -929,11 +929,11 @@ $PSTYLEMODE
   9
 $FINGERPRINTGUID
   2
-{DD3AA971-5049-4FC7-A35D-533B0EF874AA}
+{3B5CD940-0075-4F05-B29C-E68EB6AB61FE}
   9
 $VERSIONGUID
   2
-{73043F9F-DCD9-46C0-88C9-F8AB47D136DB}
+{68F5C377-0E81-4A43-990F-1AEE4C103B80}
   9
 $EXTNAMES
 290
@@ -2401,7 +2401,7 @@ STYLE
 100
 AcDbSymbolTable
  70
-1
+8
   0
 STYLE
   5
@@ -2428,6 +2428,202 @@ Standard
 2.5
   3
 txt
+  4
+
+  0
+STYLE
+  5
+4F
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+title
+ 70
+0
+ 40
+0.007
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
+  4
+
+  0
+STYLE
+  5
+50
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+header
+ 70
+0
+ 40
+0.005
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
+  4
+
+  0
+STYLE
+  5
+51
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+large
+ 70
+0
+ 40
+0.0035
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
+  4
+
+  0
+STYLE
+  5
+52
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+regular
+ 70
+0
+ 40
+0.0025
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
+  4
+
+  0
+STYLE
+  5
+53
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+small
+ 70
+0
+ 40
+0.0018
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
+  4
+
+  0
+STYLE
+  5
+54
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+DIMENSION
+ 70
+0
+ 40
+0.0018
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
+  4
+
+  0
+STYLE
+  5
+55
+330
+5
+100
+AcDbSymbolTableRecord
+100
+AcDbTextStyleTableRecord
+  2
+GRID
+ 70
+0
+ 40
+0.0035
+ 41
+1.0
+ 50
+0.0
+ 71
+0
+ 42
+2.5
+  3
+DejaVuSansCondensed.ttf
   4
 
   0
@@ -2489,7 +2685,7 @@ ACAD
   0
 APPID
   5
-56
+5D
 330
 3
 100
@@ -2503,7 +2699,7 @@ HATCHBACKGROUNDCOLOR
   0
 APPID
   5
-57
+5E
 330
 3
 100
@@ -2669,7 +2865,7 @@ Standard
   0
 DIMSTYLE
 105
-4F
+56
 330
 4
 100
@@ -2859,7 +3055,7 @@ AcDbBlockTableRecord
   0
 BLOCK_RECORD
   5
-50
+57
 330
 9
 100
@@ -2869,7 +3065,7 @@ AcDbBlockTableRecord
   2
 *Paper_Space0
 340
-53
+5A
  70
 0
 280
@@ -2963,9 +3159,9 @@ AcDbBlockEnd
   0
 BLOCK
   5
-51
+58
 330
-50
+57
 100
 AcDbEntity
   8
@@ -2989,15 +3185,15 @@ AcDbBlockBegin
   0
 VIEWPORT
   5
-54
+5B
 330
-50
+57
 100
 AcDbEntity
  67
 1
   8
-VIEWPORTS
+0
 100
 AcDbViewport
  10
@@ -3093,9 +3289,9 @@ AcDbViewport
   0
 LWPOLYLINE
   5
-55
+5C
 330
-50
+57
 100
 AcDbEntity
  67
@@ -3131,9 +3327,9 @@ AcDbPolyline
   0
 ENDBLK
   5
-52
+59
 330
-50
+57
 100
 AcDbEntity
   8
@@ -3251,7 +3447,7 @@ Layout1
   3
 A1 Planimetria
 350
-53
+5A
   0
 DICTIONARY
   5
@@ -4141,7 +4337,7 @@ CREATED_BY_EZDXF
   3
 WRITTEN_BY_EZDXF
 350
-58
+5F
   0
 DICTIONARYVAR
   5
@@ -4153,11 +4349,11 @@ DictionaryVariables
 280
 0
   1
-1.4.4 @ 2026-06-27T15:15:46.505631+00:00
+1.4.4 @ 2026-06-27T23:33:34.019223+00:00
   0
 LAYOUT
   5
-53
+5A
 330
 D
 100
@@ -4279,13 +4475,13 @@ A1 Planimetria
  76
 1
 330
-50
+57
 331
-54
+5B
   0
 DICTIONARYVAR
   5
-58
+5F
 330
 2D
 100
@@ -4293,7 +4489,7 @@ DictionaryVariables
 280
 0
   1
-1.4.4 @ 2026-06-27T15:15:46.507653+00:00
+1.4.4 @ 2026-06-27T23:33:34.021460+00:00
   0
 ENDSEC
   0

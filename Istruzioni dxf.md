@@ -87,6 +87,16 @@ Riprodurre la struttura IFC nelle entità DXF nel modo più fedele possibile:
 - Y crescente verso l'alto (convenzione DXF/matematica standard).
 - `$LTSCALE`: impostato al fattore di scala numerico della vista (es. 0.01 per 1:100, 0.02 per 1:50). Letto da `EPset_Drawing.Scale` (formato `"1/100"`) tramite `fractions.Fraction`. Default: 0.01.
 
+### Template DXF
+
+Il file `ifc_dxf_template.dxf` (generato da `create_dxf_template.py`) contiene layer, dimstyle `BONSAI_DIM` e layout A1. All'export viene letto con `ezdxf.readfile()` e il modelspace viene svuotato (`msp.delete_all_entities()`), mantenendo tutti gli stili.
+
+### Scala di annotazione
+
+La scala di annotazione corrente viene scritta in `AcDbVariableDictionary` → `DictionaryVariables("CANNOSCALE", "1:100")`. **Non** va nell'header `$CANNOSCALE` (ignorato da BricsCAD/AutoCAD). ezdxf supporta questo tramite `dict.add_dict_var()`.
+
+La lista scale (`ACAD_SCALELIST`) viene popolata con entità di tipo `SCALE` / `AcDbScale`. ezdxf non conosce questo tipo nativamente (group codes: `300`=nome, `140`=paper, `141`=drawing, `290`=flag 1:1 base). Workaround: `new_entity("SCALE")` + override `DXFTYPE` via `type()` + subclasses manuali.
+
 ---
 
 ## Classificazione a Bucket (A → D, priorità decrescente)
@@ -169,9 +179,54 @@ Attualmente gli elementi in Bucket C vengono registrati ma non disegnati. In fut
 
 ---
 
-### Bucket D — Annotazioni ✗ non implementato
+### Bucket D — Annotazioni ✓ parzialmente implementato
 
-Annotazioni 2D: quote, testi, simboli. Modulo `annotations` separato.
+Annotazioni 2D estratte dal gruppo `IfcRelAssignsToGroup` → `IfcGroup(ObjectType='DRAWING')` con lo stesso nome del disegno attivo. Le annotazioni figlie (`IfcAnnotation`) vengono classificate per tipo e scritte come entità DXF native.
+
+**Come trovare le annotazioni di un disegno:**
+```python
+for rel in ifc.by_type("IfcRelAssignsToGroup"):
+    group = rel.RelatingGroup
+    if group.is_a("IfcGroup") and group.ObjectType == "DRAWING" and group.Name == drawing_name:
+        for obj in rel.RelatedObjects:
+            if obj.is_a("IfcAnnotation") and obj.id() != drawing.id():
+                annotations.append(obj)
+```
+
+**Proiezione coordinate:** la geometria 3D delle annotazioni viene proiettata in 2D moltiplicando per la matrice inversa della camera (`cam_inv_np`).
+
+#### D1 — DIMENSION ✓ implementato
+
+Sorgente geometria: `IfcGeometricCurveSet` → `IfcIndexedPolyCurve` → `IfcCartesianPointList2D`. I due endpoint della linea di quota vengono proiettati e scritti come entità DXF `DIMENSION` con `distance=0` (Bonsai salva direttamente gli endpoint della linea di quota, non l'oggetto misurato + offset).
+
+```python
+dim = msp.add_aligned_dim(p1=p0, p2=p1, distance=0,
+    text=text, dimstyle="BONSAI_DIM",
+    dxfattribs={"layer": "IfcAnnotation_Dimension"})
+dim.render()
+```
+
+Dimstyle `BONSAI_DIM`: tick obliqui (`dimtsz > 0`, standard europeo/italiano). Tutti i parametri (altezza testo, tick, gap) calcolati in model-space: `paper_mm * 0.001 / scale_factor`.
+
+#### D2 — TEXT ✓ implementato
+
+Testo MTEXT con altezze matchate agli stili CSS di Bonsai:
+
+| Stile CSS | Altezza paper (mm) | Model-space (m) a 1:100 |
+|---|---|---|
+| `title` | 7.0 | 0.70 |
+| `header` | 5.0 | 0.50 |
+| `large` | 3.5 | 0.35 |
+| `regular` | 2.5 | 0.25 |
+| `small` | 1.8 | 0.18 |
+
+Formula: `txt_height = paper_mm * 0.001 / scale_factor`
+
+Allineamento: mappato da CSS box-align (`top-left`, `center`, ecc.) al codice `attachment_point` MTEXT (1–9).
+
+#### D3 — Altri tipi ✗ future work
+
+Simboli, retini, marker SVG di Bonsai.
 
 ---
 
@@ -186,13 +241,13 @@ Annotazioni 2D: quote, testi, simboli. Modulo `annotations` separato.
 | Hatch muri (Bucket B) | `<Classe>_Hatches` | `IfcWall_Hatches` |
 | Geometria nei BLOCK | `"0"` con BYBLOCK | `0` (colore/linetype/lw dall'INSERT) |
 
-Stili per layer configurabili in `layer_styles.json` (color ACI, lineweight mm, linetype).
+Stili per layer definiti in `ifc_dxf_template.dxf` (color ACI, lineweight mm, linetype).
 
 ---
 
 ## Entità DXF prodotte
 
-`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `HATCH` (solid fill).
+`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `HATCH` (solid fill), `DIMENSION`, `MTEXT`.
 
 ---
 
@@ -219,10 +274,12 @@ ifc_dxf non itera autonomamente tutti gli elementi IFC. Legge la lista filtrata 
 1. **Estensione B-Approximate**: aggiungere `IfcSlab`, `IfcColumn`, `IfcStairFlight` al path Shapely.
 2. **B-Accurate (OCC/HLR)**: linework preciso via ifcopenshell geom serializer.
 3. **Bucket C**: wireframe fallback dal Body 3D.
-4. **Bucket D**: annotazioni (quote, testi, simboli).
-5. **PR upstream Bonsai**: fix esportazione archi porta come `IfcCircle` invece di `IfcEllipse`.
-6. **Test data**: file IFC ridotto in `test_data/` per test riproducibili senza Dropbox.
-7. **Section view / Elevation**: logica camera non-zenitale.
+4. **Bucket D - altri tipi**: simboli, marker, retini (D1 DIMENSION e D2 TEXT già implementati).
+5. **Mirror operator.py**: le funzioni annotation di `test_ifc_dxf.py` vanno portate nell'operatore Blender.
+6. **PR upstream ezdxf**: aggiungere `SCALE`/`AcDbScale` come entity type nativo (group codes 300/140/141/290). Workaround attivo con `type()` hack.
+7. **PR upstream Bonsai**: fix esportazione archi porta come `IfcCircle` invece di `IfcEllipse`.
+8. **Test data**: file IFC ridotto in `test_data/` per test riproducibili senza Dropbox.
+9. **Section view / Elevation**: logica camera non-zenitale.
 
 ---
 

@@ -102,6 +102,41 @@ def _setup_layers(doc):
             pass
 
 
+def _setup_text_styles(doc):
+    """DXF TEXTSTYLE entries matching Bonsai's CSS text classes.
+
+    Font priority mirrors the SVG CSS: OpenGost Type B TT (if installed),
+    else the CAD application substitutes with its nearest match.
+    Height = 0 means the height is set per-entity (standard practice).
+
+    Sizes (paper mm → model-space metres at 1:100):
+        title=7mm, header=5mm, large=3.5mm, regular=2.5mm, small/DIMENSION=1.8mm
+    """
+    # DejaVu Sans Condensed: open source, pre-installed on most Linux distros,
+    # included in many Windows/macOS setups (e.g. via LibreOffice/Blender).
+    # Condensed and clean — second fallback in Bonsai's own SVG CSS.
+    font = "DejaVuSansCondensed.ttf"
+
+    # Paper-space heights in metres (2.5mm → 0.0025m), same as Bonsai CSS.
+    # Non-zero height = annotative paper-space height; CAD scales automatically.
+    _STYLES = [
+        ("title",     0.0070),
+        ("header",    0.0050),
+        ("large",     0.0035),
+        ("regular",   0.0025),
+        ("small",     0.0018),
+        ("DIMENSION", 0.0018),
+        ("GRID",      0.0035),
+    ]
+    for name, paper_h in _STYLES:
+        if name not in doc.styles:
+            doc.styles.new(name, dxfattribs={"font": font, "height": paper_h})
+        else:
+            style = doc.styles.get(name)
+            style.dxf.font = font
+            style.dxf.height = paper_h
+
+
 def _setup_dimstyle(doc, scale_factor=0.01):
     """BONSAI_DIM: oblique tick markers, sizes fixed in paper space (mm).
 
@@ -176,6 +211,7 @@ def _setup_a1_layout(doc, scale_factor=0.01):
     if vps:
         vp = vps[0]
         vp.dxf.view_height = view_height_m
+        vp.dxf.layer = "0"
         # Center on model-space origin (the camera-projected drawing is at 0,0).
         try:
             vp.dxf.view_center_point = (0.0, 0.0)
@@ -202,15 +238,17 @@ def main():
     doc.header["$LTSCALE"]     = 0.01  # default 1:100
 
     _setup_layers(doc)
+    _setup_text_styles(doc)
     _setup_dimstyle(doc, scale_factor=0.01)
     _setup_a1_layout(doc, scale_factor=0.01)
 
     doc.saveas(TEMPLATE_OUT)
 
     print(f"Template: {TEMPLATE_OUT}")
-    print(f"  Layers   : {len(LAYERS)}  (+default '0')")
-    print(f"  Dimstyle : BONSAI_DIM  (1:100 defaults, recalculated at export)")
-    print(f"  Layout   : A1 Planimetria  (841 × 594 mm, 1:100 viewport)")
+    print(f"  Layers     : {len(LAYERS)}  (+default '0')")
+    print(f"  TextStyles : title, header, large, regular, small, DIMENSION, GRID  (DejaVu Sans Condensed)")
+    print(f"  Dimstyle   : BONSAI_DIM  (1:100 defaults, recalculated at export)")
+    print(f"  Layout     : A1 Planimetria  (841 x 594 mm, 1:100 viewport)")
 
 
 if __name__ == "__main__":
