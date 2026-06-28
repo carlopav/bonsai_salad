@@ -9,3 +9,5 @@ dist/
 pianta_test*.dxf
 pianta_test*.pdf
 pianta_test*.png
+*.bak
+.pytest_cache/
