@@ -23,7 +23,7 @@ import ezdxf
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _FILES_DIR = os.path.join(os.path.dirname(__file__), "files")
 _OUT_DIR = os.path.join(_REPO_ROOT, "output", "test_runs")
-_TEMPLATE_PATH = os.path.join(_REPO_ROOT, "ifc_dxf_template_metric.dxf")
+_TEMPLATE_PATH = os.path.join(_REPO_ROOT, "ifc_dxf", "templates", "ifc_dxf_template_metric.dxf")
 
 from ifc_dxf.core.ifc_query import find_drawings
 from ifc_dxf.core.writer import export_drawing

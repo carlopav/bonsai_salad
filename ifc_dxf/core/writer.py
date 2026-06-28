@@ -372,9 +372,9 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     print(f"  TargetView : {target_view}   Scale: {human_scale}   WallMode: {wall_mode}")
 
     if template_path is None:
-        # Try to find template alongside the ifc_dxf package
+        # Try to find template in ifc_dxf/templates/
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        template_path = os.path.join(pkg_dir, "ifc_dxf_template_metric.dxf")
+        template_path = os.path.join(pkg_dir, "templates", "ifc_dxf_template_metric.dxf")
     if os.path.isfile(template_path):
         print(f"  Template   : {os.path.basename(template_path)}")
     else:
