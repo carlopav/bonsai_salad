@@ -89,7 +89,12 @@ Riprodurre la struttura IFC nelle entità DXF nel modo più fedele possibile:
 
 ### Template DXF
 
-Il file `ifc_dxf_template.dxf` (generato da `create_dxf_template.py`) contiene layer, dimstyle `BONSAI_DIM` e layout A1. All'export viene letto con `ezdxf.readfile()` e il modelspace viene svuotato (`msp.delete_all_entities()`), mantenendo tutti gli stili.
+Il file `ifc_dxf_template_metric.dxf` (mantenuto manualmente in BricsCAD) contiene:
+- layer, stili di testo annotative (title/header/large/regular/small/DIMENSION/GRID), dimstyle `dimensions_metric_m` (con frecciaquota e font dedicato)
+- layout A1 con viewport 1:100, cartiglio con campi `{{Identification}}`, `{{Name}}`, `{{scale}}`, `{{date}}`
+- scala di annotazione nel viewport impostata su 1:100 (handle nel XREC `ASDK_XREC_ANNOTATION_SCALE_INFO`)
+
+All'export: `ezdxf.readfile()` + `msp.delete_all_entities()` per svuotare il modelspace. `_fill_cartiglio()` compila i placeholder del cartiglio, aggiorna `view_height` e `view_center_point` del viewport in base alla scala, e aggiorna il XREC della scala di annotazione.
 
 ### Scala di annotazione
 
@@ -201,16 +206,16 @@ Sorgente geometria: `IfcGeometricCurveSet` → `IfcIndexedPolyCurve` → `IfcCar
 
 ```python
 dim = msp.add_aligned_dim(p1=p0, p2=p1, distance=0,
-    text=text, dimstyle="BONSAI_DIM",
+    text=text, dimstyle="dimensions_metric_m",
     dxfattribs={"layer": "IfcAnnotation_Dimension"})
 dim.render()
 ```
 
-Dimstyle `BONSAI_DIM`: tick obliqui (`dimtsz > 0`, standard europeo/italiano). Tutti i parametri (altezza testo, tick, gap) calcolati in model-space: `paper_mm * 0.001 / scale_factor`.
+Dimstyle `dimensions_metric_m` (dal template): frecciaquota, font dedicato, `dimscale=1` forzato all'export per rendering ezdxf corretto. Parametri dimensionali (altezza testo, ext lines, gap) aggiornati in base alla scala: `paper_mm * 0.001 / scale_factor`. Fallback `BONSAI_DIM` (tick obliqui) se il template non è disponibile.
 
 #### D2 — TEXT ✓ implementato
 
-Testo MTEXT con altezze matchate agli stili CSS di Bonsai:
+Entità DXF `TEXT` (non MTEXT) con altezze matchate agli stili CSS di Bonsai:
 
 | Stile CSS | Altezza paper (mm) | Model-space (m) a 1:100 |
 |---|---|---|
@@ -241,13 +246,13 @@ Simboli, retini, marker SVG di Bonsai.
 | Hatch muri (Bucket B) | `<Classe>_Hatches` | `IfcWall_Hatches` |
 | Geometria nei BLOCK | `"0"` con BYBLOCK | `0` (colore/linetype/lw dall'INSERT) |
 
-Stili per layer definiti in `ifc_dxf_template.dxf` (color ACI, lineweight mm, linetype).
+Stili per layer definiti in `ifc_dxf_template_metric.dxf` (color ACI, lineweight mm, linetype).
 
 ---
 
 ## Entità DXF prodotte
 
-`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `HATCH` (solid fill), `DIMENSION`, `MTEXT`.
+`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `HATCH` (solid fill), `DIMENSION`, `TEXT`.
 
 ---
 
