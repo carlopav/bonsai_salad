@@ -12,7 +12,7 @@ class_register, class_unregister = bpy.utils.register_classes_factory(classes)
 
 
 def get_template_path() -> str | None:
-    """Return the absolute path to ifc_dxf_template.dxf.
+    """Return the absolute path to ifc_dxf_template_metric.dxf.
 
     The template lives next to bonsai_salad/__init__.py, one level above this
     file (bonsai_salad/ifc_dxf/__init__.py).  This works for both a Blender
@@ -20,7 +20,7 @@ def get_template_path() -> str | None:
     """
     candidate = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "ifc_dxf_template.dxf",
+        "ifc_dxf_template_metric.dxf",
     )
     return candidate if os.path.isfile(candidate) else None
 

@@ -1394,7 +1394,7 @@ class SelectDxfTemplateOperator(bpy.types.Operator):
 class IfcDxfProperties(bpy.types.PropertyGroup):
     template_path: bpy.props.StringProperty(
         name="DXF Template",
-        description="Path to the ifc_dxf_template.dxf used as base for exports",
+        description="Path to the ifc_dxf_template_metric.dxf used as base for exports",
         subtype="FILE_PATH",
         default="",
     )

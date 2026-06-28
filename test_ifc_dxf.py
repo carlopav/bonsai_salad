@@ -1387,40 +1387,52 @@ def _annotation_polylines_2d(ann, cam_inv_np):
     return polylines
 
 
+_DIM_STYLE_NAME = "dimensions_metric_m"
+_DIM_STYLE_FALLBACK = "BONSAI_DIM"
+
+
 def _ensure_dim_style(doc, scale_factor):
-    """Create or update BONSAI_DIM DIMSTYLE.
+    """Create or update the dimension style, returning its name.
 
-    All sizes are in model-space units, fixed in paper space:
-      text  2.5 mm paper  →  2.5e-3 / scale_factor  model-units
-      tick  2.0 mm paper  →  2.0e-3 / scale_factor  model-units
+    Uses 'dimensions_metric_m' from the template when available (preserving
+    its arrow block, font and other appearance attrs); falls back to creating
+    'BONSAI_DIM' with oblique ticks when the template is absent.
 
-    dimtsz > 0 activates oblique tick markers (the standard European/Italian
-    diagonal slash) instead of arrows.
+    Only scale-dependent size attrs are updated so that template settings
+    (frecciaquota block, Quote text style, etc.) are left intact.
+    dimscale is forced to 1 so ezdxf renders geometry at the correct size.
     """
-    text_h   = 0.0025 / scale_factor
-    tick_sz  = 0.0020 / scale_factor
-    ext_ext  = 0.0015 / scale_factor   # extension line overshoot past dim line
-    ext_off  = 0.0005 / scale_factor   # gap between defpoint and ext line start
-    gap      = text_h * 0.4            # gap between text and dim line
+    text_h  = 0.0025 / scale_factor
+    ext_ext = 0.0015 / scale_factor
+    ext_off = 0.0005 / scale_factor
+    gap     = text_h * 0.4
 
+    if _DIM_STYLE_NAME in doc.dimstyles:
+        style = doc.dimstyles.get(_DIM_STYLE_NAME)
+        style.dxf.set("dimtxt",   text_h)
+        style.dxf.set("dimexe",   ext_ext)
+        style.dxf.set("dimexo",   ext_off)
+        style.dxf.set("dimgap",   gap)
+        style.dxf.set("dimscale", 1)   # explicit — ezdxf can't render annotative (0)
+        style.dxf.set("dimtih",   0)
+        style.dxf.set("dimtad",   1)
+        return _DIM_STYLE_NAME
+
+    # fallback: create BONSAI_DIM with oblique ticks
+    tick_sz = 0.0020 / scale_factor
     attrs = {
-        "dimtxt": text_h,
-        "dimtsz": tick_sz,   # > 0 → oblique tick, not arrow
-        "dimexe": ext_ext,
-        "dimexo": ext_off,
-        "dimgap": gap,
-        "dimtih": 0,         # text follows dim-line angle (not forced horizontal)
-        "dimtad": 1,         # text above dim line
-        "dimclrd": 256,      # BYLAYER
-        "dimclrt": 256,
-        "dimclre": 256,
+        "dimtxt": text_h, "dimtsz": tick_sz,
+        "dimexe": ext_ext, "dimexo": ext_off, "dimgap": gap,
+        "dimtih": 0, "dimtad": 1,
+        "dimclrd": 256, "dimclrt": 256, "dimclre": 256,
     }
-    if "BONSAI_DIM" not in doc.dimstyles:
-        doc.dimstyles.new("BONSAI_DIM", dxfattribs=attrs)
+    if _DIM_STYLE_FALLBACK not in doc.dimstyles:
+        doc.dimstyles.new(_DIM_STYLE_FALLBACK, dxfattribs=attrs)
     else:
-        style = doc.dimstyles.get("BONSAI_DIM")
+        style = doc.dimstyles.get(_DIM_STYLE_FALLBACK)
         for k, v in attrs.items():
             style.dxf.set(k, v)
+    return _DIM_STYLE_FALLBACK
 
 
 def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor):
@@ -1437,7 +1449,7 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
     from the point distance unless overridden by BBIM_Dimension pset.
     """
     _DIM_LAYER = "IfcAnnotation_Dimension"
-    _ensure_dim_style(doc, scale_factor)
+    dim_style_name = _ensure_dim_style(doc, scale_factor)
 
     for ann in annotations:
         if getattr(ann, "ObjectType", None) != "DIMENSION":
@@ -1472,7 +1484,7 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                     p2=p1,
                     distance=0,
                     text=text,
-                    dimstyle="BONSAI_DIM",
+                    dimstyle=dim_style_name,
                     dxfattribs={"layer": _DIM_LAYER},
                 )
                 dim.render()
@@ -1776,10 +1788,79 @@ def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0
 
 # ── DXF writer ────────────────────────────────────────────────────────────────
 
+def _fill_cartiglio(doc, scale_factor, scale_handle=None,
+                    drawing_name=None, drawing_identification=None,
+                    drawing_scale=None):
+    """Fill cartiglio placeholders in all paper-space layouts.
+
+    Replaces {{scale}}, {{date}}, {{Name}}, {{Identification}} in TEXT/MTEXT.
+    Updates the drawing viewport: view_height, center, and annotation scale
+    (ASDK_XREC_ANNOTATION_SCALE_INFO extension-dict XREC → code 340 handle).
+
+    The template is assumed to have been created at 1:100 (scale_factor=0.01).
+    view_height scales proportionally for other ratios.
+    """
+    import datetime
+    from ezdxf.lldxf.types import DXFTag
+
+    date_str  = datetime.date.today().strftime("%d.%m.%Y")
+    scale_str = drawing_scale or f"1:{int(round(1.0 / scale_factor))}"
+    name_str  = drawing_name or ""
+    ident_str = drawing_identification or ""
+
+    for layout_name in doc.layouts.names():
+        if layout_name == "Model":
+            continue
+        layout = doc.layouts.get(layout_name)
+
+        # ── viewport: update the model-space drawing viewport (view_height > 1) ──
+        for vp in layout.viewports():
+            if vp.dxf.view_height <= 1.0:
+                continue  # paper-layout sentinel viewport — leave untouched
+            # Scale proportionally from the template's 1:100 baseline
+            new_h = vp.dxf.view_height * (0.01 / scale_factor)
+            vp.dxf.view_height = new_h
+            try:
+                vp.dxf.view_center_point = (0.0, 0.0)
+            except Exception:
+                pass
+            # Update the annotation scale XREC in the viewport extension dict
+            if scale_handle and vp.has_extension_dict:
+                try:
+                    ext_dict = vp.get_extension_dict()
+                    d = ext_dict.dictionary
+                    xrec_name = "ASDK_XREC_ANNOTATION_SCALE_INFO"
+                    if xrec_name in d:
+                        xrec = d[xrec_name]
+                        for i, tag in enumerate(xrec.tags):
+                            if tag.code == 340:
+                                xrec.tags[i] = DXFTag(340, scale_handle)
+                                break
+                except Exception:
+                    pass
+
+        # ── text placeholders ─────────────────────────────────────────────────
+        for e in layout:
+            t = e.dxftype()
+            if t == "TEXT":
+                txt = e.dxf.get("text", "")
+                txt = txt.replace("{{scale}}", scale_str)
+                txt = txt.replace("{{date}}", date_str)
+                e.dxf.text = txt
+            elif t == "MTEXT":
+                # raw MTEXT stores literal braces as \{ \}
+                raw = e.text
+                raw = raw.replace(r"\{\{Name\}\}", name_str)
+                raw = raw.replace(r"\{\{Identification\}\}", ident_str)
+                e.text = raw
+
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key,
                annotations=None, cam_inv_np=None,
-               template_path=None, scale_factor=0.01):
+               template_path=None, scale_factor=0.01,
+               drawing_name=None, drawing_identification=None,
+               drawing_scale=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -1813,15 +1894,23 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         msp = doc.modelspace()
         msp.delete_all_entities()
         _resolve_text_font(doc)
+        doc.header["$LTSCALE"] = float(scale_factor)
+        scale_handles = _populate_scale_list(doc, scale_factor)
+        denom = int(round(1.0 / scale_factor))
+        current_scale_handle = scale_handles.get(f"1:{denom}")
+        _fill_cartiglio(doc, scale_factor,
+                        scale_handle=current_scale_handle,
+                        drawing_name=drawing_name,
+                        drawing_identification=drawing_identification,
+                        drawing_scale=drawing_scale)
     else:
         doc = ezdxf.new("R2010")
         doc.units = units.M
         msp = doc.modelspace()
-
-    doc.header["$LTSCALE"] = float(scale_factor)
-    scale_handles = _populate_scale_list(doc, scale_factor)
-    denom = int(round(1.0 / scale_factor))
-    current_scale_handle = scale_handles.get(f"1:{denom}")
+        doc.header["$LTSCALE"] = float(scale_factor)
+        scale_handles = _populate_scale_list(doc, scale_factor)
+        denom = int(round(1.0 / scale_factor))
+        current_scale_handle = scale_handles.get(f"1:{denom}")
 
     # ── block definitions + inserts ──────────────────────────────────────────
     for block_name in block_order:
@@ -2064,7 +2153,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     print(f"  TargetView : {target_view}   Scale: {human_scale}   WallMode: {wall_mode}")
 
     if template_path is None:
-        template_path = os.path.join(SCRIPT_DIR, "ifc_dxf_template.dxf")
+        template_path = os.path.join(SCRIPT_DIR, "ifc_dxf_template_metric.dxf")
     if os.path.isfile(template_path):
         print(f"  Template   : {os.path.basename(template_path)}")
     else:
@@ -2277,7 +2366,10 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key,
                annotations=annotations, cam_inv_np=_cam_inv_np,
-               template_path=template_path, scale_factor=scale_factor)
+               template_path=template_path, scale_factor=scale_factor,
+               drawing_name=getattr(drawing, "Name", None),
+               drawing_identification=getattr(drawing, "Identification", None),
+               drawing_scale=human_scale)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")
