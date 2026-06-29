@@ -12,15 +12,18 @@ import bpy
 from . import panels
 from . import sheets_to_pdf
 from . import ifc_dxf
+from . import dxf_ifc
 
 
 def register():
     sheets_to_pdf.register()
     ifc_dxf.register()
+    dxf_ifc.register()
     panels.register()
 
 
 def unregister():
     panels.unregister()
+    dxf_ifc.unregister()
     ifc_dxf.unregister()
     sheets_to_pdf.unregister()
