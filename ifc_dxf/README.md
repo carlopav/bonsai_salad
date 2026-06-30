@@ -169,6 +169,8 @@ Used for elements with `IfcExtrudedAreaSolid` and an extractable 2D profile.
 - `IfcWall_View`: elements seen below the cut plane → thin line, no hatch
 - `IfcWall_Hatches`: solid fill of sectioned areas
 
+**Boolean unwrapping:** `IfcBooleanResult` chains (one level per opening subtracted from the body) are unwrapped up to `BOOLEAN_UNWRAP_DEPTH_LIMIT` (default 64) levels to reach the base `IfcExtrudedAreaSolid`. A wall with more openings than the limit is silently skipped to Bucket C. *(Previous hard-coded limit was 8; bumped to 64 after finding a real-world wall with 9 nested booleans that was silently dropped.)*
+
 **Note:** B-Approximate requires a well-built IFC model. Does not handle BRep, complex booleans, or non-vertical walls.
 
 #### B-Accurate — OCC/HLR ✗ future work
@@ -285,6 +287,10 @@ In Blender (via operator), ifc_dxf reads the filtered element list from Bonsai v
 6. **Upstream PR Bonsai**: fix door arc export as `IfcCircle` instead of `IfcEllipse`.
 7. **Section view / Elevation**: non-zenithal camera logic.
 8. **More IFC test fixtures**: `test_ifc_02` through `test_ifc_05` covering rotated walls, overhead elements, text annotations, section view, different scales.
+9. **Report deep boolean chains**: during export, warn when an element's `IfcBooleanResult` chain depth exceeds a threshold, so users know to simplify geometry before exporting (B-Approximate silently drops such elements to Bucket C).
+10. **frustum culling AABB fallback**: `element_in_frustum` currently tests only the `ObjectPlacement` origin. Walls/beams/slabs whose origin is at one end may be incorrectly culled when the body extends into the view. Fix: fall back to a full geometry AABB intersection (`ifcopenshell.geom`) when the origin test fails.
+11. **Material-agnostic wall fusion option**: add an export flag to merge all `IfcWall_Section` polygons in a single `unary_union` regardless of material, useful when material assignments are inconsistent across the model.
+12. **Per-layer fusion for `IfcMaterialLayerSet` walls**: decompose each wall polygon into per-layer strips using the layer thicknesses from `IfcMaterialLayerSet`, then key fusion groups by individual layer material. Concrete strips fuse with concrete, plaster with plaster, etc.
 
 ---
 
