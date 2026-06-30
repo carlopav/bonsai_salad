@@ -18,6 +18,12 @@ except ImportError:
 
 from .camera import world_matrix_col_major
 
+# Maximum nesting depth when unwrapping IfcBooleanResult chains to reach the
+# base IfcExtrudedAreaSolid.  Each level typically corresponds to one opening
+# subtracted from the wall body.  Real-world walls rarely exceed ~20; 64 gives
+# ample headroom while guarding against corrupt/circular data.
+BOOLEAN_UNWRAP_DEPTH_LIMIT = 64
+
 
 # ---------------------------------------------------------------------------
 # IFC curve extraction helpers
@@ -671,7 +677,7 @@ def _extruded_plan_polygon(item, wm_flat, cam_inv_col_major, camera_dir):
     while item.is_a("IfcBooleanClippingResult") or item.is_a("IfcBooleanResult"):
         item = item.FirstOperand
         depth += 1
-        if depth > 8:
+        if depth > BOOLEAN_UNWRAP_DEPTH_LIMIT:
             return None
 
     if not item.is_a("IfcExtrudedAreaSolid"):
@@ -757,7 +763,7 @@ def _wall_z_range(element, wm_flat):
                    cur.is_a("IfcBooleanResult")):
                 cur = cur.FirstOperand
                 depth += 1
-                if depth > 8:
+                if depth > BOOLEAN_UNWRAP_DEPTH_LIMIT:
                     break
             if not cur.is_a("IfcExtrudedAreaSolid"):
                 continue
@@ -852,7 +858,7 @@ def _slab_footprint_world(elem, wm_flat):
                    cur.is_a("IfcBooleanResult")):
                 cur = cur.FirstOperand
                 depth += 1
-                if depth > 8:
+                if depth > BOOLEAN_UNWRAP_DEPTH_LIMIT:
                     break
             if not cur.is_a("IfcExtrudedAreaSolid"):
                 continue
