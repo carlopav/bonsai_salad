@@ -178,17 +178,21 @@ def get_elements(ifc, drawing, pset):
 def _get_drawing_annotations(ifc, drawing):
     """Return list of IfcAnnotation elements associated with a Bonsai drawing.
 
-    Bonsai links drawing annotations via IfcRelAssignsToGroup -> IfcGroup
-    (ObjectType='DRAWING', Name=drawing.Name).
+    Bonsai links all annotations for a drawing into an IfcGroup
+    (ObjectType='DRAWING') whose RelatedObjects include the drawing itself.
+    We match by GlobalId so the group Name need not equal the drawing Name.
     """
-    drawing_name = drawing.Name
+    drawing_guid = drawing.GlobalId
     result = []
     for rel in ifc.by_type("IfcRelAssignsToGroup"):
         group = rel.RelatingGroup
-        if (group.is_a("IfcGroup")
-                and getattr(group, "ObjectType", None) == "DRAWING"
-                and group.Name == drawing_name):
-            for obj in rel.RelatedObjects:
-                if obj.is_a("IfcAnnotation") and obj.id() != drawing.id():
-                    result.append(obj)
+        if not (group.is_a("IfcGroup")
+                and getattr(group, "ObjectType", None) == "DRAWING"):
+            continue
+        if not any(getattr(obj, "GlobalId", None) == drawing_guid
+                   for obj in rel.RelatedObjects):
+            continue
+        for obj in rel.RelatedObjects:
+            if obj.is_a("IfcAnnotation") and obj.id() != drawing.id():
+                result.append(obj)
     return result

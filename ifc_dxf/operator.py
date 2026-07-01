@@ -55,6 +55,22 @@ def _get_target_view(drawing):
         return "PLAN_VIEW"
 
 
+def _open_file(path):
+    """Open a file with the OS default application, cross-platform."""
+    import sys
+    import subprocess
+
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Blender operator classes
 # ---------------------------------------------------------------------------
@@ -76,6 +92,11 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         ],
         default="R2010",
     )
+    open_after_export: bpy.props.BoolProperty(
+        name="Open After Export",
+        description="Open the exported file with the system's default application",
+        default=False,
+    )
 
     @classmethod
     def poll(cls, context):
@@ -89,6 +110,11 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         )
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "dxf_version")
+        layout.prop(self, "open_after_export")
 
     def execute(self, context):
         ifc = _get_ifc()
@@ -139,6 +165,10 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported to {output_path}")
+
+        if self.open_after_export:
+            _open_file(output_path)
+
         return {"FINISHED"}
 
 

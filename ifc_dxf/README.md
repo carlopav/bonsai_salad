@@ -67,11 +67,14 @@ Reproduce the IFC structure in DXF entities as faithfully as possible:
 
 | IFC | DXF |
 |-----|-----|
-| IFC type (`IfcDoorType`, `IfcFurnitureType`, …) | A **BLOCK** (name = `GlobalId` of the type) |
-| IFC element instance | An **INSERT** |
-| Element with no shared type | BLOCK named with the element's `GlobalId` |
+| IFC type with 2D repr (`IfcDoorType`, `IfcFurnitureType`, …) | A shared **BLOCK** (name = `GlobalId` of the type) |
+| IFC element instance (type has 2D repr) | An **INSERT** |
+| Element with no shared type (doors, furniture without type) | Unique **BLOCK** + **INSERT**, name = `{IfcClass}_{GlobalId[:8]}` |
+| Flat floor element (`IfcSlab`, `IfcCovering`, `IfcRoof`) | Closed **LWPOLYLINE** in a **GROUP** (`fp_{GlobalId[:8]}`) |
 
 **Key rule:** always use the IFC `GlobalId` as the unique block identifier, not the `Name` field (which may be non-unique, e.g. "Unnamed" for multiple different types).
+
+**Shared block condition:** a shared type block is only used when `from_type=True` (the plan repr comes from the type's `RepresentationMaps` via `IfcMappedItem`) **and** `get_type_block_name` returns a non-`None` name. If the type has no 2D representation in its `RepresentationMaps`, the element falls through to the footprint or unique-block path.
 
 ### Placement Rules
 
@@ -133,11 +136,17 @@ For each IfcSlab / IfcCovering(FLOOR) with Z_top ≤ cut_z:
 - `IfcTrimmedCurve` (IfcEllipse, unequal axes) → `ELLIPSE`
 - `IfcCircle` → `CIRCLE`
 
+**Tessellated meshes (`IfcPolygonalFaceSet`):** when the geom engine returns a mesh (faces non-empty), only *crease edges* are kept — naked edges (belonging to exactly one face) and shared edges whose dihedral angle exceeds `MESH_CREASE_ANGLE_DEG` (15°). This avoids flooding the plan view with every interior triangle edge, relevant for terrain (`IfcGeographicElement[TERRAIN]`) represented as a dense mesh.
+
 **Bonsai bug note:** door opening arcs are exported as `IfcEllipse` instead of `IfcCircle`. Active workaround (`_trimmed_ellipse_spec`). To be reported as an upstream PR.
 
 **IFC fidelity principle:** maximum adherence to geometry as described in IFC. Separate arcs are never merged even if contiguous — two `IfcTrimmedCurve` → two `DXF ARC`.
 
-**Output:** BLOCK + INSERT (one per type/element, multiple INSERTs for instances).
+**Output — three paths depending on geometry source:**
+
+1. **Shared BLOCK + INSERT** — element uses a type with a 2D `RepresentationMaps` (`from_type=True`). Block geometry in type's local coordinates; multiple instances share one BLOCK definition.
+2. **Footprint LWPOLYLINE + GROUP** — `IfcSlab`, `IfcCovering`, `IfcRoof` without a shared type block. The `IfcExtrudedAreaSolid` profile is extracted, projected to drawing space, and written as a closed `LWPOLYLINE`. Each element gets its own named GROUP (`fp_{GlobalId[:8]}`). Interior rings (holes) produce additional LWPOLYLINEs in the same GROUP. Scoped to these classes specifically to avoid capturing the `Body` solid of doors/windows that also contain `IfcExtrudedAreaSolid`.
+3. **Unique BLOCK + INSERT** — all other elements with instance-specific geometry (`from_type=False` and not a footprint class): each gets a unique BLOCK named `{IfcClass}_{GlobalId[:8]}`. Preserves arcs and circles from the 2D plan symbol.
 
 **Limitation:** requires a geometrically correct IFC model with proper Z coordinates. Without OCC, partial occlusion (e.g. a chair partly covered by a slab) is not handled — the element is shown fully or excluded fully.
 
@@ -192,13 +201,20 @@ Elements in Bucket C are currently logged but not drawn. Future: wireframe from 
 2D annotations extracted from the `IfcRelAssignsToGroup` → `IfcGroup(ObjectType='DRAWING')` group with the same name as the active drawing. Child annotations (`IfcAnnotation`) are classified by type and written as native DXF entities.
 
 **How to find the annotations for a drawing:**
+
+Match by the drawing's `GlobalId` in `RelatedObjects`, not by `Name`. The drawing `IfcAnnotation` is itself a member of the group, alongside its child annotations. The group `Name` may differ from the drawing `Name` (e.g. drawing `"01 PIANO TERRA ARCHITETTURA"` → group `"01 PIANO TERRA PLAN"`).
+
 ```python
+drawing_guid = drawing.GlobalId
 for rel in ifc.by_type("IfcRelAssignsToGroup"):
     group = rel.RelatingGroup
-    if group.is_a("IfcGroup") and group.ObjectType == "DRAWING" and group.Name == drawing_name:
-        for obj in rel.RelatedObjects:
-            if obj.is_a("IfcAnnotation") and obj.id() != drawing.id():
-                annotations.append(obj)
+    if not (group.is_a("IfcGroup") and getattr(group, "ObjectType", None) == "DRAWING"):
+        continue
+    if not any(getattr(obj, "GlobalId", None) == drawing_guid for obj in rel.RelatedObjects):
+        continue
+    for obj in rel.RelatedObjects:
+        if obj.is_a("IfcAnnotation") and obj.id() != drawing.id():
+            annotations.append(obj)
 ```
 
 **Coordinate projection:** the 3D geometry of annotations is projected to 2D by multiplying by the camera inverse matrix (`cam_inv_np`).
@@ -214,7 +230,9 @@ dim = msp.add_aligned_dim(p1=p0, p2=p1, distance=0,
 dim.render()
 ```
 
-Dimstyle `dimensions_metric_m` (from template): dimension arrows, dedicated font, `dimscale=1` forced at export for correct ezdxf rendering. Dimensional parameters (text height, extension lines, gap) updated based on scale: `paper_mm * 0.001 / scale_factor`. Fallback `BONSAI_DIM` (oblique ticks) if the template is not available.
+Dimstyle `dimensions_metric_m` (from template): dimension arrows, dedicated font. Dimensional parameters (text height, extension lines, gap) set in paper-space units (metres): `paper_mm * 0.001`. `dimscale = 1 / scale_factor` (e.g. 100 for 1:100) so that paper-space sizes render correctly in model space. Fallback `BONSAI_DIM` (oblique ticks) if the template is not available.
+
+**Annotative flag:** each `DIMENSION` entity receives `AcadAnnotative` XDATA so that BricsCAD/AutoCAD treat it as an annotative object. Without this flag the dimension is visible only when the annotation scale matches, and appears tiny at fixed model-space size otherwise.
 
 #### D2 — TEXT ✓ implemented
 
@@ -279,7 +297,7 @@ In Blender (via operator), ifc_dxf reads the filtered element list from Bonsai v
 
 ## TODO / Roadmap
 
-1. **Extend B-Approximate**: add `IfcSlab`, `IfcColumn`, `IfcStairFlight` to the Shapely path.
+1. **Extend B-Approximate**: add `IfcColumn`, `IfcStairFlight` to the Shapely section path. (`IfcSlab` is now handled via the Bucket A footprint path — closed LWPOLYLINE from profile — rather than Bucket B.)
 2. **B-Accurate (OCC/HLR)**: precise linework via ifcopenshell geom serializer.
 3. **Bucket C**: wireframe fallback from the 3D Body.
 4. **Bucket D - other types**: symbols, markers, hatches (D1 DIMENSION and D2 TEXT already implemented).

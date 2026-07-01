@@ -21,6 +21,7 @@ from .camera import (
 )
 from .ifc_query import (
     find_plan_repr,
+    is_mapped_repr,
     get_type_block_name,
     get_material_name,
     get_elements,
@@ -33,6 +34,7 @@ from .geometry import (
     _extract_wall_polygon_with_openings,
     _compute_floor_slabs,
     _is_occluded_by_slab,
+    _slab_footprint_world,
 )
 from .dxf_template import (
     _project_local_to_lines,
@@ -181,7 +183,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                annotations=None, cam_inv_np=None,
                template_path=None, scale_factor=0.01,
                drawing_name=None, drawing_identification=None,
-               drawing_scale=None):
+               drawing_scale=None, footprint_polys=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -316,6 +318,14 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 msp.add_lwpolyline(hole,
                                    dxfattribs={"closed": True, "layer": outline_layer})
 
+    # Footprint polygons: closed LWPOLYLINE entities grouped per element
+    if footprint_polys:
+        for gid, layer, exterior, holes in footprint_polys:
+            entities = [msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": layer})]
+            for hole in holes:
+                entities.append(msp.add_lwpolyline(hole, dxfattribs={"closed": True, "layer": layer}))
+            doc.groups.new(f"fp_{gid[:8]}").extend(entities)
+
     # zoom extents
     xs, ys = [], []
     for _, _, _, geoms in wall_geom_groups:
@@ -326,6 +336,9 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     for inserts in block_inserts.values():
         for pos, _rot, _layer in inserts:
             xs.append(float(pos[0])); ys.append(float(pos[1]))
+    for _gid, _layer, exterior, _holes in (footprint_polys or []):
+        xs.extend(p[0] for p in exterior)
+        ys.extend(p[1] for p in exterior)
     if xs and ys:
         pad = max((max(xs) - min(xs)) * 0.05, (max(ys) - min(ys)) * 0.05, 0.5)
         xmin, xmax = min(xs) - pad, max(xs) + pad
@@ -396,6 +409,11 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     # Classes processed in Bucket B (section from 3D solid)
     _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
 
+    # Classes whose plan view is best represented as a 2D footprint polygon
+    # (closed LWPOLYLINE) rather than a BLOCK/INSERT. Scoped tightly to avoid
+    # accidentally capturing the Body IfcExtrudedAreaSolid of doors/windows.
+    _FOOTPRINT_CLASSES = frozenset({"IfcSlab", "IfcCovering", "IfcRoof"})
+
     cut_z = cam_pos[2]
     floor_slabs = _compute_floor_slabs(ifc, cut_z) if SHAPELY_AVAILABLE else []
     if floor_slabs:
@@ -431,6 +449,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     block_inserts = {}   # name -> [(pos_2d, rot_deg, layer), ...]
     flat_edges    = []   # [(p0, p1, layer)] -- wall_mode='flat' only
     wall_polys_by_key = {}  # (ifc_class, material, layer) -> [Polygon, ...]
+    footprint_polys = []  # [(gid, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
     seen_blocks   = {}
 
     bucket_a = bucket_b = bucket_c = 0
@@ -501,52 +520,90 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         placed    = False
 
         try:
-            ifc_type, block_name = get_type_block_name(element)
-            if block_name is None:
-                # No shared type: use "{IfcClass}_{GlobalId[:8]}" -- readable + unique
-                block_name  = f"{ifc_class}_{gid[:8]}"
-                block_gid   = gid
-            else:
-                block_gid   = ifc_type.GlobalId
+            # Step 1: shared type block when the plan geometry actually comes from the
+            # type. Two cases:
+            #   a) from_type=True: repr found in type's RepresentationMaps directly.
+            #   b) is_mapped_repr: element has its own Representation but all items are
+            #      IfcMappedItem delegating to the type (find_plan_repr returns
+            #      from_type=False in this case because element.Representation exists,
+            #      but the geometry is still shared from the type).
+            block_name = None
+            if rec.from_type or is_mapped_repr(rec.plan_repr):
+                ifc_type, block_name = get_type_block_name(element)
+                if block_name is not None:
+                    block_gid = ifc_type.GlobalId
 
-            if block_name not in seen_blocks:
-                verts, edges, arcs, circles, ellipses = _extract_local_curves(
-                    element, rec.plan_repr
-                )
-                if verts or edges or arcs or circles or ellipses:
-                    lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
-                    arcs_blk = [
-                        (float((_cam_R @ np.array([cx, cy, 0.]))[0]),
-                         float((_cam_R @ np.array([cx, cy, 0.]))[1]),
-                         r, (a_s + _cam_rot_deg) % 360, (a_e + _cam_rot_deg) % 360)
-                        for cx, cy, r, a_s, a_e in arcs
-                    ]
-                    circles_blk = [
-                        (float((_cam_R @ np.array([cx, cy, 0.]))[0]),
-                         float((_cam_R @ np.array([cx, cy, 0.]))[1]), r)
-                        for cx, cy, r in circles
-                    ]
-                    ellipses_blk = []
-                    for cx, cy, maj_x, maj_y, ratio, t1, t2 in ellipses:
-                        c   = _cam_R @ np.array([cx, cy, 0.0])
-                        maj = _cam_R @ np.array([maj_x, maj_y, 0.0])
-                        ellipses_blk.append((float(c[0]), float(c[1]),
-                                              float(maj[0]), float(maj[1]), ratio, t1, t2))
-                    block_defs[block_name] = {
-                        "ifc_class": ifc_class, "material": material,
-                        "lines": lines, "arcs": arcs_blk,
-                        "circles": circles_blk, "ellipses": ellipses_blk,
-                        "globalid": block_gid,
-                    }
-                    block_order.append(block_name)
-                    seen_blocks[block_name] = True
+            # Step 2: footprint LWPOLYLINE+GROUP — for _FOOTPRINT_CLASSES (slabs,
+            # coverings, roofs) without a shared type block. Scoped to these classes
+            # so that doors/windows (which also have IfcExtrudedAreaSolid in their
+            # Body repr) keep their 2D plan symbol with arcs.
+            if block_name is None and SHAPELY_AVAILABLE and ifc_class in _FOOTPRINT_CLASSES:
+                fpoly = _slab_footprint_world(element, wm)
+                if fpoly is not None:
+                    z_elem = float(wm[14])  # col-major index 14 = row2,col3 = world Z
+                    ext_pts = []
+                    for wx, wy in fpoly.exterior.coords[:-1]:
+                        cpt = _cam_inv_np @ np.array([wx, wy, z_elem, 1.0])
+                        ext_pts.append((float(cpt[0]), float(cpt[1])))
+                    hole_pts = []
+                    for ring in fpoly.interiors:
+                        hole = []
+                        for wx, wy in ring.coords[:-1]:
+                            cpt = _cam_inv_np @ np.array([wx, wy, z_elem, 1.0])
+                            hole.append((float(cpt[0]), float(cpt[1])))
+                        hole_pts.append(hole)
+                    if len(ext_pts) >= 3:
+                        footprint_polys.append((gid, rec.layer, ext_pts, hole_pts))
+                        bucket_a += 1
+                        bucket_a_classes[ifc_class] = bucket_a_classes.get(ifc_class, 0) + 1
+                        placed = True
 
-            if block_name in seen_blocks:
-                pos, rot = _compute_insert(wm, _cam_inv_np)
-                block_inserts.setdefault(block_name, []).append((pos, rot, rec.layer))
-                bucket_a += 1
-                bucket_a_classes[ifc_class] = bucket_a_classes.get(ifc_class, 0) + 1
-                placed = True
+            # Step 3: BLOCK/INSERT — shared type block (step 1) or unique per instance
+            # (all elements not placed above, including _FOOTPRINT_CLASSES when
+            # footprint extraction failed and non-footprint classes).
+            if not placed:
+                if block_name is None:
+                    block_name = f"{ifc_class}_{gid[:8]}"
+                    block_gid  = gid
+
+                if block_name not in seen_blocks:
+                    verts, edges, arcs, circles, ellipses = _extract_local_curves(
+                        element, rec.plan_repr
+                    )
+                    if verts or edges or arcs or circles or ellipses:
+                        lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
+                        arcs_blk = [
+                            (float((_cam_R @ np.array([cx, cy, 0.]))[0]),
+                             float((_cam_R @ np.array([cx, cy, 0.]))[1]),
+                             r, (a_s + _cam_rot_deg) % 360, (a_e + _cam_rot_deg) % 360)
+                            for cx, cy, r, a_s, a_e in arcs
+                        ]
+                        circles_blk = [
+                            (float((_cam_R @ np.array([cx, cy, 0.]))[0]),
+                             float((_cam_R @ np.array([cx, cy, 0.]))[1]), r)
+                            for cx, cy, r in circles
+                        ]
+                        ellipses_blk = []
+                        for cx, cy, maj_x, maj_y, ratio, t1, t2 in ellipses:
+                            c   = _cam_R @ np.array([cx, cy, 0.0])
+                            maj = _cam_R @ np.array([maj_x, maj_y, 0.0])
+                            ellipses_blk.append((float(c[0]), float(c[1]),
+                                                  float(maj[0]), float(maj[1]), ratio, t1, t2))
+                        block_defs[block_name] = {
+                            "ifc_class": ifc_class, "material": material,
+                            "lines": lines, "arcs": arcs_blk,
+                            "circles": circles_blk, "ellipses": ellipses_blk,
+                            "globalid": block_gid,
+                        }
+                        block_order.append(block_name)
+                        seen_blocks[block_name] = True
+
+                if block_name in seen_blocks:
+                    pos, rot = _compute_insert(wm, _cam_inv_np)
+                    block_inserts.setdefault(block_name, []).append((pos, rot, rec.layer))
+                    bucket_a += 1
+                    bucket_a_classes[ifc_class] = bucket_a_classes.get(ifc_class, 0) + 1
+                    placed = True
         except Exception:
             pass
 
@@ -582,13 +639,16 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
     t0 = time.perf_counter()
     scale_factor_val = _parse_scale_factor(pset.get("Scale", "")) or 0.01
+    if footprint_polys:
+        print(f"  Footprints : {len(footprint_polys)} LWPOLYLINE groups")
     _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key,
                annotations=annotations, cam_inv_np=_cam_inv_np,
                template_path=template_path, scale_factor=scale_factor_val,
                drawing_name=getattr(drawing, "Name", None),
                drawing_identification=getattr(drawing, "Identification", None),
-               drawing_scale=human_scale)
+               drawing_scale=human_scale,
+               footprint_polys=footprint_polys)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")

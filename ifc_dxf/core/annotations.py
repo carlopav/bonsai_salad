@@ -79,6 +79,27 @@ def _annotation_polylines_2d(ann, cam_inv_np):
     return polylines
 
 
+def _mark_dim_annotative(dim_entity, doc):
+    """Add AcadAnnotative XDATA to a DIMENSION entity.
+
+    This is the minimum flag BricsCAD/AutoCAD need to treat the entity as
+    annotative and display it at the correct paper size for the current scale.
+    """
+    from ezdxf.lldxf.types import DXFTag
+    try:
+        if "AcadAnnotative" not in doc.appids:
+            doc.appids.new("AcadAnnotative")
+        dim_entity.set_xdata("AcadAnnotative", [
+            DXFTag(1000, "AnnotativeData"),
+            DXFTag(1002, "{"),
+            DXFTag(1070, 1),
+            DXFTag(1070, 1),
+            DXFTag(1002, "}"),
+        ])
+    except Exception:
+        pass
+
+
 def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor):
     """Write DIMENSION annotations as native DXF DIMENSION entities.
 
@@ -132,6 +153,7 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                     dxfattribs={"layer": _DIM_LAYER},
                 )
                 dim.render()
+                _mark_dim_annotative(dim.dimension, doc)
 
 
 def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0.0):

@@ -302,31 +302,39 @@ def _ensure_dim_style(doc, scale_factor):
     its arrow block, font and other appearance attrs); falls back to creating
     'BONSAI_DIM' with oblique ticks when the template is absent.
 
-    Only scale-dependent size attrs are updated so that template settings
-    (frecciaquota block, Quote text style, etc.) are left intact.
-    dimscale is forced to 1 so ezdxf renders geometry at the correct size.
+    Size attributes are kept in paper-space metres (e.g. 0.0025 = 2.5 mm).
+    dimscale is set to 1/scale_factor (e.g. 100 for 1:100) so that ezdxf
+    multiplies them to the correct model-space sizes when rendering.
+    Dimension entities are individually marked as annotative (AcadAnnotative
+    XDATA) so BricsCAD/AutoCAD display them at the correct paper size.
     """
-    text_h  = 0.0025 / scale_factor
-    ext_ext = 0.0015 / scale_factor
-    ext_off = 0.0005 / scale_factor
+    dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
+
+    # Paper-space sizes (metres) -- dimscale multiplies these to model space.
+    text_h  = 0.0025
+    ext_ext = 0.0015
+    ext_off = 0.0005
     gap     = text_h * 0.4
+    arrow   = 0.0020
 
     if _DIM_STYLE_NAME in doc.dimstyles:
         style = doc.dimstyles.get(_DIM_STYLE_NAME)
         style.dxf.set("dimtxt",   text_h)
+        style.dxf.set("dimasz",   arrow)
         style.dxf.set("dimexe",   ext_ext)
         style.dxf.set("dimexo",   ext_off)
         style.dxf.set("dimgap",   gap)
-        style.dxf.set("dimscale", 1)   # explicit -- ezdxf can't render annotative (0)
+        style.dxf.set("dimscale", dim_scale)
         style.dxf.set("dimtih",   0)
         style.dxf.set("dimtad",   1)
         return _DIM_STYLE_NAME
 
     # fallback: create BONSAI_DIM with oblique ticks
-    tick_sz = 0.0020 / scale_factor
     attrs = {
-        "dimtxt": text_h, "dimtsz": tick_sz,
+        "dimtxt": text_h, "dimtsz": arrow,
+        "dimasz": arrow,
         "dimexe": ext_ext, "dimexo": ext_off, "dimgap": gap,
+        "dimscale": dim_scale,
         "dimtih": 0, "dimtad": 1,
         "dimclrd": 256, "dimclrt": 256, "dimclre": 256,
     }
