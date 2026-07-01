@@ -407,7 +407,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     print(f"  Elements   : {len(elements)}")
 
     # Classes processed in Bucket B (section from 3D solid)
-    _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase"})
+    _SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase", "IfcColumn"})
 
     # Classes whose plan view is best represented as a 2D footprint polygon
     # (closed LWPOLYLINE) rather than a BLOCK/INSERT. Scoped tightly to avoid

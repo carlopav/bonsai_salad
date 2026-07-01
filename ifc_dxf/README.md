@@ -91,24 +91,42 @@ The scale list (`ACAD_SCALELIST`) uses `SCALE`/`AcDbScale` entities (group codes
 ## Pipeline A — Approximate
 
 No OCC / HLR. Geometry quality depends on what the IFC file provides.
+Ifc semantics is taken into account to decide how to process elements.
 
 ---
 
-### Plan view
+### View specific rules for IfcElements
+
+#### Plan View
 
 The active drawing is an `IfcAnnotation` with `EPset_Drawing`. Its camera defines an orthographic frustum looking down at a horizontal cut plane at height `cut_z`. All geometry is projected to the drawing's 2D space via the camera inverse matrix.
+
+Custom Section or viewed: IfcWall IfcWallStandardCase, IfcColumn
+Only 2D representation: IfcWindow, IfcFurniture, IfcSanitaryTerminal.
+
+#### Sections
+To be implemented
+
+#### Elevations
+To be implemented
+
+#### Details
+To be implemented
+
+#### Schedules
+To be implemented
 
 ---
 
 ### Element selection according to the view limits
 
-**Input:** the element list from `tool.Drawing.get_drawing_elements()` (Blender/Bonsai) or from frustum Z-culling in standalone mode.
+**Input:** the element list from `tool.Drawing.get_drawing_elements()` (Blender/Bonsai) or from spatial culling in standalone mode (`get_elements` in `ifc_query.py`).
 
-**Frustum Z-culling:** elements whose `ObjectPlacement` origin falls outside the camera frustum in Z are excluded before bucket assignment.
+**Frustum 3D bbox culling:** a world-space bounding box `(x_min, x_max, y_min, y_max, z_min, z_max)` is derived from the camera body geometry (`IfcCsgSolid` / `IfcExtrudedAreaSolid`) transformed by the camera's `ObjectPlacement`. Each element's `ObjectPlacement` origin is tested against this box. Elements outside are excluded.
 
 **Known limitation:** `element_in_frustum` tests only the `ObjectPlacement` origin point. Elements whose origin is outside the frustum but whose body extends into view (e.g. a long wall starting outside) may be incorrectly excluded. A full AABB fallback is planned.
 
-**Overhead fill re-addition:** windows/doors filling openings entirely above `cut_z` (`z_min_opening > cut_z`) are excluded by frustum culling (`Z_max = cut_z`) but must appear as overhead elements. They are explicitly re-added to the element list after culling.
+**Overhead fill re-addition:** windows/doors that fill openings entirely above `cut_z` are excluded by frustum culling (`z_max = cut_z` for the camera box) but must appear as overhead elements. In `export_drawing`, before `classify_elements` is called, walls/columns are inspected for openings with `z_min_opening > cut_z`; any filling elements not already in the element list are re-added.
 
 ---
 
@@ -148,7 +166,7 @@ Annotations (`IfcAnnotation` children of the drawing group) are processed separa
 
 #### Bucket B — Section from 3D
 
-**Condition:** element class is in `_SECTION_CLASSES` (`IfcWall`, `IfcWallStandardCase`; future: `IfcColumn`, `IfcStairFlight`).
+**Condition:** element class is in `_SECTION_CLASSES` (`IfcWall`, `IfcWallStandardCase`, `IfcColumn`; future: `IfcStairFlight`).
 
 > `IfcSlab`/`IfcCovering`/`IfcRoof` use a footprint path in Bucket A, not Bucket B.
 
@@ -254,7 +272,7 @@ Placeholder. Goals and open questions to be established.
 ## TODO / Roadmap
 
 **Pipeline A:**
-1. Add `IfcColumn`, `IfcStairFlight` to Bucket B section path.
+1. Add `IfcStairFlight` to Bucket B section path.
 2. Report elements with deep boolean chains (> threshold) during export.
 3. Frustum culling AABB fallback: test full geometry bounding box when origin test fails.
 4. Material-agnostic wall fusion option (`unary_union` regardless of material).
