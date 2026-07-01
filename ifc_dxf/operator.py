@@ -102,12 +102,23 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
     def poll(cls, context):
         return _get_ifc() is not None and _get_active_drawing() is not None
 
+    def _default_filepath(self, drawing):
+        try:
+            ifc_path = bpy.context.scene.BIMProperties.ifc_file or ""
+        except Exception:
+            ifc_path = ""
+        raw_name = (getattr(drawing, "Name", None) or "drawing") if drawing else "drawing"
+        safe_name = "".join(c if c.isalnum() or c in "-_ ." else "_" for c in raw_name)
+        if ifc_path:
+            ifc_abs = bpy.path.abspath(ifc_path)
+            drawings_dir = os.path.join(os.path.dirname(ifc_abs), "drawings")
+            base_dir = drawings_dir if os.path.isdir(drawings_dir) else os.path.dirname(ifc_abs)
+        else:
+            base_dir = ""
+        return os.path.join(base_dir, safe_name + ".dxf")
+
     def invoke(self, context, event):
-        ifc_path = bpy.data.filepath or ""
-        self.filepath = os.path.join(
-            os.path.dirname(ifc_path) if ifc_path else "",
-            "drawing.dxf",
-        )
+        self.filepath = self._default_filepath(_get_active_drawing())
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
@@ -127,7 +138,8 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             self.report({"ERROR"}, "No active Bonsai drawing found.")
             return {"CANCELLED"}
 
-        output_path = bpy.path.abspath(self.filepath)
+        raw_path = self.filepath or self._default_filepath(drawing)
+        output_path = bpy.path.abspath(raw_path)
         if not output_path.lower().endswith((".dxf", ".dwg")):
             output_path += ".dxf"
 
