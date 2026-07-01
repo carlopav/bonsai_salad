@@ -177,9 +177,13 @@ Annotations (`IfcAnnotation` children of the drawing group) are processed separa
 4. Group polygons by `(ifc_class, material)`.
 5. Shapely union with 0.5 mm snap tolerance.
 
-**Boolean unwrapping:** `IfcBooleanResult` chains unwrapped up to depth 64 to reach the base solid. Elements exceeding the limit skip to Bucket C.
+**Boolean clipping:** `IfcBooleanClippingResult` chains are fully walked. Each clipping operand is applied as a 2D Shapely difference after projecting to camera space:
+- `IfcPolygonalBoundedHalfSpace` → boundary polygon projected and subtracted.
+- `IfcHalfSpaceSolid` → half-plane rectangle constructed from plane origin + normal.
 
-**Limitation:** vertical extrusion only. Does not handle BRep, complex booleans, or non-vertical elements.
+Only clipping planes whose normal is perpendicular to the view axis (`|normal_cam.z| ≤ 0.1`) are processed; tilted planes are skipped (2D approximation is only valid for vertical planes).
+
+**Limitation:** vertical extrusion only. Does not handle BRep or non-vertical elements.
 
 #### Bucket C — No geometry
 

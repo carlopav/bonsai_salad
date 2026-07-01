@@ -677,6 +677,109 @@ def _apply_axis2placement3d(pts_2d, placement):
     return origin + xs * x_ax + ys * y_ax  # shape (N, 3)
 
 
+def _curve_to_pts_2d(curve):
+    """Extract (x, y) list from IfcPolyline or IfcIndexedPolyCurve boundary."""
+    if curve.is_a("IfcPolyline"):
+        pts = [(float(p.Coordinates[0]), float(p.Coordinates[1])) for p in curve.Points]
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        return pts if len(pts) >= 3 else None
+    if curve.is_a("IfcIndexedPolyCurve"):
+        cl = curve.Points.CoordList
+        pts = [(float(c[0]), float(c[1])) for c in cl]
+        if len(pts) > 1 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        return pts if len(pts) >= 3 else None
+    return None
+
+
+def _clip_polygon_2d_with_halfspace(poly, second_op, wm_flat, cam_inv_col_major):
+    """Subtract an IfcHalfSpaceSolid or IfcPolygonalBoundedHalfSpace from poly (2D).
+
+    The clipping plane normal is transformed to camera space: if its Z component
+    is significant the plane is tilted relative to the view and the 2D
+    approximation is skipped (projection and clipping do not commute for tilted
+    planes).
+
+    Called once per boolean node when walking the IfcBooleanClippingResult chain.
+    Returns the clipped polygon, or the original if the operand is unsupported.
+    """
+    if not (second_op.is_a("IfcHalfSpaceSolid") or
+            second_op.is_a("IfcPolygonalBoundedHalfSpace")):
+        return poly
+
+    base = second_op.BaseSurface
+    if not base.is_a("IfcPlane"):
+        return poly
+
+    world_m  = np.array(wm_flat,          dtype=float).reshape(4, 4, order='F')
+    cam_inv  = np.array(cam_inv_col_major, dtype=float).reshape(4, 4, order='F')
+    combined = cam_inv @ world_m
+
+    placement = base.Position
+    if placement.Axis:
+        ax = placement.Axis.DirectionRatios
+        normal_l = np.array([float(ax[0]), float(ax[1]),
+                              float(ax[2]) if len(ax) > 2 else 0.0, 0.0])
+    else:
+        normal_l = np.array([0.0, 0.0, 1.0, 0.0])
+
+    normal_c = combined @ normal_l  # plane normal in camera space (direction, w=0)
+
+    # Perpendicularity check: a vertical plane has normal_c[2] ≈ 0.
+    # Skip tilted planes — the 2D clip would be incorrect.
+    if abs(float(normal_c[2])) > 0.1:
+        return poly
+
+    if second_op.is_a("IfcPolygonalBoundedHalfSpace"):
+        pts_2d = _curve_to_pts_2d(second_op.PolygonalBoundary)
+        if pts_2d is None:
+            return poly
+        pts_3d = _apply_axis2placement3d(pts_2d, second_op.Position)
+        pts_h  = np.hstack([pts_3d, np.ones((len(pts_3d), 1))])
+        pts_c  = (combined @ pts_h.T).T[:, :2]
+        try:
+            clip = shapely.Polygon(pts_c.tolist())
+            if not clip.is_valid:
+                clip = clip.buffer(0)
+            if not clip.exterior.is_ccw:
+                clip = shapely.Polygon(list(clip.exterior.coords)[::-1])
+            result = poly.difference(clip)
+            if not result.is_empty and result.area > 1e-6:
+                return result
+        except Exception:
+            pass
+        return poly
+
+    # IfcHalfSpaceSolid (unbounded): build a half-plane rectangle in camera 2D.
+    loc = placement.Location.Coordinates
+    origin_l = np.array([float(loc[0]), float(loc[1]),
+                          float(loc[2]) if len(loc) > 2 else 0.0, 1.0])
+    origin_c = combined @ origin_l
+    nx, ny = float(normal_c[0]), float(normal_c[1])
+    norm2d = math.sqrt(nx * nx + ny * ny)
+    if norm2d < 1e-9:
+        return poly
+    nx, ny = nx / norm2d, ny / norm2d
+    if second_op.AgreementFlag:
+        nx, ny = -nx, -ny
+    ox, oy = float(origin_c[0]), float(origin_c[1])
+    BIG = 1e6
+    px, py = -ny, nx  # perpendicular to normal in 2D
+    p1 = (ox + px * BIG, oy + py * BIG)
+    p2 = (ox - px * BIG, oy - py * BIG)
+    p3 = (p2[0] + nx * BIG, p2[1] + ny * BIG)
+    p4 = (p1[0] + nx * BIG, p1[1] + ny * BIG)
+    try:
+        clip = shapely.Polygon([p1, p2, p3, p4])
+        result = poly.difference(clip)
+        if not result.is_empty and result.area > 1e-6:
+            return result
+    except Exception:
+        pass
+    return poly
+
+
 def _extrusion_parallel_to_camera(item, wm_flat, camera_dir):
     """Return True if item's ExtrudedDirection is within ~15 deg of camera_dir in world space."""
     if not item.is_a("IfcExtrudedAreaSolid"):
@@ -707,27 +810,34 @@ def _extruded_plan_polygon(item, wm_flat, cam_inv_col_major, camera_dir):
     Rejects items whose extrusion direction is not sufficiently parallel to the
     camera (non-vertical walls, ramps, slabs at angle): caller should fall back
     to Bucket C / OCC for those cases.
+
+    IfcBooleanClippingResult chains are unwrapped to collect clipping operands
+    (IfcHalfSpaceSolid, IfcPolygonalBoundedHalfSpace); each clip is applied as
+    a 2D Shapely difference after projecting to camera space.
     """
-    # Unwrap boolean wrappers to get the base extrusion
+    # Walk the boolean chain: collect clipping nodes, reach the base extrusion.
+    chain = []
+    cur = item
     depth = 0
-    while item.is_a("IfcBooleanClippingResult") or item.is_a("IfcBooleanResult"):
-        item = item.FirstOperand
+    while cur.is_a("IfcBooleanClippingResult") or cur.is_a("IfcBooleanResult"):
+        chain.append(cur)
+        cur = cur.FirstOperand
         depth += 1
         if depth > BOOLEAN_UNWRAP_DEPTH_LIMIT:
             return None
 
-    if not item.is_a("IfcExtrudedAreaSolid"):
+    if not cur.is_a("IfcExtrudedAreaSolid"):
         return None
 
     # Only use profile extraction when extrusion is (nearly) parallel to view.
-    if not _extrusion_parallel_to_camera(item, wm_flat, camera_dir):
+    if not _extrusion_parallel_to_camera(cur, wm_flat, camera_dir):
         return None
 
-    pts_2d = _profile_to_pts_2d(item.SweptArea)
+    pts_2d = _profile_to_pts_2d(cur.SweptArea)
     if not pts_2d:
         return None
 
-    pts_3d = _apply_axis2placement3d(pts_2d, item.Position)
+    pts_3d = _apply_axis2placement3d(pts_2d, cur.Position)
 
     world_m = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
     cam_inv = np.array(cam_inv_col_major, dtype=float).reshape(4, 4, order='F')
@@ -740,9 +850,17 @@ def _extruded_plan_polygon(item, wm_flat, cam_inv_col_major, camera_dir):
         poly = shapely.Polygon(pts_draw.tolist())
         if not poly.is_valid:
             poly = poly.buffer(0)
-        return poly if poly.area > 1e-6 else None
+        if poly.area <= 1e-6:
+            return None
     except Exception:
         return None
+
+    # Apply boolean clippings in reverse chain order (outermost last = applied last)
+    for node in reversed(chain):
+        poly = _clip_polygon_2d_with_halfspace(poly, node.SecondOperand,
+                                               wm_flat, cam_inv_col_major)
+
+    return poly if poly.area > 1e-6 else None
 
 
 def _wall_profile_polygon(element, wm_flat, cam_inv_col_major, camera_dir):
