@@ -24,6 +24,13 @@ from .camera import world_matrix_col_major
 # ample headroom while guarding against corrupt/circular data.
 BOOLEAN_UNWRAP_DEPTH_LIMIT = 64
 
+# Dihedral-angle threshold for "feature edge" extraction from tessellated
+# surfaces (IfcPolygonalFaceSet, IfcTriangulatedFaceSet).  Edges shared by two
+# faces whose normals differ by more than this angle are drawn; flatter edges
+# are discarded.  Naked (perimeter) edges are always drawn regardless.
+# 10° retains ridges and valleys while suppressing nearly-flat triangulation.
+MESH_CREASE_ANGLE_DEG = 15.0
+
 
 # ---------------------------------------------------------------------------
 # IFC curve extraction helpers
@@ -573,7 +580,36 @@ def _extract_local_curves(element, plan_repr):
     s.set('use-world-coords', False)
     s.set('context-ids', [ctx_id])
     shape = ifcopenshell.geom.create_shape(s, element)
-    return list(shape.geometry.verts), list(shape.geometry.edges), [], [], []
+    g = shape.geometry
+    verts = list(g.verts)
+    faces = list(g.faces)
+
+    if not faces:
+        # 2D wire geometry (no faces) — return all edges as-is
+        return verts, list(g.edges), [], [], []
+
+    # 3D tessellated mesh: return only naked + crease edges (dihedral > threshold).
+    # This avoids flooding the DXF with interior triangulation lines.
+    from collections import defaultdict
+    cos_t = math.cos(math.radians(MESH_CREASE_ANGLE_DEG))
+    v_np = np.array(verts).reshape(-1, 3)
+    f_np = np.array(faces).reshape(-1, 3)
+    e0 = v_np[f_np[:, 1]] - v_np[f_np[:, 0]]
+    e1 = v_np[f_np[:, 2]] - v_np[f_np[:, 0]]
+    fn = np.cross(e0, e1)
+    norms = np.linalg.norm(fn, axis=1, keepdims=True)
+    fn = np.where(norms > 1e-12, fn / norms, np.array([[0.0, 0.0, 1.0]]))
+
+    edge_faces = defaultdict(list)
+    for fi, (a, b, c) in enumerate(f_np.tolist()):
+        for i, j in ((a, b), (b, c), (c, a)):
+            edge_faces[(min(i, j), max(i, j))].append(fi)
+
+    sel = []
+    for (i, j), fs in edge_faces.items():
+        if len(fs) != 2 or np.dot(fn[fs[0]], fn[fs[1]]) < cos_t:
+            sel += [i, j]
+    return verts, sel, [], [], []
 
 
 # ---------------------------------------------------------------------------
