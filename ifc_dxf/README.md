@@ -1,46 +1,44 @@
-# ifc_dxf: DXF Generation Rules
+# ifc_dxf: DXF Generation
 
-A tool to export an IFC drawing view to DXF, aiming for maximum structural and geometric fidelity.
-> Implementation: pure Python (`ezdxf` + `shapely` + `ifcopenshell`). No OCC dependency in ifc_dxf.
+Export an IFC drawing view to DXF with maximum structural and geometric fidelity.
+Implementation: pure Python (`ezdxf` + `shapely` + `ifcopenshell`). No OCC dependency.
 
----
-
-## IFC Compatibility
-
-- Works with all IFC versions available in IfcOpenShell.
-- Available `RepresentationContext` values are retrieved at runtime (each IFC file declares its own sub-contexts), with no version hardcoding.
+| Pipeline | Status | Approach |
+|----------|--------|----------|
+| **A — Approximate** | ✓ implemented | IFC-native traversal: 2D reprs as BLOCK/INSERT, sections via Shapely profile extraction |
+| **B — (to be defined)** | ✗ future | — |
 
 ---
 
-## RepresentationIdentifier (IFC4)
+## Shared Reference
 
-Each `IfcShapeRepresentation` has a `RepresentationIdentifier` field that indicates the role of the representation:
+### IFC Compatibility
 
-| Identifier | Type | Use in ifc_dxf |
+- Works with all IFC versions supported by IfcOpenShell.
+- Available `RepresentationContext` values are retrieved at runtime; no version hardcoding.
+
+### RepresentationIdentifier (IFC4)
+
+Each `IfcShapeRepresentation` has a `RepresentationIdentifier` field:
+
+| Identifier | Type | Pipeline A handling |
 |---|---|---|
-| `Body` | 3D solid / swept solid / BRep | Bucket B (if IfcExtrudedAreaSolid ‖ camera) or Bucket C |
-| `FootPrint` | 2D plan projection | **Bucket A** (preferred for plan view) |
-| `Axis` | Axis or centre line | **Bucket A** (e.g. beams, columns) |
+| `Body` | 3D solid / swept solid / BRep | Bucket B (Shapely profile) or Bucket C |
+| `FootPrint` | 2D plan projection | **Bucket A** |
+| `Axis` | Axis or centre line | **Bucket A** (beams, columns) |
 | `Profile` | 3D cross-section | Bucket B (if extrusion ‖ camera) |
-| `Reference` | Reference geometry | Ignored |
-| `Surface` | External surface | Bucket C |
-| `Annotation` | 2D annotations | **Bucket D** (`annotations` module) |
-| `Box` | Bounding box | Ignored |
-| `CoG` | Centre of gravity | Ignored |
-| `Clearance` | Manoeuvre space | Ignored |
-| `Lighting` | Render geometry | Ignored |
+| `Annotation` | 2D annotations | **Bucket D** |
+| `Reference` / `Surface` / `Box` / `CoG` / `Clearance` / `Lighting` | — | Ignored / Bucket C |
 
-**Selection priority for plan view** (descending order):
-1. `Plan / Body / PLAN_VIEW` → **Bucket A**
-2. `Plan / Body / MODEL_VIEW` → **Bucket A**
-3. `Model / Body / PLAN_VIEW` → **Bucket A**
-4. `Model / Body / MODEL_VIEW` → **Bucket A**
-5. `FootPrint / PLAN_VIEW` → **Bucket A**
-6. No 2D representation → **Bucket B** or **C**
+**Selection priority for plan view** (descending):
+1. `Plan / Body / PLAN_VIEW` → Bucket A
+2. `Plan / Body / MODEL_VIEW` → Bucket A
+3. `Model / Body / PLAN_VIEW` → Bucket A
+4. `Model / Body / MODEL_VIEW` → Bucket A
+5. `FootPrint / PLAN_VIEW` → Bucket A
+6. No 2D representation → Bucket B or C
 
----
-
-## Sub-context: TargetView (`IfcGeometricProjectionEnum`)
+### Sub-context: TargetView
 
 ```
 IfcGeometricRepresentationContext   (ContextType = "Model" | "Plan")
@@ -49,160 +47,135 @@ IfcGeometricRepresentationContext   (ContextType = "Model" | "Plan")
          └─ TargetView         →  IfcGeometricProjectionEnum
 ```
 
-| TargetView | Description | ifc_dxf view |
-|---|---|---|
-| `PLAN_VIEW` | Plan view (from above) | **Plan view** |
-| `REFLECTED_PLAN_VIEW` | Reflected plan (ceilings) | RCP |
-| `SECTION_VIEW` | Vertical section | Section view |
-| `ELEVATION_VIEW` | External elevation | Elevation |
-| `MODEL_VIEW` | Generic 3D view | Axonometric |
-| `GRAPH_VIEW` | Schematic representation | Axis, reference |
-| `SKETCH_VIEW` | Approximate sketch | Not used |
+| TargetView | Description |
+|---|---|
+| `PLAN_VIEW` | Plan view (from above) |
+| `REFLECTED_PLAN_VIEW` | Reflected ceiling plan |
+| `SECTION_VIEW` | Vertical section |
+| `ELEVATION_VIEW` | External elevation |
+| `MODEL_VIEW` | Generic 3D / axonometric |
+| `GRAPH_VIEW` | Schematic / axis |
 
----
+### DXF Coordinate System
 
-## DXF Structure — Fundamental Rule
-
-Reproduce the IFC structure in DXF entities as faithfully as possible:
-
-| IFC | DXF |
-|-----|-----|
-| IFC type with 2D repr (`IfcDoorType`, `IfcFurnitureType`, …) | A shared **BLOCK** (name = `GlobalId` of the type) |
-| IFC element instance (type has 2D repr) | An **INSERT** |
-| Element with no shared type (doors, furniture without type) | Unique **BLOCK** + **INSERT**, name = `{IfcClass}_{GlobalId[:8]}` |
-| Flat floor element (`IfcSlab`, `IfcCovering`, `IfcRoof`) | Closed **LWPOLYLINE** in a **GROUP** (`fp_{GlobalId[:8]}`) |
-
-**Key rule:** always use the IFC `GlobalId` as the unique block identifier, not the `Name` field (which may be non-unique, e.g. "Unnamed" for multiple different types).
-
-**Shared block condition:** a shared type block is only used when `from_type=True` (the plan repr comes from the type's `RepresentationMaps` via `IfcMappedItem`) **and** `get_type_block_name` returns a non-`None` name. If the type has no 2D representation in its `RepresentationMaps`, the element falls through to the footprint or unique-block path.
-
-### Placement Rules
-
-- **BLOCK geometry**: in the element/type local coordinates. Entities on layer `"0"` with `color=0` (BYBLOCK), `linetype="BYBLOCK"`, `lineweight=-2` (BYBLOCK). This way the INSERT controls colour, linetype and lineweight.
-- **INSERT position**: projection of the world-space origin of the element's `ObjectPlacement`.
-- **INSERT rotation**: angle (degrees, CCW) that the element's local X axis makes with the drawing X axis, in world XY (not in camera space — the BLOCK geometry already has R_cam baked in).
-- **INSERT layer**: exact IFC class name (e.g. `IfcDoor`, `IfcFurniture`, `IfcWindow_Overhead`).
-- **Never** put block geometry in world coordinates with INSERT at (0,0,0).
-
-### Coordinates and DXF Scale
-
-- System: real metres 1:1. `$INSUNITS = 6` (Metres), `$MEASUREMENT = 1` (Metric).
-- Camera centre corresponds to (0, 0) in drawing space.
-- Y increases upward (standard DXF/mathematical convention).
-- `$LTSCALE`: set to the numeric scale factor of the view (e.g. 0.01 for 1:100, 0.02 for 1:50). Read from `EPset_Drawing.Scale` (format `"1/100"`) via `fractions.Fraction`. Default: 0.01.
+- Real metres 1:1. `$INSUNITS = 6` (Metres), `$MEASUREMENT = 1` (Metric).
+- Camera centre → drawing origin (0, 0). Y increases upward.
+- `$LTSCALE`: numeric scale factor (e.g. 0.01 for 1:100). Read from `EPset_Drawing.Scale` (format `"1/100"`).
 
 ### DXF Template
 
-The file `ifc_dxf_template_metric.dxf` (maintained manually in BricsCAD) contains:
-- Layers, annotative text styles (title/header/large/regular/small/DIMENSION/GRID), dimstyle `dimensions_metric_m` (with dimension arrows and dedicated font).
-- A1 layout with a 1:100 viewport and a title block (cartiglio) with fields `{{Identification}}`, `{{Name}}` (in MTEXT, curly braces escaped as `\{\{...\}\}`), `{{scale}}`, `{{date}}` (in TEXT).
-- Annotation scale in the viewport set to 1:100 (handle in XREC `ASDK_XREC_ANNOTATION_SCALE_INFO`).
+`ifc_dxf_template_metric.dxf` (maintained in BricsCAD):
+- Layers, annotative text styles, dimstyle `dimensions_metric_m`.
+- A1 layout with 1:100 viewport and title block (cartiglio): `{{Identification}}`, `{{Name}}`, `{{scale}}`, `{{date}}`.
+- Annotation scale in viewport via XREC `ASDK_XREC_ANNOTATION_SCALE_INFO`.
 
-At export: `ezdxf.readfile()` + `msp.delete_all_entities()` to clear the model space. `_fill_cartiglio()` fills the title block placeholders, updates the viewport `view_height` and `view_center_point` based on scale, and updates the annotation scale XREC.
+At export: `ezdxf.readfile()` + `msp.delete_all_entities()`. `_fill_cartiglio()` updates title block fields, viewport height/centre, and annotation scale XREC.
 
-### Annotation Scale
+Current annotation scale written to `AcDbVariableDictionary → DictionaryVariables("CANNOSCALE", "1:100")`, not to `$CANNOSCALE` (ignored by BricsCAD/AutoCAD).
 
-The current annotation scale is written to `AcDbVariableDictionary` → `DictionaryVariables("CANNOSCALE", "1:100")`. **Not** to the header `$CANNOSCALE` (ignored by BricsCAD/AutoCAD). ezdxf supports this via `dict.add_dict_var()`.
+The scale list (`ACAD_SCALELIST`) uses `SCALE`/`AcDbScale` entities (group codes 300/140/141/290) not natively supported by ezdxf; workaround via `new_entity("SCALE")` + manual subclass setup.
 
-The scale list (`ACAD_SCALELIST`) is populated with entities of type `SCALE` / `AcDbScale`. ezdxf does not natively know this type (group codes: `300`=name, `140`=paper, `141`=drawing, `290`=1:1 base flag). Workaround: `new_entity("SCALE")` + `DXFTYPE` override via `type()` + manual subclasses.
+### Layer Naming
+
+| Type | Format | Example |
+|---|---|---|
+| Bucket A — INSERT elements | IFC class name | `IfcDoor`, `IfcFurniture` |
+| Bucket A — overhead fill | `<Class>_Overhead` | `IfcWindow_Overhead` |
+| Bucket B — section cut | `<Class>_Section` | `IfcWall_Section` |
+| Bucket B — view (below cut) | `<Class>_View` | `IfcWall_View` |
+| Bucket B — hatch fill | `<Class>_Hatches` | `IfcWall_Hatches` |
+| Geometry inside BLOCKs | `"0"` with BYBLOCK | controlled by INSERT |
 
 ---
 
-## Bucket Classification (A → D, decreasing priority)
+## Pipeline A — Approximate
 
-For each element, the classifier picks the highest applicable bucket.
+### Concept
 
-### Bucket A — Native 2D Representation ✓ implemented
-
-**Condition:** a `Plan/Body/PLAN_VIEW` (or equivalent) representation exists in the element or its IFC type.
-
-**Slab occlusion pre-filter:** before processing a Bucket A element, verify it is not hidden by an overlying slab. The filter combines a Z check with a Shapely XY footprint check of the slab, so elements in courtyards, atriums, or at different levels are not incorrectly excluded.
+Each IFC element is routed to the highest applicable bucket. No OCC / HLR. Geometry quality depends on what the IFC file provides.
 
 ```
-For each IfcSlab / IfcCovering(FLOOR) with Z_top ≤ cut_z:
-  - extract 2D footprint in world XY (IfcExtrudedAreaSolid → Shapely Polygon)
-  - element excluded if: z_element_origin < z_top  AND  origin_XY ∈ footprint
+element
+  │
+  ├─ has 2D plan representation? ──────────────────── Bucket A (native 2D)
+  │
+  ├─ is a section class (IfcWall, …)? ─────────────── Bucket B (Shapely profile)
+  │
+  └─ neither ──────────────────────────────────────── Bucket C (skipped)
+
+Annotations (IfcAnnotation children of the drawing group) ── Bucket D
 ```
 
-**Overhead windows/doors:** elements filling openings entirely above the cut plane (z_min_opening > cut_z) are shown on the layer `<Class>_Overhead` (e.g. `IfcWindow_Overhead`) with a dashed linetype. Since the camera frustum has Z_max = cut_z, these elements are explicitly re-added to the processing list after frustum culling.
+### Bucket A — Native 2D Representation
 
-**Geometry source:** direct Python traversal of the IFC tree (`IfcMappedItem`, `IfcCompositeCurve`, `IfcTrimmedCurve`, `IfcIndexedPolyCurve`, etc.). Fallback: `ifcopenshell.geom.create_shape` with `use-world-coords=False`.
+**Condition:** a plan repr (`Plan/Body/PLAN_VIEW` or equivalent) exists on the element or its type.
 
-**DXF entities produced** (exact, not tessellated):
-- `IfcPolyline`, `IfcIndexedPolyCurve` (IfcLineIndex) → `LINE`
-- `IfcIndexedPolyCurve` (IfcArcIndex) → `ARC`
-- `IfcTrimmedCurve` (IfcCircle) → `ARC` or `CIRCLE`
-- `IfcTrimmedCurve` (IfcEllipse, equal axes) → `ARC`
-- `IfcTrimmedCurve` (IfcEllipse, unequal axes) → `ELLIPSE`
-- `IfcCircle` → `CIRCLE`
+**Pre-filters applied before Bucket A geometry extraction:**
 
-**Tessellated meshes (`IfcPolygonalFaceSet`):** when the geom engine returns a mesh (faces non-empty), only *crease edges* are kept — naked edges (belonging to exactly one face) and shared edges whose dihedral angle exceeds `MESH_CREASE_ANGLE_DEG` (15°). This avoids flooding the plan view with every interior triangle edge, relevant for terrain (`IfcGeographicElement[TERRAIN]`) represented as a dense mesh.
+- **Slab occlusion:** element origin is below a slab (`IfcSlab` / `IfcCovering(FLOOR)`) whose footprint covers the origin in XY → element sent to Bucket C (hidden under slab).
+- **Overhead fill:** windows/doors filling openings entirely above the cut plane (`z_min_opening > cut_z`) are shown on `<Class>_Overhead` layer with dashed linetype. Explicitly re-added after frustum culling since the camera frustum has `Z_max = cut_z`.
 
-**Bonsai bug note:** door opening arcs are exported as `IfcEllipse` instead of `IfcCircle`. Active workaround (`_trimmed_ellipse_spec`). To be reported as an upstream PR.
+**Geometry extraction:** direct IFC tree traversal (`IfcMappedItem`, `IfcCompositeCurve`, `IfcTrimmedCurve`, `IfcIndexedPolyCurve`, …). Fallback: `ifcopenshell.geom.create_shape` with `use-world-coords=False`.
 
-**IFC fidelity principle:** maximum adherence to geometry as described in IFC. Separate arcs are never merged even if contiguous — two `IfcTrimmedCurve` → two `DXF ARC`.
+**Exact DXF entities** (not tessellated):
+
+| IFC curve | DXF entity |
+|---|---|
+| `IfcPolyline`, `IfcIndexedPolyCurve` (LineIndex) | `LINE` |
+| `IfcIndexedPolyCurve` (ArcIndex) | `ARC` |
+| `IfcTrimmedCurve` (IfcCircle) | `ARC` or `CIRCLE` |
+| `IfcTrimmedCurve` (IfcEllipse, equal axes) | `ARC` |
+| `IfcTrimmedCurve` (IfcEllipse, unequal axes) | `ELLIPSE` |
+| `IfcCircle` | `CIRCLE` |
+
+**Tessellated meshes (`IfcPolygonalFaceSet`):** only *crease edges* are kept — naked edges (1 adjacent face) and shared edges whose dihedral angle exceeds `MESH_CREASE_ANGLE_DEG` (15°). Prevents triangle-edge flooding for terrain meshes (`IfcGeographicElement[TERRAIN]`).
+
+**Bonsai bug note:** door opening arcs are exported as `IfcEllipse` instead of `IfcCircle`. Workaround active in `_trimmed_ellipse_spec`. Upstream PR pending.
 
 **Output — three paths depending on geometry source:**
 
-1. **Shared BLOCK + INSERT** — element uses a type with a 2D `RepresentationMaps` (`from_type=True`). Block geometry in type's local coordinates; multiple instances share one BLOCK definition.
-2. **Footprint LWPOLYLINE + GROUP** — `IfcSlab`, `IfcCovering`, `IfcRoof` without a shared type block. The `IfcExtrudedAreaSolid` profile is extracted, projected to drawing space, and written as a closed `LWPOLYLINE`. Each element gets its own named GROUP (`fp_{GlobalId[:8]}`). Interior rings (holes) produce additional LWPOLYLINEs in the same GROUP. Scoped to these classes specifically to avoid capturing the `Body` solid of doors/windows that also contain `IfcExtrudedAreaSolid`.
-3. **Unique BLOCK + INSERT** — all other elements with instance-specific geometry (`from_type=False` and not a footprint class): each gets a unique BLOCK named `{IfcClass}_{GlobalId[:8]}`. Preserves arcs and circles from the 2D plan symbol.
+1. **Shared BLOCK + INSERT** — type provides 2D geometry (`from_type=True`, or element repr consists entirely of `IfcMappedItem` delegating to the type). Multiple instances share one BLOCK definition named `{TypeName}_{TypeGlobalId[:8]}`.
 
-**Limitation:** requires a geometrically correct IFC model with proper Z coordinates. Without OCC, partial occlusion (e.g. a chair partly covered by a slab) is not handled — the element is shown fully or excluded fully.
+2. **Footprint LWPOLYLINE + GROUP** — `IfcSlab`, `IfcCovering`, `IfcRoof` without a shared type block. Profile extracted from `IfcExtrudedAreaSolid` (unwrapping `IfcBooleanResult` chains), projected to drawing space, written as closed `LWPOLYLINE`. Grouped per element (`fp_{GlobalId[:8]}`). Interior rings produce additional LWPOLYLINEs in the same GROUP. Scoped to these classes to avoid capturing the `Body` solid of doors/windows.
 
----
+3. **Unique BLOCK + INSERT** — all other elements with instance-specific geometry: unique BLOCK named `{IfcClass}_{GlobalId[:8]}`. Preserves arcs and circles from the 2D plan symbol.
 
-### Bucket B — Section Generated from 3D ✓ partially implemented
+**Key rule:** `GlobalId` as block identifier, never `Name` (non-unique across types).
 
-**Condition:** no native 2D representation found by Bucket A.
+**BLOCK geometry:** entities on layer `"0"` with `color=0`, `linetype="BYBLOCK"`, `lineweight=-2` (all BYBLOCK). INSERT controls colour/linetype/lineweight.
 
-**Typical classes:** `IfcWall`, `IfcWallStandardCase` (future: `IfcSlab`, `IfcColumn`, `IfcStairFlight`, …).
+**INSERT position:** projection of the world-space origin of `ObjectPlacement` via camera inverse matrix.
 
-**Output:** entities written directly to model space (no BLOCK/INSERT). Layer with semantic suffix.
+**INSERT rotation:** angle (degrees CCW) of the element's local X axis in world XY. Computed in world space, not camera space — BLOCK geometry already has `R_cam` baked in.
 
-#### B-Approximate — Shapely ✓ implemented
+### Bucket B — Section from 3D (B-Approximate)
 
-Used for elements with `IfcExtrudedAreaSolid` and an extractable 2D profile.
+**Condition:** element is in a section class (`IfcWall`, `IfcWallStandardCase`; future: `IfcColumn`, `IfcStairFlight`).
 
-**Algorithm for walls:**
-1. Extract the 2D wall profile (`IfcArbitraryClosedProfileDef`, `IfcRectangleProfileDef`).
-2. Project the profile into drawing space (camera matrix).
+> `IfcSlab` is handled via the Bucket A footprint path, not Bucket B.
+
+**Algorithm:**
+1. Extract 2D wall profile (`IfcArbitraryClosedProfileDef`, `IfcRectangleProfileDef`).
+2. Project to drawing space (camera matrix).
 3. Subtract opening footprints (`IfcOpeningElement`).
 4. Group polygons by `(ifc_class, material)`.
-5. Shapely union with 0.5 mm snap tolerance → clean contours.
-6. Write closed `LWPOLYLINE` → layer `IfcWall_Section` or `IfcWall_View`.
-7. Write solid `HATCH` → layer `IfcWall_Hatches` (sectioned elements only).
+5. Shapely union with 0.5 mm snap tolerance.
+6. Write closed `LWPOLYLINE` → `<Class>_Section` or `<Class>_View`.
+7. Write solid `HATCH` → `<Class>_Hatches` (sectioned elements only).
 
-**Layers:**
-- `IfcWall_Section`: cut → thick line + hatch
-- `IfcWall_View`: elements seen below the cut plane → thin line, no hatch
-- `IfcWall_Hatches`: solid fill of sectioned areas
+**Boolean unwrapping:** `IfcBooleanResult` chains unwrapped up to `BOOLEAN_UNWRAP_DEPTH_LIMIT` (64) to reach the base `IfcExtrudedAreaSolid`. Elements exceeding the limit silently skip to Bucket C.
 
-**Boolean unwrapping:** `IfcBooleanResult` chains (one level per opening subtracted from the body) are unwrapped up to `BOOLEAN_UNWRAP_DEPTH_LIMIT` (default 64) levels to reach the base `IfcExtrudedAreaSolid`. A wall with more openings than the limit is silently skipped to Bucket C. *(Previous hard-coded limit was 8; bumped to 64 after finding a real-world wall with 9 nested booleans that was silently dropped.)*
+**Limitation:** requires vertical extrusion and a well-formed IFC profile. Does not handle BRep or non-vertical elements.
 
-**Note:** B-Approximate requires a well-built IFC model. Does not handle BRep, complex booleans, or non-vertical walls.
+### Bucket C — Skipped
 
-#### B-Accurate — OCC/HLR ✗ future work
+Elements with no usable representation, or occluded by a slab. Counted in export log but not drawn.
 
-Uses `ifcopenshell.geom` with HLR (Hidden Line Removal) to generate precise linework. Equivalent to the OCC path in Bonsai SVG. Requires OCC to be available in ifcopenshell.
+Future: wireframe fallback from projected 3D Body.
 
----
+### Bucket D — Annotations
 
-### Bucket C — Fallback ✗ skipped (future work)
-
-**Condition:** no higher bucket is applicable.
-
-Elements in Bucket C are currently logged but not drawn. Future: wireframe from the projected 3D Body (without HLR).
-
----
-
-### Bucket D — Annotations ✓ partially implemented
-
-2D annotations extracted from the `IfcRelAssignsToGroup` → `IfcGroup(ObjectType='DRAWING')` group with the same name as the active drawing. Child annotations (`IfcAnnotation`) are classified by type and written as native DXF entities.
-
-**How to find the annotations for a drawing:**
-
-Match by the drawing's `GlobalId` in `RelatedObjects`, not by `Name`. The drawing `IfcAnnotation` is itself a member of the group, alongside its child annotations. The group `Name` may differ from the drawing `Name` (e.g. drawing `"01 PIANO TERRA ARCHITETTURA"` → group `"01 PIANO TERRA PLAN"`).
+**Discovery:** match the drawing's `GlobalId` in `RelatedObjects` of every `IfcRelAssignsToGroup` whose `RelatingGroup` is `IfcGroup(ObjectType='DRAWING')`. The drawing `IfcAnnotation` is itself a member of the group. Match by GUID, not by `Name` — the group name may differ from the drawing name.
 
 ```python
 drawing_guid = drawing.GlobalId
@@ -217,98 +190,65 @@ for rel in ifc.by_type("IfcRelAssignsToGroup"):
             annotations.append(obj)
 ```
 
-**Coordinate projection:** the 3D geometry of annotations is projected to 2D by multiplying by the camera inverse matrix (`cam_inv_np`).
+**Coordinate projection:** 3D annotation geometry → 2D via `cam_inv_np`.
 
-#### D1 — DIMENSION ✓ implemented
+#### D1 — DIMENSION
 
-Geometry source: `IfcGeometricCurveSet` → `IfcIndexedPolyCurve` → `IfcCartesianPointList2D`. The two endpoints of the dimension line are projected and written as DXF `DIMENSION` entities with `distance=0` (Bonsai stores the dimension line endpoints directly, not the measured object + offset).
+Geometry: `IfcGeometricCurveSet → IfcIndexedPolyCurve → IfcCartesianPointList2D`. Endpoints projected and written as DXF `DIMENSION` with `distance=0`.
 
-```python
-dim = msp.add_aligned_dim(p1=p0, p2=p1, distance=0,
-    text=text, dimstyle="dimensions_metric_m",
-    dxfattribs={"layer": "IfcAnnotation_Dimension"})
-dim.render()
-```
+Dimstyle `dimensions_metric_m` (from template). Parameters in paper-space metres: `paper_mm * 0.001`. `dimscale = 1 / scale_factor` (e.g. 100 for 1:100). Fallback `BONSAI_DIM` (oblique ticks) if template unavailable.
 
-Dimstyle `dimensions_metric_m` (from template): dimension arrows, dedicated font. Dimensional parameters (text height, extension lines, gap) set in paper-space units (metres): `paper_mm * 0.001`. `dimscale = 1 / scale_factor` (e.g. 100 for 1:100) so that paper-space sizes render correctly in model space. Fallback `BONSAI_DIM` (oblique ticks) if the template is not available.
+Each `DIMENSION` entity receives `AcadAnnotative` XDATA so BricsCAD/AutoCAD treat it as annotative.
 
-**Annotative flag:** each `DIMENSION` entity receives `AcadAnnotative` XDATA so that BricsCAD/AutoCAD treat it as an annotative object. Without this flag the dimension is visible only when the annotation scale matches, and appears tiny at fixed model-space size otherwise.
+#### D2 — TEXT
 
-#### D2 — TEXT ✓ implemented
-
-DXF `TEXT` entities with heights matched to Bonsai CSS styles:
-
-| CSS Style | Paper height (mm) | Model-space (m) at 1:100 |
+| CSS Style | Paper (mm) | Model-space at 1:100 |
 |---|---|---|
-| `title` | 7.0 | 0.70 |
-| `header` | 5.0 | 0.50 |
-| `large` | 3.5 | 0.35 |
-| `regular` | 2.5 | 0.25 |
-| `small` | 1.8 | 0.18 |
+| `title` | 7.0 | 0.70 m |
+| `header` | 5.0 | 0.50 m |
+| `large` | 3.5 | 0.35 m |
+| `regular` | 2.5 | 0.25 m |
+| `small` | 1.8 | 0.18 m |
 
-Formula: `txt_height = paper_mm * 0.001 / scale_factor`
+Formula: `txt_height = paper_mm * 0.001 / scale_factor`. Alignment mapped from Bonsai CSS box-align to DXF `halign`/`valign`.
 
-Alignment: mapped from the Bonsai CSS box-align attribute (`top-left`, `center`, etc.) to the DXF `halign` / `valign` codes of the `TEXT` entity.
-
-#### D3 — Other types ✗ future work
+#### D3 — Other (future)
 
 Symbols, hatches, Bonsai SVG markers.
 
----
+### Limitations
 
-## Layer Naming
-
-| Type | Format | Example |
-|---|---|---|
-| INSERT elements (Bucket A) | IFC class name | `IfcDoor`, `IfcFurniture` |
-| INSERT overhead (Bucket A) | `<Class>_Overhead` | `IfcWindow_Overhead` |
-| Wall section (Bucket B) | `<Class>_Section` | `IfcWall_Section` |
-| Wall view (Bucket B) | `<Class>_View` | `IfcWall_View` |
-| Wall hatch (Bucket B) | `<Class>_Hatches` | `IfcWall_Hatches` |
-| Geometry inside BLOCKs | `"0"` with BYBLOCK | `0` (colour/linetype/lw from INSERT) |
-
-Layer styles defined in `ifc_dxf_template_metric.dxf` (ACI colour, lineweight mm, linetype).
+- Requires correct Z coordinates and `IfcExtrudedAreaSolid` profiles (B-Approximate, footprint).
+- No OCC: partial occlusion not handled — element shown fully or excluded fully.
+- `element_in_frustum` tests only `ObjectPlacement` origin — elements whose origin is outside the frustum but whose body extends into view may be incorrectly culled (known issue).
 
 ---
 
-## DXF Entities Produced
+## Pipeline B — (to be defined)
 
-`LINE`, `ARC`, `CIRCLE`, `ELLIPSE`, `LWPOLYLINE`, `HATCH` (solid fill), `DIMENSION`, `TEXT`.
-
----
-
-## View Type (first discriminant)
-
-| View | Status |
-|---|---|
-| Plan view | ✓ implemented |
-| Section view (vertical) | future work |
-| Elevation | future work |
-| Reflected Ceiling Plan | future work |
-| Axonometric | future work |
-
----
-
-## Include / Exclude
-
-In Blender (via operator), ifc_dxf reads the filtered element list from Bonsai via `tool.Drawing.get_drawing_elements()`. In standalone mode (`cli.py`), the list is built via frustum Z-culling + skipped-class filter.
+Placeholder. Goals and open questions to be established.
 
 ---
 
 ## TODO / Roadmap
 
-1. **Extend B-Approximate**: add `IfcColumn`, `IfcStairFlight` to the Shapely section path. (`IfcSlab` is now handled via the Bucket A footprint path — closed LWPOLYLINE from profile — rather than Bucket B.)
-2. **B-Accurate (OCC/HLR)**: precise linework via ifcopenshell geom serializer.
-3. **Bucket C**: wireframe fallback from the 3D Body.
-4. **Bucket D - other types**: symbols, markers, hatches (D1 DIMENSION and D2 TEXT already implemented).
-5. **Upstream PR ezdxf**: add `SCALE`/`AcDbScale` as a native entity type (group codes 300/140/141/290). Active workaround with `type()` hack.
-6. **Upstream PR Bonsai**: fix door arc export as `IfcCircle` instead of `IfcEllipse`.
-7. **Section view / Elevation**: non-zenithal camera logic.
-8. **More IFC test fixtures**: `test_ifc_02` through `test_ifc_05` covering rotated walls, overhead elements, text annotations, section view, different scales.
-9. **Report deep boolean chains**: during export, warn when an element's `IfcBooleanResult` chain depth exceeds a threshold, so users know to simplify geometry before exporting (B-Approximate silently drops such elements to Bucket C).
-10. **frustum culling AABB fallback**: `element_in_frustum` currently tests only the `ObjectPlacement` origin. Walls/beams/slabs whose origin is at one end may be incorrectly culled when the body extends into the view. Fix: fall back to a full geometry AABB intersection (`ifcopenshell.geom`) when the origin test fails.
-11. **Material-agnostic wall fusion option**: add an export flag to merge all `IfcWall_Section` polygons in a single `unary_union` regardless of material, useful when material assignments are inconsistent across the model.
-12. **Per-layer fusion for `IfcMaterialLayerSet` walls**: decompose each wall polygon into per-layer strips using the layer thicknesses from `IfcMaterialLayerSet`, then key fusion groups by individual layer material. Concrete strips fuse with concrete, plaster with plaster, etc.
+**Pipeline A:**
+1. Add `IfcColumn`, `IfcStairFlight` to Bucket B section path.
+2. Report elements with deep boolean chains (> threshold) during export.
+3. Frustum culling AABB fallback: test full geometry bounding box when origin test fails.
+4. Material-agnostic wall fusion option (`unary_union` regardless of material).
+5. Per-layer fusion for `IfcMaterialLayerSet` walls (decompose polygon into layer strips).
+6. Bucket D — D3: symbols, markers, hatches.
+7. More IFC test fixtures (rotated walls, overhead elements, text annotations, sections, different scales).
+
+**Upstream:**
+8. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
+9. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
+
+**Future pipelines:**
+10. B-Accurate (OCC/HLR): precise linework via ifcopenshell geom serializer.
+11. Section view / Elevation: non-zenithal camera logic.
+12. Reflected Ceiling Plan, Axonometric.
 
 ---
 
@@ -316,21 +256,20 @@ In Blender (via operator), ifc_dxf reads the filtered element list from Bonsai v
 
 ### Camera Projection
 
-Orthographic. The camera inverse matrix transforms world points → camera-local; camera X and Y map to drawing X and Y.
+Orthographic. Camera inverse matrix transforms world points → camera-local.
 
-- `project()`: rotation + translation — for INSERT origins (world-space).
-- `project_local()`: rotation only (`_cam_R`) — for BLOCK geometry (local coordinates).
+- `R_cam` (rotation only) → for BLOCK geometry in local coordinates.
+- `cam_inv_np` (rotation + translation) → for INSERT origins and annotation points.
 
 ### INSERT Rotation
 
-Calculated in world XY (`atan2(local_x_world.y, local_x_world.x)`), **not** in camera space. The BLOCK geometry already has `R_cam` baked in; using `R_cam^T * R_elem` would cause a double camera rotation on all INSERTs.
+Computed as `atan2(local_x_world.y, local_x_world.x)` in world XY, not in camera space. The BLOCK geometry already has `R_cam` baked in; applying it again in camera space would double-rotate.
 
-### Required IFC Model Quality
+### IFC Model Quality Requirements (Pipeline A)
 
-B-Approximate and the slab occlusion filter assume:
-- Correct Z coordinates for each element (accurate ObjectPlacement).
-- Correct storey assignment.
-- `IfcExtrudedAreaSolid` profiles with vertical extrusion.
-- Slabs (`IfcSlab`) and floors (`IfcCovering FLOOR`) with correct Z coordinates.
+B-Approximate and the footprint/occlusion filters require:
+- Correct Z coordinates in `ObjectPlacement`.
+- `IfcExtrudedAreaSolid` profiles with vertical extrusion axis.
+- `IfcSlab` / `IfcCovering(FLOOR)` with correct Z for occlusion filtering.
 
-Without OCC, an imprecise IFC model produces incorrect results without explicit error messages.
+Without OCC, an imprecise model produces incorrect results without explicit errors.
