@@ -194,7 +194,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     block_order:   list of block names in insertion order
     block_inserts: name -> [(pos_2d, rot_deg, layer), ...]
     flat_edges:    [(p0, p1, layer), ...]
-    wall_polys_by_key: {(ifc_class, material, layer) -> [shapely Polygon, ...]}
+    wall_polys_by_key: {(ifc_class, material, layer, z_top) -> [shapely Polygon, ...]}
     annotations:   list of IfcAnnotation elements (optional, Bucket D)
     cam_inv_np:    4x4 numpy camera inverse matrix (needed for annotations)
     template_path: path to ifc_dxf_template.dxf (None -> minimal fallback)
@@ -270,7 +270,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # Pre-process all wall groups into (outline_layer, hatch_layer, geoms_list).
     # Then write in two passes: hatches first (bottom of draw order), outlines on top.
     wall_geom_groups = []
-    for (ifc_class, material, layer), polys in wall_polys_by_key.items():
+    for (ifc_class, material, layer, _z_top), polys in wall_polys_by_key.items():
         if not polys:
             continue
         try:
@@ -448,7 +448,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     block_order   = []
     block_inserts = {}   # name -> [(pos_2d, rot_deg, layer), ...]
     flat_edges    = []   # [(p0, p1, layer)] -- wall_mode='flat' only
-    wall_polys_by_key = {}  # (ifc_class, material, layer) -> [Polygon, ...]
+    wall_polys_by_key = {}  # (ifc_class, material, layer, z_top) -> [Polygon, ...]
     footprint_polys = []  # [(gid, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
     seen_blocks   = {}
 
@@ -478,7 +478,12 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                     element, wm, col_major, cut_z, cam_dir
                 )
                 if poly is not None:
-                    key = (ifc_class, material, rec.layer)
+                    if rec.layer.endswith("_View"):
+                        _, z_max = _wall_z_range(element, wm)
+                        z_top_key = round(z_max, 3) if z_max is not None else None
+                    else:
+                        z_top_key = None
+                    key = (ifc_class, material, rec.layer, z_top_key)
                     wall_polys_by_key.setdefault(key, []).append(poly)
                     bucket_b += 1
                     bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
@@ -627,7 +632,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
     if wall_mode == "shapely" and wall_polys_by_key:
         n_polys = sum(len(v) for v in wall_polys_by_key.values())
-        n_sec   = sum(len(v) for (_, _, lyr), v in wall_polys_by_key.items()
+        n_sec   = sum(len(v) for (_, _, lyr, _), v in wall_polys_by_key.items()
                       if lyr.endswith("_Section"))
         print(f"  Wall polys : {n_polys} total ({n_sec} section, {n_polys-n_sec} view)"
               f"  in {len(wall_polys_by_key)} groups")
