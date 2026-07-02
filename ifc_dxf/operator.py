@@ -227,6 +227,15 @@ class IfcDxfProperties(bpy.types.PropertyGroup):
     export_method: bpy.props.EnumProperty(
         name="Method",
         items=[
+            ("ACCURATE",
+             "Accurate",
+             "Matches Bonsai's own SVG export: real OCC Hidden Line Removal "
+             "(ifcopenshell.geom's native SVG serializer) for wall/column section "
+             "cuts, fused and hatched like Approximate; native 2D plan symbols "
+             "(shared BLOCK per type) for doors, windows, furniture, sanitary "
+             "fixtures, etc. Correct occlusion for any BRep geometry at the cost "
+             "of tessellated (faceted) section linework and a slower pipeline. "
+             "Default pipeline"),
             ("APPROXIMATE",
              "Approximate",
              "Reads native 2D representations where available (exact arcs/circles/"
@@ -234,18 +243,9 @@ class IfcDxfProperties(bpy.types.PropertyGroup):
              "projecting extrusion profiles and subtracting openings with Shapely. "
              "Fast, pure Python, no OCC dependency. Assumes vertical extrusions and "
              "does not perform true hidden-line removal, so complex BRep geometry or "
-             "non-planar cuts may come out inaccurate. This is the implemented, "
-             "default pipeline"),
-            ("ACCURATE",
-             "Accurate",
-             "Matches Bonsai's own SVG export: renders the full 3D Body through OCC "
-             "Hidden Line Removal (ifcopenshell.geom's native SVG serializer), giving "
-             "correct occlusion and cut lines for any geometry at the cost of "
-             "tessellated (faceted) linework and a slower pipeline. v1: linework only, "
-             "no hatches yet; elements with complex/tessellated geometry (furniture, "
-             "sanitary fixtures) are not yet attributed to their own layer"),
+             "non-planar cuts may come out inaccurate"),
         ],
-        default="APPROXIMATE",
+        default="ACCURATE",
     )
     template_path: bpy.props.StringProperty(
         name="DXF Template",

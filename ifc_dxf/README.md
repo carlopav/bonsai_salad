@@ -290,11 +290,16 @@ and use the same native-representation path as Pipeline A, which is both
 reliable and (for door/window/furniture symbols) usually what you want to see
 in a plan anyway.
 
-### HLR section cut (Wall / WallStandardCase / Column)
+### HLR section cut (Wall / WallStandardCase / Column, cut by the plane)
 
-Calls `ifcopenshell.geom.serializers.svg`, the native C++ serializer built on
-OpenCASCADE's HLRBRep engine — the same engine Bonsai's own SVG export uses.
-No separate OCC Python bindings needed, it ships in the standard ifcopenshell wheel.
+Elements are first split into **cut** (Z range straddles `cut_z`, real HLR
+section) vs **view** (entirely below `cut_z`, see next section) using the same
+`_wall_z_range` test as Pipeline A's `classify_elements`.
+
+For cut elements: calls `ifcopenshell.geom.serializers.svg`, the native C++
+serializer built on OpenCASCADE's HLRBRep engine — the same engine Bonsai's own
+SVG export uses. No separate OCC Python bindings needed, it ships in the
+standard ifcopenshell wheel.
 
 **Camera setup:** `SvgSerializer.addDrawing(pos, view_dir, ref_dir, name, True)`.
 `ref_dir` must be the drawing placement's local **+X** axis, not +Y — empirically
@@ -310,14 +315,30 @@ an SVG XML string directly (no file I/O). Parsed with `xml.etree.ElementTree`.
 
 **Output structure:** one `<g class="section" ifc:plane="...">` wrapping the
 whole drawing. Inside it, `<g id="product-{guid}-body" class="{IfcClass}"
-ifc:guid="...">` gives a clean per-element HLR outline for elements that
-actually cross the cut plane — written to `{IfcClass}_Section`. The
-`class="projection"` catch-all (see above) is counted and dropped, not drawn.
+ifc:guid="...">` gives a clean per-element HLR outline. Each `<path d="...">`
+may contain several `M`-delimited closed loops; each loop is built directly
+into a Shapely `Polygon` (HLR closes loops back to their start point, so no
+extra work is needed) and grouped into the same `wall_polys_by_key` structure
+Pipeline A uses, keyed by `(ifc_class, material, f"{ifc_class}_Section", None)`.
+`_write_dxf` then Shapely-unions (fuses adjacent/overlapping wall outlines at
+corners and T-junctions) and hatches them exactly like Pipeline A — no
+Accurate-specific fusion/hatch code was needed, only feeding HLR polygons
+through the existing shared machinery.
 
-Path `d` attributes are polygonal only (`setPolygonal(True)` + `setUseHlrPoly(True)`
-guarantee no curve commands) — `M x,y L x,y L x,y ...`, possibly several
-M-delimited subpaths per path. Parsed into line segments and written through
-the same `flat_edges` input as Pipeline A's `wall_mode="flat"`, sharing `_write_dxf`.
+The `class="projection"` catch-all (see above) is counted and dropped, not drawn.
+
+### View walls/columns (below the cut plane, not sliced)
+
+HLR's single `addDrawing` pass only returns geometry actually sliced by the
+cut plane (empirically verified: an isolated below-cut element produces
+nothing at all). Rather than build a second HLR configuration for this, view
+elements reuse Pipeline A's `_extract_wall_polygon_with_openings` Shapely
+profile projection directly (cross-import from `approximate/geometry.py`) —
+for a simple vertical wall/column prism this gives the exact same silhouette a
+true top-down HLR projection would, so it's not a loss of accuracy for the
+common case. Grouped into `wall_polys_by_key` under `f"{ifc_class}_View"`,
+keyed additionally by `z_max` (rounded) like Pipeline A, so polygons from
+different floor levels never fuse together.
 
 ### Native 2D plan symbol (everything else)
 
@@ -329,11 +350,9 @@ into `curves.py` for this reuse), one BLOCK is shared across instances of the
 same `IfcTypeObject`.
 
 **v1 limitations (by design, to revisit):**
-- No hatches for HLR section cuts — needs Shapely `polygonize` over the closed
-  HLR loops + a raycast against the 3D geometry to attribute each fill to a
-  material/layer, mirroring Bonsai's own SHAPELY fill mode.
-- No below-cut "view" geometry for HLR classes — only entities actually sliced
-  by the cut plane appear.
+- No material-layer hatch decomposition (`IfcMaterialLayerSet` strips) for HLR/
+  view walls yet — Pipeline A's `export_material_layers` option isn't wired up
+  here; HLR/view walls currently only get the standard single-material hatch.
 - No overhead-fill re-addition (Pipeline A re-adds windows/doors whose opening
   is entirely above the cut plane, marked `_Overhead`); Pipeline B's shared
   `get_elements()` call doesn't perform this step yet, so such elements are
@@ -357,20 +376,23 @@ same `IfcTypeObject`.
 6. More IFC test fixtures (rotated walls, overhead elements, text annotations, sections, different scales).
 
 **Pipeline B:**
-7. Hatches: Shapely polygonize of closed HLR loops + raycast-based material/layer attribution.
-8. Below-cut "view" geometry (elements not crossing the cut plane).
-9. Diagnose the `class="projection"` mispositioning (shared/mapped Type
-   representations?) — currently dropped rather than attributed.
-10. Overhead-fill re-addition, matching Pipeline A.
-11. `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching Pipeline A.
+7. ~~Hatches + fusion for section-cut walls/columns (feed HLR polygons through
+   Pipeline A's wall_polys_by_key -> shared Shapely union + hatch)~~ — FATTO (lug 2026)
+8. ~~Below-cut "view" geometry (elements not crossing the cut plane)~~ — FATTO (lug 2026),
+   via Pipeline A's Shapely profile projection, not a second HLR pass
+9. Material-layer hatch decomposition (`IfcMaterialLayerSet` strips) for HLR/view walls.
+10. Diagnose the `class="projection"` mispositioning (shared/mapped Type
+    representations?) — currently dropped rather than attributed.
+11. Overhead-fill re-addition, matching Pipeline A.
+12. `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching Pipeline A.
 
 **Upstream:**
-12. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
-13. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
+13. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
+14. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
 
 **Future pipelines:**
-14. Section view / Elevation: non-zenithal camera logic.
-15. Reflected Ceiling Plan, Axonometric.
+15. Section view / Elevation: non-zenithal camera logic.
+16. Reflected Ceiling Plan, Axonometric.
 
 ---
 
