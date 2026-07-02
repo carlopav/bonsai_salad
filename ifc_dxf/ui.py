@@ -12,7 +12,6 @@ class IfcDxfPanel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Bonsai Salad"
-    bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
         layout = self.layout
@@ -27,7 +26,22 @@ class IfcDxfPanel(bpy.types.Panel):
         else:
             layout.label(text=getattr(drawing, "Name", "Drawing"), icon="FILE_IMAGE")
 
+        layout.operator("bim.export_drawing_to_dxf", icon="EXPORT")
+
+
+class IfcDxfOptionsPanel(bpy.types.Panel):
+    bl_label = "Options"
+    bl_idname = "BONSAI_SALAD_PT_ifc_dxf_options"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Bonsai Salad"
+    bl_parent_id = "BONSAI_SALAD_PT_ifc_dxf"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
         props = context.scene.ifc_dxf
+
         import os
         from . import get_template_path as _get_tpl
         tpl = props.template_path or (_get_tpl() or "")
@@ -36,7 +50,8 @@ class IfcDxfPanel(bpy.types.Panel):
         row.label(text=tpl_name, icon="FILE")
         row.operator("bim.select_dxf_template", text="", icon="FILEBROWSER")
 
-        layout.operator("bim.export_drawing_to_dxf", icon="EXPORT")
+        layout.prop(props, "mesh_crease_angle")
+        layout.prop(props, "export_material_layers")
 
 
-classes = [IfcDxfPanel]
+classes = [IfcDxfPanel, IfcDxfOptionsPanel]

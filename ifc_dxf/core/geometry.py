@@ -561,7 +561,7 @@ def _extract_curves_from_items(items, mapping_target=None):
     return verts, edges, arcs, circles, ellipses
 
 
-def _extract_local_curves(element, plan_repr):
+def _extract_local_curves(element, plan_repr, crease_angle_deg=15.0):
     """Extract plan curves in element-local coords.
 
     Returns (verts_flat, edges_flat, arcs, circles, ellipses).
@@ -591,7 +591,7 @@ def _extract_local_curves(element, plan_repr):
     # 3D tessellated mesh: return only naked + crease edges (dihedral > threshold).
     # This avoids flooding the DXF with interior triangulation lines.
     from collections import defaultdict
-    cos_t = math.cos(math.radians(MESH_CREASE_ANGLE_DEG))
+    cos_t = math.cos(math.radians(crease_angle_deg))
     v_np = np.array(verts).reshape(-1, 3)
     f_np = np.array(faces).reshape(-1, 3)
     e0 = v_np[f_np[:, 1]] - v_np[f_np[:, 0]]

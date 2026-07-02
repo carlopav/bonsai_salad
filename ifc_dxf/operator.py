@@ -166,11 +166,14 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             from . import get_template_path
             template_path = get_template_path() or None
 
+        props = context.scene.ifc_dxf
         try:
             export_drawing(
                 ifc, drawing, pset, output_path,
                 wall_mode=wall_mode,
                 template_path=template_path,
+                crease_angle_deg=props.mesh_crease_angle,
+                export_material_layers=props.export_material_layers,
             )
         except Exception as exc:
             self.report({"ERROR"}, f"DXF export failed: {exc}")
@@ -215,6 +218,18 @@ class IfcDxfProperties(bpy.types.PropertyGroup):
         description="Path to the ifc_dxf_template_metric.dxf used as base for exports",
         subtype="FILE_PATH",
         default="",
+    )
+    mesh_crease_angle: bpy.props.FloatProperty(
+        name="Mesh Crease Angle",
+        description="Minimum dihedral angle (degrees) between adjacent faces to draw a shared edge in tessellated meshes",
+        default=15.0,
+        min=0.0,
+        max=180.0,
+    )
+    export_material_layers: bpy.props.BoolProperty(
+        name="Export Material Layers",
+        description="Decompose layered walls into per-material-layer polygons",
+        default=False,
     )
 
 

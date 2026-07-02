@@ -365,7 +365,8 @@ WALL_MODES = ("flat", "shapely")
 
 
 def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
-                   template_path=None):
+                   template_path=None, crease_angle_deg=15.0,
+                   export_material_layers=False):
     """Export a single Bonsai drawing to DXF.
 
     Parameters
@@ -494,7 +495,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
             plan_repr_b, _ = find_plan_repr(element, target_view)
             if plan_repr_b is not None:
                 try:
-                    verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b)
+                    verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b,
+                                                                       crease_angle_deg)
                     if verts and edges:
                         n        = len(verts) // 3
                         va       = np.array(verts[:n*3]).reshape(n, 3)
@@ -573,7 +575,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
                 if block_name not in seen_blocks:
                     verts, edges, arcs, circles, ellipses = _extract_local_curves(
-                        element, rec.plan_repr
+                        element, rec.plan_repr, crease_angle_deg
                     )
                     if verts or edges or arcs or circles or ellipses:
                         lines = _project_local_to_lines(verts or [], edges or [], _cam_R)
