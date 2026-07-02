@@ -9,7 +9,7 @@ import os
 import bpy
 import numpy as np
 
-from .core import export_drawing, find_drawings
+from .core import export_drawing_approximate, export_drawing_accurate, find_drawings
 
 
 # ---------------------------------------------------------------------------
@@ -168,13 +168,20 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
 
         props = context.scene.ifc_dxf
         try:
-            export_drawing(
-                ifc, drawing, pset, output_path,
-                wall_mode=wall_mode,
-                template_path=template_path,
-                crease_angle_deg=props.mesh_crease_angle,
-                export_material_layers=props.export_material_layers,
-            )
+            if props.export_method == "ACCURATE":
+                export_drawing_accurate(
+                    ifc, drawing, pset, output_path,
+                    template_path=template_path,
+                    crease_angle_deg=props.mesh_crease_angle,
+                )
+            else:
+                export_drawing_approximate(
+                    ifc, drawing, pset, output_path,
+                    wall_mode=wall_mode,
+                    template_path=template_path,
+                    crease_angle_deg=props.mesh_crease_angle,
+                    export_material_layers=props.export_material_layers,
+                )
         except Exception as exc:
             self.report({"ERROR"}, f"DXF export failed: {exc}")
             return {"CANCELLED"}
@@ -213,6 +220,33 @@ class SelectDxfTemplateOperator(bpy.types.Operator):
 
 
 class IfcDxfProperties(bpy.types.PropertyGroup):
+    show_options: bpy.props.BoolProperty(
+        name="Show Options",
+        default=False,
+    )
+    export_method: bpy.props.EnumProperty(
+        name="Method",
+        items=[
+            ("APPROXIMATE",
+             "Approximate",
+             "Reads native 2D representations where available (exact arcs/circles/"
+             "ellipses, no tessellation) and derives wall/column sections by "
+             "projecting extrusion profiles and subtracting openings with Shapely. "
+             "Fast, pure Python, no OCC dependency. Assumes vertical extrusions and "
+             "does not perform true hidden-line removal, so complex BRep geometry or "
+             "non-planar cuts may come out inaccurate. This is the implemented, "
+             "default pipeline"),
+            ("ACCURATE",
+             "Accurate",
+             "Matches Bonsai's own SVG export: renders the full 3D Body through OCC "
+             "Hidden Line Removal (ifcopenshell.geom's native SVG serializer), giving "
+             "correct occlusion and cut lines for any geometry at the cost of "
+             "tessellated (faceted) linework and a slower pipeline. v1: linework only, "
+             "no hatches yet; elements with complex/tessellated geometry (furniture, "
+             "sanitary fixtures) are not yet attributed to their own layer"),
+        ],
+        default="APPROXIMATE",
+    )
     template_path: bpy.props.StringProperty(
         name="DXF Template",
         description="Path to the ifc_dxf_template_metric.dxf used as base for exports",

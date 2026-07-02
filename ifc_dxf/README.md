@@ -1,12 +1,16 @@
 # ifc_dxf: DXF Generation
 
 Export an IFC drawing view to DXF with maximum structural and geometric fidelity.
-Implementation: pure Python (`ezdxf` + `shapely` + `ifcopenshell`). No OCC dependency.
+Two independent extraction pipelines (`ifc_dxf/core/approximate/`, `ifc_dxf/core/accurate/`)
+share the same DXF writer, template handling, materials classification and
+annotation writer (`ifc_dxf/core/dxf_writer.py`, `dxf_template.py`, `materials.py`,
+`annotations.py`). No OCC Python bindings are required for either pipeline —
+Accurate uses ifcopenshell's own native HLR serializer.
 
 | Pipeline | Status | Approach |
 |----------|--------|----------|
 | **A — Approximate** | ✓ implemented | IFC-native traversal: 2D reprs as BLOCK/INSERT, sections via Shapely profile extraction |
-| **B — (to be defined)** | ✗ future | — |
+| **B — Accurate** | ✓ v1 (linework only) | OCC/HLR via `ifcopenshell.geom.serializers.svg` — matches Bonsai's own SVG export engine |
 
 ---
 
@@ -267,9 +271,78 @@ for rel in ifc.by_type("IfcRelAssignsToGroup"):
 
 ---
 
-## Pipeline B — (to be defined)
+## Pipeline B — Accurate (OCC/HLR)
 
-Placeholder. Goals and open questions to be established.
+Hybrid: a true HLR section cut only for classes that need one (`IfcWall`,
+`IfcWallStandardCase`, `IfcColumn` — same set as Pipeline A's `_SECTION_CLASSES`);
+everything else (doors, windows, furniture, sanitary fixtures, ...) reuses
+Pipeline A's Bucket A logic verbatim — native 2D plan representation, shared
+BLOCK per `IfcTypeObject` — via the shared `plan_symbols.place_plan_symbol()`.
+
+**Why hybrid:** the HLR serializer's `class="projection"` catch-all group
+(meant for below-cut visible-but-not-sliced geometry) was found to place its
+paths at coordinates unrelated to the element's real position — verified even
+for a single isolated element written to the serializer alone, so it is not a
+camera/parsing bug on this side. Root cause suspected to be in how the native
+serializer handles shared/mapped Type representations, not yet diagnosed
+further. Rather than draw misleading linework, these classes skip HLR entirely
+and use the same native-representation path as Pipeline A, which is both
+reliable and (for door/window/furniture symbols) usually what you want to see
+in a plan anyway.
+
+### HLR section cut (Wall / WallStandardCase / Column)
+
+Calls `ifcopenshell.geom.serializers.svg`, the native C++ serializer built on
+OpenCASCADE's HLRBRep engine — the same engine Bonsai's own SVG export uses.
+No separate OCC Python bindings needed, it ships in the standard ifcopenshell wheel.
+
+**Camera setup:** `SvgSerializer.addDrawing(pos, view_dir, ref_dir, name, True)`.
+`ref_dir` must be the drawing placement's local **+X** axis, not +Y — empirically
+verified: passing local Y rotates the HLR output 90° relative to the rest of the
+pipeline (Pipeline A's camera-space projection). With local X, HLR path
+coordinates match Pipeline A's to float precision, no further transform needed.
+`pos`/`view_dir`/`ref_dir` are plain `(x, y, z)` tuples — the SWIG binding accepts
+them directly in place of `gp_Pnt`/`gp_Dir`. See `camera.camera_pos_dir_ref()`.
+
+**Pipeline:** `addDrawing` → iterate elements via `ifcopenshell.geom.iterator` →
+`serialiser.write(elem)` per element → `finalize()` → `buf.get_value()` returns
+an SVG XML string directly (no file I/O). Parsed with `xml.etree.ElementTree`.
+
+**Output structure:** one `<g class="section" ifc:plane="...">` wrapping the
+whole drawing. Inside it, `<g id="product-{guid}-body" class="{IfcClass}"
+ifc:guid="...">` gives a clean per-element HLR outline for elements that
+actually cross the cut plane — written to `{IfcClass}_Section`. The
+`class="projection"` catch-all (see above) is counted and dropped, not drawn.
+
+Path `d` attributes are polygonal only (`setPolygonal(True)` + `setUseHlrPoly(True)`
+guarantee no curve commands) — `M x,y L x,y L x,y ...`, possibly several
+M-delimited subpaths per path. Parsed into line segments and written through
+the same `flat_edges` input as Pipeline A's `wall_mode="flat"`, sharing `_write_dxf`.
+
+### Native 2D plan symbol (everything else)
+
+Same code as Pipeline A's Bucket A, factored out into `plan_symbols.place_plan_symbol()`
+(shared module, used by both pipelines): `find_plan_repr` looks up the
+element's or its type's Plan/Body representation, `curves._extract_local_curves`
+extracts exact arcs/circles/ellipses (moved out of `approximate/geometry.py`
+into `curves.py` for this reuse), one BLOCK is shared across instances of the
+same `IfcTypeObject`.
+
+**v1 limitations (by design, to revisit):**
+- No hatches for HLR section cuts — needs Shapely `polygonize` over the closed
+  HLR loops + a raycast against the 3D geometry to attribute each fill to a
+  material/layer, mirroring Bonsai's own SHAPELY fill mode.
+- No below-cut "view" geometry for HLR classes — only entities actually sliced
+  by the cut plane appear.
+- No overhead-fill re-addition (Pipeline A re-adds windows/doors whose opening
+  is entirely above the cut plane, marked `_Overhead`); Pipeline B's shared
+  `get_elements()` call doesn't perform this step yet, so such elements are
+  currently missing from the accurate export.
+- `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction (Pipeline A's Shapely-
+  based `_slab_footprint_world` path) isn't ported to Pipeline B; these classes
+  fall back to `place_plan_symbol` only, or are skipped if that fails.
+- Root cause of the `class="projection"` mispositioning is still undiagnosed;
+  worth a proper upstream investigation before relying on it for anything.
 
 ---
 
@@ -283,14 +356,21 @@ Placeholder. Goals and open questions to be established.
 5. Bucket D — D3: symbols, markers, hatches.
 6. More IFC test fixtures (rotated walls, overhead elements, text annotations, sections, different scales).
 
+**Pipeline B:**
+7. Hatches: Shapely polygonize of closed HLR loops + raycast-based material/layer attribution.
+8. Below-cut "view" geometry (elements not crossing the cut plane).
+9. Diagnose the `class="projection"` mispositioning (shared/mapped Type
+   representations?) — currently dropped rather than attributed.
+10. Overhead-fill re-addition, matching Pipeline A.
+11. `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching Pipeline A.
+
 **Upstream:**
-7. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
-8. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
+12. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
+13. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
 
 **Future pipelines:**
-9. B-Accurate (OCC/HLR): precise linework via ifcopenshell geom serializer.
-10. Section view / Elevation: non-zenithal camera logic.
-11. Reflected Ceiling Plan, Axonometric.
+14. Section view / Elevation: non-zenithal camera logic.
+15. Reflected Ceiling Plan, Axonometric.
 
 ---
 

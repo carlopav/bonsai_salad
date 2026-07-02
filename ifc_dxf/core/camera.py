@@ -35,6 +35,24 @@ def camera_dir_pos(drawing):
     return cam_dir, cam_pos
 
 
+def camera_pos_dir_ref(drawing):
+    """Return (pos, view_dir, ref_dir) tuples for ifcopenshell.geom's
+    SvgSerializer.addDrawing(pos, dir, ref, name, include_projection).
+
+    ref_dir must be the placement's local +X axis (not +Y): empirically
+    verified against this module's own camera_matrix_inv_col_major
+    projection -- passing local Y here rotates the HLR output 90 degrees
+    relative to the rest of the pipeline. With local X, HLR path
+    coordinates come out identical (to float precision) to the coordinates
+    produced by the approximate pipeline's camera-space projection.
+    """
+    m = _placement_matrix(drawing)
+    pos      = tuple(float(x) for x in m[:3, 3])
+    view_dir = tuple(float(x) for x in -m[:3, 2])
+    ref_dir  = tuple(float(x) for x in m[:3, 0])
+    return pos, view_dir, ref_dir
+
+
 def get_camera_frustum_bbox(drawing):
     """Return (x_min, x_max, y_min, y_max, z_min, z_max) in world coordinates
     from the drawing camera's body geometry (IfcCsgSolid / IfcExtrudedAreaSolid).
