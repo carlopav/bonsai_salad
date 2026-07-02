@@ -280,18 +280,17 @@ Placeholder. Goals and open questions to be established.
 2. Report elements with deep boolean chains (> threshold) during export.
 3. Frustum culling AABB fallback: test full geometry bounding box when origin test fails.
 4. Material-agnostic wall fusion option (`unary_union` regardless of material).
-5. Per-layer fusion for `IfcMaterialLayerSet` walls (decompose polygon into layer strips).
-6. Bucket D — D3: symbols, markers, hatches.
-7. More IFC test fixtures (rotated walls, overhead elements, text annotations, sections, different scales).
+5. Bucket D — D3: symbols, markers, hatches.
+6. More IFC test fixtures (rotated walls, overhead elements, text annotations, sections, different scales).
 
 **Upstream:**
-8. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
-9. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
+7. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
+8. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
 
 **Future pipelines:**
-10. B-Accurate (OCC/HLR): precise linework via ifcopenshell geom serializer.
-11. Section view / Elevation: non-zenithal camera logic.
-12. Reflected Ceiling Plan, Axonometric.
+9. B-Accurate (OCC/HLR): precise linework via ifcopenshell geom serializer.
+10. Section view / Elevation: non-zenithal camera logic.
+11. Reflected Ceiling Plan, Axonometric.
 
 ---
 

@@ -875,6 +875,138 @@ def _wall_profile_polygon(element, wm_flat, cam_inv_col_major, camera_dir):
     return None
 
 
+def _get_material_layer_strips(element):
+    """Return list of (material_name, y_start, y_end) in element-local Y space.
+
+    Reads IfcMaterialLayerSetUsage: layers are stacked along local AXIS2 (Y)
+    starting at OffsetFromReferenceLine.  Returns [] if no layer set found.
+    """
+    try:
+        for rel in getattr(element, 'HasAssociations', []):
+            if not rel.is_a("IfcRelAssociatesMaterial"):
+                continue
+            usage = rel.RelatingMaterial
+            if not usage.is_a("IfcMaterialLayerSetUsage"):
+                continue
+            sign   = -1.0 if getattr(usage, 'DirectionSense', 'POSITIVE') == 'NEGATIVE' else 1.0
+            y      = float(usage.OffsetFromReferenceLine)
+            strips = []
+            for layer in usage.ForLayerSet.MaterialLayers:
+                name      = (getattr(layer.Material, 'Name', None) or "") if layer.Material else ""
+                thickness = float(layer.LayerThickness)
+                y_next    = y + sign * thickness
+                strips.append((name, min(y, y_next), max(y, y_next)))
+                y = y_next
+            return strips
+    except Exception:
+        pass
+    return []
+
+
+def _decompose_wall_to_layer_polygons(full_poly, element, wm_flat, cam_inv_col_major):
+    """Decompose full wall plan polygon into per-material-layer sub-polygons.
+
+    Each material layer occupies a strip along the wall's local Y axis (thickness
+    direction). The strip is intersected with full_poly to get the layer footprint.
+
+    Returns list of (material_name, shapely_polygon), or None if no layer set.
+    """
+    strips = _get_material_layer_strips(element)
+    if not strips:
+        return None
+
+    world_m  = np.array(wm_flat,          dtype=float).reshape(4, 4, order='F')
+    cam_inv  = np.array(cam_inv_col_major, dtype=float).reshape(4, 4, order='F')
+    combined = cam_inv @ world_m
+
+    # Local Y axis (thickness direction) and X axis (length direction) in camera 2D
+    dy = (combined @ np.array([0.0, 1.0, 0.0, 0.0]))[:2]
+    dx = (combined @ np.array([1.0, 0.0, 0.0, 0.0]))[:2]
+    dy_n = np.linalg.norm(dy)
+    dx_n = np.linalg.norm(dx)
+    if dy_n < 1e-9 or dx_n < 1e-9:
+        return None
+    dy = dy / dy_n
+    dx = dx / dx_n
+
+    # Wall origin in camera 2D
+    orig = (combined @ np.array([0.0, 0.0, 0.0, 1.0]))[:2]
+
+    BIG = 1e6
+    result = []
+    for mat_name, y_start, y_end in strips:
+        p0 = orig + y_start * dy  # near edge of strip
+        p1 = orig + y_end   * dy  # far edge of strip
+        # Strip polygon: infinite in wall length direction, bounded in Y
+        s1 = tuple(p0 + dx * BIG)
+        s2 = tuple(p0 - dx * BIG)
+        s3 = tuple(p1 - dx * BIG)
+        s4 = tuple(p1 + dx * BIG)
+        try:
+            strip_poly  = shapely.Polygon([s1, s2, s3, s4])
+            layer_poly  = full_poly.intersection(strip_poly)
+            if not layer_poly.is_empty and layer_poly.area > 1e-6:
+                result.append((mat_name, layer_poly))
+        except Exception:
+            pass
+
+    return result if result else None
+
+
+def _wall_layer_subdivision_lines(full_poly, element, wm_flat, cam_inv_col_major):
+    """Return shapely LineStrings marking the boundaries between adjacent
+    IfcMaterialLayerSetUsage layers, clipped to full_poly.
+
+    Only internal boundaries are returned (the two outer wall faces are
+    already drawn as the wall outline). Returns None if there are fewer
+    than two layers.
+    """
+    strips = _get_material_layer_strips(element)
+    if len(strips) < 2:
+        return None
+
+    counts: dict[float, int] = {}
+    for _, y_start, y_end in strips:
+        for y in (round(y_start, 9), round(y_end, 9)):
+            counts[y] = counts.get(y, 0) + 1
+    internal_ys = sorted(y for y, c in counts.items() if c >= 2)
+    if not internal_ys:
+        return None
+
+    world_m  = np.array(wm_flat,          dtype=float).reshape(4, 4, order='F')
+    cam_inv  = np.array(cam_inv_col_major, dtype=float).reshape(4, 4, order='F')
+    combined = cam_inv @ world_m
+
+    dy = (combined @ np.array([0.0, 1.0, 0.0, 0.0]))[:2]
+    dx = (combined @ np.array([1.0, 0.0, 0.0, 0.0]))[:2]
+    dy_n = np.linalg.norm(dy)
+    dx_n = np.linalg.norm(dx)
+    if dy_n < 1e-9 or dx_n < 1e-9:
+        return None
+    dy = dy / dy_n
+    dx = dx / dx_n
+
+    orig = (combined @ np.array([0.0, 0.0, 0.0, 1.0]))[:2]
+
+    BIG = 1e6
+    result = []
+    for y in internal_ys:
+        p = orig + y * dy
+        line = shapely.LineString([tuple(p + dx * BIG), tuple(p - dx * BIG)])
+        try:
+            clipped = full_poly.intersection(line)
+        except Exception:
+            continue
+        if clipped.is_empty:
+            continue
+        if clipped.geom_type == 'LineString':
+            result.append(clipped)
+        elif clipped.geom_type == 'MultiLineString':
+            result.extend(list(clipped.geoms))
+
+    return result if result else None
+
+
 def _opening_footprint_polygon(opening, cam_inv_col_major):
     """Get plan footprint of an IfcOpeningElement via geom tessellation.
 

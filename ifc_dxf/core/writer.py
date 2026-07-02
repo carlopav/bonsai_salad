@@ -35,7 +35,10 @@ from .geometry import (
     _compute_floor_slabs,
     _is_occluded_by_slab,
     _slab_footprint_world,
+    _decompose_wall_to_layer_polygons,
+    _wall_layer_subdivision_lines,
 )
+from .materials import classify_material_color
 from .dxf_template import (
     _project_local_to_lines,
     _compute_insert,
@@ -183,7 +186,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                annotations=None, cam_inv_np=None,
                template_path=None, scale_factor=0.01,
                drawing_name=None, drawing_identification=None,
-               drawing_scale=None, footprint_polys=None):
+               drawing_scale=None, footprint_polys=None,
+               wall_layer_polys=None, wall_subdivision_lines=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -270,7 +274,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # Pre-process all wall groups into (outline_layer, hatch_layer, geoms_list).
     # Then write in two passes: hatches first (bottom of draw order), outlines on top.
     wall_geom_groups = []
-    for (ifc_class, material, layer, _z_top), polys in wall_polys_by_key.items():
+    for (ifc_class, material, layer, z_top), polys in wall_polys_by_key.items():
         if not polys:
             continue
         try:
@@ -284,12 +288,20 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         outline_layer = layer
         hatch_layer   = f"{ifc_class}_Hatches"
         geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
-        wall_geom_groups.append((outline_layer, hatch_layer, is_section, geoms))
+        decompose_key = (ifc_class, layer, z_top)
+        wall_geom_groups.append((outline_layer, hatch_layer, is_section, geoms, decompose_key))
 
-    # Pass 1 -- hatches (drawn first -> below everything else)
-    for outline_layer, hatch_layer, is_section, geoms in wall_geom_groups:
-        if not is_section:
-            continue
+    # Keys whose standard hatch was replaced by per-material-layer hatches (Pass 1b).
+    # Elements without a material layer set (e.g. IfcColumn, or walls with no
+    # IfcMaterialLayerSetUsage) are never decomposed and must keep their standard hatch.
+    decomposed_keys = set()
+    if wall_layer_polys:
+        decomposed_keys = {
+            (ifc_class, layer, z_top)
+            for (ifc_class, _mat_name, layer, z_top) in wall_layer_polys.keys()
+        }
+
+    def _write_hatch(msp, hatch_layer, geoms):
         for poly in geoms:
             if poly.geom_type != 'Polygon':
                 continue
@@ -304,8 +316,48 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             for hole in holes:
                 hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
 
+    # Pass 1 -- hatches (drawn first -> below everything else)
+    # Only groups actually decomposed into per-material-layer hatches (Pass 1b)
+    # skip their standard hatch here; everything else (e.g. IfcColumn, or walls
+    # without a material layer set) keeps its normal hatch.
+    for outline_layer, hatch_layer, is_section, geoms, decompose_key in wall_geom_groups:
+        if not is_section or decompose_key in decomposed_keys:
+            continue
+        _write_hatch(msp, hatch_layer, geoms)
+
+    # Pass 1b -- per-material-layer hatches (IfcWall_Hatches_Calcestruzzo, …)
+    # These layers don't exist in the template (material names are arbitrary),
+    # so they're created on the fly and coloured by material keyword.
+    if wall_layer_polys:
+        for (ifc_class, mat_name, layer, _z_top), polys in wall_layer_polys.items():
+            if not layer.endswith("_Section") or not polys:
+                continue
+            try:
+                expanded = [p.buffer(SNAP_TOL, join_style=2) for p in polys]
+                merged   = shapely.ops.unary_union(expanded).buffer(-SNAP_TOL, join_style=2)
+            except Exception:
+                merged = polys[0] if len(polys) == 1 else None
+            if merged is None:
+                continue
+            suffix     = f"_{mat_name}" if mat_name else ""
+            hatch_layer = f"{ifc_class}_Hatches{suffix}"
+            try:
+                dxf_layer = doc.layers.get(hatch_layer)
+            except Exception:
+                dxf_layer = doc.layers.add(hatch_layer)
+            dxf_layer.color = classify_material_color(mat_name)
+            geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
+            _write_hatch(msp, hatch_layer, geoms)
+
+    # Pass 1c -- material-layer subdivision lines (fixed layer, styled by template)
+    if wall_subdivision_lines:
+        for line in wall_subdivision_lines:
+            pts = [(float(x), float(y)) for x, y in line.coords]
+            if len(pts) >= 2:
+                msp.add_lwpolyline(pts, dxfattribs={"layer": "IfcWall_LayersSubdivision"})
+
     # Pass 2 -- outlines (drawn last -> on top of hatches)
-    for outline_layer, hatch_layer, is_section, geoms in wall_geom_groups:
+    for outline_layer, hatch_layer, is_section, geoms, _decompose_key in wall_geom_groups:
         for poly in geoms:
             if poly.geom_type != 'Polygon':
                 continue
@@ -328,7 +380,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
 
     # zoom extents
     xs, ys = [], []
-    for _, _, _, geoms in wall_geom_groups:
+    for _, _, _, geoms, _ in wall_geom_groups:
         for poly in geoms:
             if poly.geom_type == 'Polygon':
                 xs.extend(x for x, y in poly.exterior.coords)
@@ -451,6 +503,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     flat_edges    = []   # [(p0, p1, layer)] -- wall_mode='flat' only
     wall_polys_by_key = {}  # (ifc_class, material, layer, z_top) -> [Polygon, ...]
     footprint_polys = []  # [(gid, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
+    wall_layer_polys_by_key = {}  # (ifc_class, mat_name, layer, z_top) -> [Polygon]
+    wall_subdivision_lines = []  # [LineString, ...]
     seen_blocks   = {}
 
     bucket_a = bucket_b = bucket_c = 0
@@ -486,6 +540,19 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                         z_top_key = None
                     key = (ifc_class, material, rec.layer, z_top_key)
                     wall_polys_by_key.setdefault(key, []).append(poly)
+                    if export_material_layers and rec.layer.endswith("_Section"):
+                        layer_polys = _decompose_wall_to_layer_polygons(
+                            poly, element, wm, col_major
+                        )
+                        if layer_polys:
+                            for mat_name, lp in layer_polys:
+                                lkey = (ifc_class, mat_name, rec.layer, z_top_key)
+                                wall_layer_polys_by_key.setdefault(lkey, []).append(lp)
+                        subdivision_lines = _wall_layer_subdivision_lines(
+                            poly, element, wm, col_major
+                        )
+                        if subdivision_lines:
+                            wall_subdivision_lines.extend(subdivision_lines)
                     bucket_b += 1
                     bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
                     processed = True
@@ -655,7 +722,9 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                drawing_name=getattr(drawing, "Name", None),
                drawing_identification=getattr(drawing, "Identification", None),
                drawing_scale=human_scale,
-               footprint_polys=footprint_polys)
+               footprint_polys=footprint_polys,
+               wall_layer_polys=wall_layer_polys_by_key or None,
+               wall_subdivision_lines=wall_subdivision_lines or None)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")
