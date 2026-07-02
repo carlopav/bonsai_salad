@@ -17,7 +17,7 @@ import ifcopenshell
 # ---------------------------------------------------------------------------
 
 def _pt2(model: ifcopenshell.file, x: float, y: float, scale: float = 1.0):
-    return model.createIfcCartesianPoint([x * scale, y * scale])
+    return model.createIfcCartesianPoint([float(x) * scale, float(y) * scale])
 
 
 def _axis2d(model: ifcopenshell.file, cx: float, cy: float, scale: float = 1.0):
@@ -166,14 +166,19 @@ def _spline_to_ifc(model: ifcopenshell.file, entity, scale: float):
 
 
 def _hatch_to_ifc(model: ifcopenshell.file, entity, scale: float):
-    """Extract outer boundary loops of a HATCH as IfcPolyline items."""
+    """Extract boundary loops of a HATCH as IfcPolyline items."""
     items = []
     try:
         for path in entity.paths:
             pts = []
-            for edge in path.edges:
-                if hasattr(edge, "start"):
-                    pts.append(edge.start)
+            if hasattr(path, "vertices"):
+                # PolylinePath: vertices are (x, y, bulge) tuples
+                pts = [(v[0], v[1]) for v in path.vertices]
+            elif hasattr(path, "edges"):
+                # EdgePath
+                for edge in path.edges:
+                    if hasattr(edge, "start"):
+                        pts.append((edge.start[0], edge.start[1]))
             if len(pts) >= 2:
                 ifc_pts = [_pt2(model, p[0], p[1], scale) for p in pts]
                 ifc_pts.append(ifc_pts[0])  # close loop
@@ -271,11 +276,13 @@ def block_to_representation_map(
 def insert_to_mapped_item(model: ifcopenshell.file, insert_entity, repr_map, scale: float = 1.0):
     """Convert a DXF INSERT to IfcMappedItem using a pre-built IfcRepresentationMap."""
     t = insert_entity.dxf
+    rotation = math.radians(getattr(t, "rotation", 0.0))
+    cos_r, sin_r = math.cos(rotation), math.sin(rotation)
     target = model.createIfcCartesianTransformationOperator2D(
-        Axis1=None,
-        Axis2=None,
-        LocalOrigin=model.createIfcCartesianPoint([t.insert.x * scale, t.insert.y * scale]),
-        Scale=getattr(t, "xscale", 1.0),
+        Axis1=model.createIfcDirection([cos_r, sin_r]),
+        Axis2=model.createIfcDirection([-sin_r, cos_r]),
+        LocalOrigin=model.createIfcCartesianPoint([float(t.insert.x) * scale, float(t.insert.y) * scale]),
+        Scale=float(getattr(t, "xscale", 1.0)),
     )
     return model.createIfcMappedItem(
         MappingSource=repr_map,

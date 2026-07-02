@@ -2,12 +2,11 @@
 # Copyright (C) 2026 Carlo Pavan <carlopav@gmail.com>
 # GPL-3.0
 
-"""Main DXF → IFC representation import pipeline (pure Python, no bpy)."""
+"""Main DXF -> IFC representation import pipeline (pure Python, no bpy)."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -16,11 +15,7 @@ import ifcopenshell
 import ifcopenshell.api
 import ifcopenshell.util.representation
 
-from .converter import (
-    dxf_entity_to_ifc,
-    block_to_representation_map,
-    insert_to_mapped_item,
-)
+from .converter import dxf_entity_to_ifc
 from .styles import (
     layer_colour,
     lineweight_to_mm,
@@ -33,26 +28,25 @@ from .styles import (
 # ---------------------------------------------------------------------------
 
 _INSUNITS_TO_METERS: dict[int, float] = {
-    0:  1.0,       # unitless → assume metres
-    1:  0.0254,    # inches
-    2:  0.3048,    # feet
-    4:  1e-3,      # mm
-    5:  1e-2,      # cm
-    6:  1.0,       # metres
-    7:  1e3,       # km
-    14: 1e-6,      # microns
-    15: 1e-2,      # decimetres
-    17: 1e6,       # megametres
+    0:  1.0,
+    1:  0.0254,
+    2:  0.3048,
+    4:  1e-3,
+    5:  1e-2,
+    6:  1.0,
+    7:  1e3,
+    14: 1e-6,
+    15: 1e-2,
+    17: 1e6,
 }
 
 
 def _dxf_scale(doc) -> float:
-    """Return scale factor to convert DXF document units → metres."""
     try:
         insunits = doc.header.get("$INSUNITS", 4)
         return _INSUNITS_TO_METERS.get(insunits, 1e-3)
     except Exception:
-        return 1e-3  # assume mm if header unreadable
+        return 1e-3
 
 
 # ---------------------------------------------------------------------------
@@ -68,11 +62,7 @@ def get_or_create_subcontext(
     """Return existing subcontext or create it under the matching parent context."""
     parent = ifcopenshell.util.representation.get_context(model, context_identifier)
     if parent is None:
-        parent = ifcopenshell.api.run(
-            "context.add_context",
-            model,
-            context_type="Plan",
-        )
+        parent = ifcopenshell.api.run("context.add_context", model, context_type="Plan")
 
     for sub in model.by_type("IfcGeometricRepresentationSubContext"):
         if (
@@ -93,36 +83,6 @@ def get_or_create_subcontext(
 
 
 # ---------------------------------------------------------------------------
-# Pset helper (optional)
-# ---------------------------------------------------------------------------
-
-def _write_pset(
-    model: ifcopenshell.file,
-    element,
-    dxf_path: Path,
-    layer_name: str,
-    linetype_name: str,
-    aci_index: int,
-    lineweight_raw: int,
-):
-    import ifcopenshell.api
-    pset = ifcopenshell.api.run("pset.add_pset", model, product=element, name="Pset_DXFSource")
-    ifcopenshell.api.run(
-        "pset.edit_pset",
-        model,
-        pset=pset,
-        properties={
-            "DXF_SourceFile":  str(dxf_path),
-            "DXF_Layer":       layer_name,
-            "DXF_Linetype":    linetype_name,
-            "DXF_Color":       str(aci_index),
-            "DXF_Lineweight":  str(lineweight_raw),
-            "DXF_ImportDate":  datetime.now().isoformat(),
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -132,20 +92,22 @@ def import_dxf_as_representation(
     dxf_path: Path,
     subcontext=None,
     *,
-    write_pset: bool = False,
     skip_layers: Optional[list[str]] = None,
+    source_block: Optional[str] = None,
+    source_layer: Optional[str] = None,
 ) -> object:
     """
     Parse *dxf_path* and assign its geometry as an IFC representation on *element*.
 
     Parameters
     ----------
-    model       : open ifcopenshell.file
-    element     : target IFC product (already exists in model)
-    dxf_path    : path to the DXF file
-    subcontext  : IfcGeometricRepresentationSubContext; created if None
-    write_pset  : if True, attach Pset_DXFSource to element with DXF metadata
-    skip_layers : layer names to ignore (e.g. ["DEFPOINTS"])
+    model        : open ifcopenshell.file
+    element      : target IFC product (already exists in model)
+    dxf_path     : path to the DXF file
+    subcontext   : IfcGeometricRepresentationSubContext; created if None
+    skip_layers  : layer names to ignore (e.g. ["DEFPOINTS"])
+    source_block : if set, import only entities from this block definition
+    source_layer : if set, import only entities on this layer (from modelspace)
 
     Returns
     -------
@@ -153,65 +115,60 @@ def import_dxf_as_representation(
     """
     dxf_path = Path(dxf_path)
     doc = ezdxf.readfile(str(dxf_path))
-    msp = doc.modelspace()
     scale = _dxf_scale(doc)
+
+    if source_block:
+        if source_block not in doc.blocks:
+            raise ValueError(f"Block '{source_block}' not found in {dxf_path.name}")
+        msp = doc.blocks[source_block]
+    else:
+        msp = doc.modelspace()
 
     if subcontext is None:
         subcontext = get_or_create_subcontext(model)
 
     _skip = set(skip_layers or []) | {"DEFPOINTS"}
+    _only_layer = source_layer or None
 
-    # 1. Remove any existing representation in this subcontext
+    # 1. Remove any existing representation in this subcontext directly
     if element.Representation:
-        to_remove = [
-            r for r in element.Representation.Representations
-            if r.ContextOfItems == subcontext
-        ]
-        for r in to_remove:
-            ifcopenshell.api.run(
-                "geometry.remove_representation",
-                model,
-                product=element,
-                representation=r,
-            )
+        pds = element.Representation
+        pds.Representations = [r for r in pds.Representations if r.ContextOfItems != subcontext]
 
-    # 2. Pre-build block definitions → IfcRepresentationMap
-    block_maps: dict[str, object] = {}
-    for block_def in doc.blocks:
-        block_name = block_def.name
-        if block_name.startswith("*"):
-            continue
-        repr_map = block_to_representation_map(model, block_def, subcontext, scale)
-        if repr_map is not None:
-            block_maps[block_name] = repr_map
-
-    # 3. Group modelspace entities by layer
+    # 2. Group modelspace entities by layer, expanding INSERTs inline
     layer_entities: dict[str, list] = defaultdict(list)
-    insert_entities: list = []
 
     for entity in msp:
-        layer_name = entity.dxf.layer
-        if layer_name in _skip:
-            continue
         if entity.dxftype() == "INSERT":
-            insert_entities.append(entity)
+            # Expand block to world-space entities via ezdxf
+            for virtual in entity.virtual_entities():
+                layer_name = virtual.dxf.layer
+                if layer_name in _skip:
+                    continue
+                if _only_layer and layer_name != _only_layer:
+                    continue
+                layer_entities[layer_name].append(virtual)
         else:
+            layer_name = entity.dxf.layer
+            if layer_name in _skip:
+                continue
+            if _only_layer and layer_name != _only_layer:
+                continue
             layer_entities[layer_name].append(entity)
 
     all_items: list = []
-    ifc_layers: list = []
 
     # 4. Per-layer geometry + style
     for layer_name, entities in layer_entities.items():
         ifc_items = []
         for entity in entities:
             item = dxf_entity_to_ifc(model, entity, scale)
-            if item is not None:
-                # IfcGeometricCurveSet returned by lwpolyline multi-segment
-                if item.is_a("IfcGeometricCurveSet"):
-                    ifc_items.extend(item.Elements)
-                else:
-                    ifc_items.append(item)
+            if item is None:
+                continue
+            if item.is_a("IfcGeometricCurveSet"):
+                ifc_items.extend(item.Elements)
+            else:
+                ifc_items.append(item)
 
         if not ifc_items:
             continue
@@ -222,7 +179,6 @@ def import_dxf_as_representation(
         dxf_layer = doc.layers.get(layer_name)
         linetype_name = "CONTINUOUS"
         lineweight_raw = -3
-        aci_index = 7
         if dxf_layer is not None:
             try:
                 linetype_name = dxf_layer.dxf.linetype or "CONTINUOUS"
@@ -230,10 +186,6 @@ def import_dxf_as_representation(
                 pass
             try:
                 lineweight_raw = dxf_layer.dxf.lineweight
-            except Exception:
-                pass
-            try:
-                aci_index = dxf_layer.color
             except Exception:
                 pass
 
@@ -248,7 +200,7 @@ def import_dxf_as_representation(
             CurveWidth=model.createIfcPositiveLengthMeasure(lw_mm) if lw_mm else None,
         )
 
-        ifc_layer = model.createIfcPresentationLayerWithStyle(
+        model.createIfcPresentationLayerWithStyle(
             Name=layer_name,
             AssignedItems=[curve_set],
             LayerOn=True,
@@ -256,27 +208,11 @@ def import_dxf_as_representation(
             LayerBlocked=False,
             LayerStyles=[model.createIfcPresentationStyleAssignment([curve_style])],
         )
-        ifc_layers.append(ifc_layer)
-
-        if write_pset:
-            _write_pset(
-                model, element, dxf_path,
-                layer_name, linetype_name, aci_index, lineweight_raw,
-            )
-
-    # 5. INSERT entities → IfcMappedItem
-    for insert in insert_entities:
-        block_name = insert.dxf.name
-        repr_map = block_maps.get(block_name)
-        if repr_map is None:
-            continue
-        mapped_item = insert_to_mapped_item(model, insert, repr_map, scale)
-        all_items.append(mapped_item)
 
     if not all_items:
         raise ValueError(f"No geometry found in {dxf_path.name}")
 
-    # 6. Build ShapeRepresentation and assign
+    # 6. Build ShapeRepresentation and assign directly (avoids API wrapping)
     new_repr = model.createIfcShapeRepresentation(
         ContextOfItems=subcontext,
         RepresentationIdentifier="Annotation",
@@ -284,11 +220,11 @@ def import_dxf_as_representation(
         Items=all_items,
     )
 
-    ifcopenshell.api.run(
-        "geometry.assign_representation",
-        model,
-        product=element,
-        representation=new_repr,
-    )
+    pds = element.Representation
+    if pds is None:
+        pds = model.createIfcProductDefinitionShape(Representations=[new_repr])
+        element.Representation = pds
+    else:
+        pds.Representations = list(pds.Representations) + [new_repr]
 
     return new_repr

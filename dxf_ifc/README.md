@@ -40,7 +40,6 @@ Each DXF layer becomes an `IfcPresentationLayerWithStyle` with:
 | Context | `Plan` (2D) or `Model` (3D) |
 | Subcontext | Identifier string, default `Annotation` |
 | Target View | e.g. `PLAN_VIEW`, `SECTION_VIEW` |
-| Write Pset_DXFSource | Optionally attach DXF metadata (source file, layer, colour, lineweight) as a property set |
 
 ## Dependencies
 

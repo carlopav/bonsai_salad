@@ -3,7 +3,6 @@
 # GPL-3.0
 
 import bpy
-from .operator import _get_ifc, _get_selected_element, _get_element_subcontext
 
 
 class DxfIfcPanel(bpy.types.Panel):
@@ -16,8 +15,6 @@ class DxfIfcPanel(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        props = context.scene.dxf_ifc
-        layout.prop(props, "write_pset")
         layout.operator("bim.import_dxf_as_representation", icon="IMPORT")
 
 
