@@ -265,7 +265,35 @@ for rel in ifc.by_type("IfcRelAssignsToGroup"):
 | `regular` | 2.5 | 0.25 m |
 | `small` | 1.8 | 0.18 m |
 
-`txt_height = paper_mm * 0.001 / scale_factor`. Bonsai CSS box-align → DXF `halign`/`valign`.
+`txt_height = paper_mm * 0.001 / scale_factor`.
+
+Two sub-cases, both `ObjectType == "TEXT"`, distinguished by whether the annotation
+has an `IfcTypeProduct` (`IsTypedBy` → `IfcRelDefinesByType`):
+
+- **Plain/untyped** (free-standing notes): each `IfcTextLiteralWithExtent` in the
+  element's own `Representation` becomes one DXF `TEXT` entity, positioned at the
+  literal's own local `Placement` (not just the annotation origin — needed once
+  an annotation carries more than one literal). Gets a single annotative-scale
+  representation via `_make_text_annotative()`.
+
+- **Typed tags** (space tags, and any other Bonsai "tag" built from a library
+  type — door tags, level tags, ...): Bonsai shares the tag's text-literal
+  layout from the type's `RepresentationMaps` (same mechanism as door/window
+  plan symbols sharing a type's Body geometry), and the *stored* `Literal`
+  string keeps Bonsai's unresolved template syntax forever — `{{Name}}`,
+  `` `` `round({{Qto_SpaceBaseQuantities.NetFloorArea}}, 0.01)` `` `` — resolving
+  it live against the tag's assigned product every time Bonsai renders an SVG
+  (`tool.Drawing.replace_text_literal_variables`, never baked back into the IFC).
+  Mapped onto DXF as a **shared BLOCK with one ATTDEF per text literal** (default
+  text = the raw template, position/`halign`/`valign` from the literal's own
+  `Placement`/`BoxAlignment`) plus **one INSERT+ATTRIB per instance**, with each
+  ATTRIB holding that instance's resolved value. One BLOCK per `IfcTypeProduct`,
+  reused across every tagged instance (`get_type_block_name`, same helper Bucket A
+  plan symbols use). The instance → product link (e.g. which `IfcSpace` a tag
+  belongs to) comes from `IfcRelAssignsToProduct` (`HasAssignments`), matching
+  Bonsai's `bpy.ops.bim.edit_assigned_product` — not geometric proximity or naming.
+  Template resolution reuses `ifcopenshell.util.selector.get_element_value()` /
+  `.format()`, the same standard (non-Bonsai-specific) functions Bonsai itself calls.
 
 **D3 — Other (future):** symbols, hatches, Bonsai SVG markers.
 
@@ -385,6 +413,9 @@ same `IfcTypeObject`.
     representations?) — currently dropped rather than attributed.
 11. Overhead-fill re-addition, matching Pipeline A.
 12. `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching Pipeline A.
+13. Naming convention for dxf: ClassNameSenzaIfc_TypeNameSenzaIfc_GuidLast8Chars for example: FurnitureType_Bigtablewithchairs_851asdas
+14. Template-based space tag: se il template DXF contiene già un blocco con nome corrispondente al tipo esportato da Bonsai e attributi coincidenti con i {{}}, usare quello invece di generarlo — si parte aggiungendo il blocco al template
+
 
 **Upstream:**
 13. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).

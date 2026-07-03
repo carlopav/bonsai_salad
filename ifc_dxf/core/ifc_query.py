@@ -111,6 +111,19 @@ def get_type_block_name(element):
     return ifc_type, f"{name}_{ifc_type.GlobalId[:8]}"
 
 
+def get_assigned_product(element):
+    """Return the IfcRelAssignsToProduct.RelatingProduct linked to element, or None.
+
+    Mirrors Bonsai's tool.Drawing.get_assigned_product (bpy.ops.bim.edit_assigned_product):
+    a tag annotation (e.g. a space tag) is linked to its target product (e.g. the
+    IfcSpace it labels) this way, not via geometric proximity or naming.
+    """
+    for rel in getattr(element, "HasAssignments", []) or []:
+        if rel.is_a("IfcRelAssignsToProduct"):
+            return rel.RelatingProduct
+    return None
+
+
 def get_material_name(element):
     """Return the first material name associated with the element, or empty string."""
     try:
