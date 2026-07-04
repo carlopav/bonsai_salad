@@ -219,6 +219,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     footprint_polys = []  # [(gid, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
     wall_layer_polys_by_key = {}  # (ifc_class, mat_name, layer, z_top) -> [Polygon]
     wall_subdivision_lines = []  # [LineString, ...]
+    direct_entities = []  # [{layer, polylines, arcs, circles, ellipses}] -- non-type symbols
     seen_blocks   = {}
 
     bucket_a = bucket_b = bucket_c = 0
@@ -342,6 +343,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                     element, rec.layer, target_view, crease_angle_deg,
                     _cam_R, _cam_inv_np, _cam_rot_deg,
                     block_defs, block_order, block_inserts, seen_blocks,
+                    direct_entities,
                 )
                 if placed:
                     bucket_a += 1
@@ -392,7 +394,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                drawing_scale=human_scale,
                footprint_polys=footprint_polys,
                wall_layer_polys=wall_layer_polys_by_key or None,
-               wall_subdivision_lines=wall_subdivision_lines or None)
+               wall_subdivision_lines=wall_subdivision_lines or None,
+               direct_entities=direct_entities or None)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")

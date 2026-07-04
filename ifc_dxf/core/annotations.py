@@ -132,6 +132,12 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
     """
     _DIM_LAYER = "IfcAnnotation_Dimension"
     dim_style_name = _ensure_dim_style(doc, scale_factor)
+    # The template style is annotative (dimscale=0), which we leave untouched so
+    # the template alone owns dimension appearance. But ezdxf bakes the dimension
+    # picture block at creation time, and dimscale=0 would render it ~1:1 (text
+    # and arrows ~100x too small in model space). Override dimscale per entity so
+    # the baked geometry is paper-correct, without mutating the shared style.
+    dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
 
     for ann in annotations:
         if getattr(ann, "ObjectType", None) != "DIMENSION":
@@ -167,6 +173,7 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                     distance=0,
                     text=text,
                     dimstyle=dim_style_name,
+                    override={"dimscale": dim_scale},
                     dxfattribs={"layer": _DIM_LAYER},
                 )
                 dim.render()

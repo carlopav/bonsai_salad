@@ -296,18 +296,19 @@ def _fill_cartiglio(doc, scale_factor, scale_handle=None,
 
 
 def _ensure_dim_style(doc, scale_factor):
-    """Create or update the dimension style, returning its name.
+    """Return the dimension style name to use.
 
-    Uses 'dimensions_metric_m' from the template when available (preserving
-    its arrow block, font and other appearance attrs); falls back to creating
-    'BONSAI_DIM' with oblique ticks when the template is absent.
+    Prefers the template's 'dimensions_metric_m' and uses it exactly as authored
+    -- arrow block, sizes, and its annotative dimscale=0 are all left untouched,
+    so the template alone controls dimension appearance. Only when the template
+    is absent do we create the 'BONSAI_DIM' fallback with our own standard sizes.
 
-    Size attributes are kept in paper-space metres (e.g. 0.0025 = 2.5 mm).
-    dimscale is set to 1/scale_factor (e.g. 100 for 1:100) so that ezdxf
-    multiplies them to the correct model-space sizes when rendering.
     Dimension entities are individually marked as annotative (AcadAnnotative
     XDATA) so BricsCAD/AutoCAD display them at the correct paper size.
     """
+    if _DIM_STYLE_NAME in doc.dimstyles:
+        return _DIM_STYLE_NAME
+
     dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
 
     # Paper-space sizes (metres) -- dimscale multiplies these to model space.
@@ -316,18 +317,6 @@ def _ensure_dim_style(doc, scale_factor):
     ext_off = 0.0005
     gap     = text_h * 0.4
     arrow   = 0.0020
-
-    if _DIM_STYLE_NAME in doc.dimstyles:
-        style = doc.dimstyles.get(_DIM_STYLE_NAME)
-        style.dxf.set("dimtxt",   text_h)
-        style.dxf.set("dimasz",   arrow)
-        style.dxf.set("dimexe",   ext_ext)
-        style.dxf.set("dimexo",   ext_off)
-        style.dxf.set("dimgap",   gap)
-        style.dxf.set("dimscale", dim_scale)
-        style.dxf.set("dimtih",   0)
-        style.dxf.set("dimtad",   1)
-        return _DIM_STYLE_NAME
 
     # fallback: create BONSAI_DIM with oblique ticks
     attrs = {

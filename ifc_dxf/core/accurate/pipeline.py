@@ -253,6 +253,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     block_order   = []
     block_inserts = {}
     seen_blocks   = {}
+    direct_entities = []  # [{layer, polylines, arcs, circles, ellipses}] -- non-type symbols
     n_symbols_placed = 0
     for element in symbol_elements:
         try:
@@ -260,6 +261,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
                 element, element.is_a(), target_view, crease_angle_deg,
                 _cam_R, _cam_inv_np, _cam_rot_deg,
                 block_defs, block_order, block_inserts, seen_blocks,
+                direct_entities,
             )
         except Exception:
             placed = False
@@ -279,7 +281,8 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
                template_path=template_path, scale_factor=scale_factor_val,
                drawing_name=getattr(drawing, "Name", None),
                drawing_identification=getattr(drawing, "Identification", None),
-               drawing_scale=human_scale)
+               drawing_scale=human_scale,
+               direct_entities=direct_entities or None)
     print(f"  DXF gen    : {time.perf_counter() - t1:.2f}s")
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  >> {output_path}  ({size_kb} KB)")

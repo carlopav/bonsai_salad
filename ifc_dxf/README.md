@@ -413,7 +413,9 @@ same `IfcTypeObject`.
     representations?) — currently dropped rather than attributed.
 11. Overhead-fill re-addition, matching Pipeline A.
 12. `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching Pipeline A.
-13. Naming convention for dxf: ClassNameSenzaIfc_TypeNameSenzaIfc_GuidLast8Chars for example: FurnitureType_Bigtablewithchairs_851asdas
+13. ~~Naming convention for dxf blocks: ClassNameSenzaIfc_TypeNameSenzaIfc_GuidLast8Chars
+    for example: FurnitureType_Bigtablewithchairs_851asdas~~ — FATTO (lug 2026),
+    via `make_block_name` in `core/ifc_query.py` (type-based and per-instance blocks)
 14. Template-based space tag: se il template DXF contiene già un blocco con nome corrispondente al tipo esportato da Bonsai e attributi coincidenti con i {{}}, usare quello invece di generarlo — si parte aggiungendo il blocco al template
 
 

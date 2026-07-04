@@ -36,7 +36,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                template_path=None, scale_factor=0.01,
                drawing_name=None, drawing_identification=None,
                drawing_scale=None, footprint_polys=None,
-               wall_layer_polys=None, wall_subdivision_lines=None):
+               wall_layer_polys=None, wall_subdivision_lines=None,
+               direct_entities=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -46,6 +47,9 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     block_defs:    name -> {ifc_class, material, lines, arcs, circles, ellipses}
     block_order:   list of block names in insertion order
     block_inserts: name -> [(pos_2d, rot_deg, layer), ...]
+    direct_entities: [{layer, polylines, arcs, circles, ellipses}, ...] --
+                   world-space geometry for elements that don't match a reusable
+                   type symbol, drawn straight onto their IfcClass layer.
     flat_edges:    [(p0, p1, layer), ...]
     wall_polys_by_key: {(ifc_class, material, layer, z_top) -> [shapely Polygon, ...]}
     annotations:   list of IfcAnnotation elements (optional, Bucket D)
@@ -114,6 +118,27 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         for pos, rot, layer in block_inserts.get(block_name, []):
             msp.add_blockref(block_name, pos,
                              dxfattribs={"rotation": rot, "layer": layer})
+
+    # Direct geometry (elements not matching a reusable type symbol): entities
+    # drawn straight onto their IfcClass layer, inheriting its colour/linetype.
+    for ent in (direct_entities or []):
+        layer = ent["layer"]
+        for pts in ent.get("polylines", []):
+            if len(pts) < 2:
+                continue
+            closed = (len(pts) >= 4
+                      and abs(pts[0][0] - pts[-1][0]) < SNAP_TOL
+                      and abs(pts[0][1] - pts[-1][1]) < SNAP_TOL)
+            msp.add_lwpolyline(pts[:-1] if closed else pts,
+                               dxfattribs={"layer": layer, "closed": closed})
+        for cx, cy, r, a_s, a_e in ent.get("arcs", []):
+            msp.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": layer})
+        for cx, cy, r in ent.get("circles", []):
+            msp.add_circle((cx, cy), r, dxfattribs={"layer": layer})
+        for cx, cy, mx, my, ratio, t1, t2 in ent.get("ellipses", []):
+            msp.add_ellipse(center=(cx, cy, 0), major_axis=(mx, my, 0),
+                            ratio=ratio, start_param=t1, end_param=t2,
+                            dxfattribs={"layer": layer})
 
     # flat wall edges (wall_mode='flat')
     for p0, p1, layer in flat_edges:
@@ -240,6 +265,15 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     for _gid, _layer, exterior, _holes in (footprint_polys or []):
         xs.extend(p[0] for p in exterior)
         ys.extend(p[1] for p in exterior)
+    for ent in (direct_entities or []):
+        for pts in ent.get("polylines", []):
+            xs.extend(p[0] for p in pts); ys.extend(p[1] for p in pts)
+        for cx, cy, r, _a_s, _a_e in ent.get("arcs", []):
+            xs.extend((cx - r, cx + r)); ys.extend((cy - r, cy + r))
+        for cx, cy, r in ent.get("circles", []):
+            xs.extend((cx - r, cx + r)); ys.extend((cy - r, cy + r))
+        for cx, cy, _mx, _my, _ratio, _t1, _t2 in ent.get("ellipses", []):
+            xs.append(cx); ys.append(cy)
     if xs and ys:
         pad = max((max(xs) - min(xs)) * 0.05, (max(ys) - min(ys)) * 0.05, 0.5)
         xmin, xmax = min(xs) - pad, max(xs) + pad

@@ -1,6 +1,7 @@
 """IFC data access: drawing discovery, element queries, representation lookup."""
 
 import json
+import re
 
 import ifcopenshell
 import ifcopenshell.util.element
@@ -97,18 +98,60 @@ def is_mapped_repr(plan_repr):
     return bool(items) and all(item.is_a("IfcMappedItem") for item in items)
 
 
+# Characters DXF block names disallow (plus whitespace), stripped from name parts.
+_INVALID_BLOCK_CHARS = re.compile(r'[<>/\\":;?*|=,`\s]+')
+
+
+def _sanitize_name_part(text):
+    """Strip whitespace and characters DXF block names disallow from one name part."""
+    return _INVALID_BLOCK_CHARS.sub("", str(text or ""))
+
+
+# PredefinedType sentinel values that carry no useful info — omitted from names.
+# USERDEFINED is handled separately (falls back to the entity's ObjectType).
+_SKIP_PREDEFINED = {"NOTDEFINED", "NOTKNOWN"}
+
+
+def make_block_name(ifc_class, predefined_type, object_type, name, globalid):
+    """Build a DXF block name "{Class}_{PredefinedType}_{Name}_{GlobalId[:8]}".
+
+    Class has its leading "Ifc" stripped (IfcCoveringType -> Covering);
+    PredefinedType is included unless it's a bare sentinel (NOTDEFINED/NOTKNOWN),
+    and when it's USERDEFINED the entity's ObjectType is used in its place;
+    Name is sanitized of whitespace and characters DXF block names disallow.
+    Empty parts are skipped. The first 8 GlobalId chars keep the name unique even
+    when multiple entities share the same class and name, e.g.
+    "Covering_FLOORING_PavimentoCucinaInGres_2N4bXk9Q". The full GlobalId is
+    stored in the block description (DXF group code 4).
+    """
+    cls = ifc_class[3:] if ifc_class.startswith("Ifc") else ifc_class
+    if predefined_type == "USERDEFINED":
+        pdt = object_type
+    elif predefined_type in _SKIP_PREDEFINED:
+        pdt = None
+    else:
+        pdt = predefined_type
+    parts = [_sanitize_name_part(cls), _sanitize_name_part(pdt),
+             _sanitize_name_part(name)]
+    parts = [p for p in parts if p]
+    parts.append(globalid[:8])
+    return "_".join(parts)
+
+
 def get_type_block_name(element):
     """Return (type_entity, block_name) if element has a type, else (None, None).
 
-    block_name = "{TypeName}_{GlobalId[:8]}" — human-readable in CAD viewers
-    while remaining unique even when multiple types share the same Name.
-    The full GlobalId is stored in the block description (DXF group code 4).
+    block_name follows make_block_name using the type's own class, PredefinedType,
+    Name, and GlobalId, e.g. "Covering_FLOORING_PavimentoCucinaInGres_2N4bXk9Q".
     """
     ifc_type = ifcopenshell.util.element.get_type(element)
     if ifc_type is None:
         return None, None
-    name = (getattr(ifc_type, "Name", None) or ifc_type.is_a())
-    return ifc_type, f"{name}_{ifc_type.GlobalId[:8]}"
+    return ifc_type, make_block_name(
+        ifc_type.is_a(), getattr(ifc_type, "PredefinedType", None),
+        getattr(ifc_type, "ObjectType", None),
+        getattr(ifc_type, "Name", None), ifc_type.GlobalId
+    )
 
 
 def get_assigned_product(element):
