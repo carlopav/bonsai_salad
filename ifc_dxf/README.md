@@ -1,6 +1,14 @@
 # ifc_dxf: DXF Generation
 
 Export an IFC drawing view to DXF with maximum structural and geometric fidelity.
+
+**Upstream-merge principle:** this work is aimed at being merged upstream into
+Bonsai. Therefore ifc_dxf must not reimplement what Bonsai already provides:
+whenever `bonsai.tool` is importable, its functions are reused directly (e.g.
+`tool.Drawing.get_drawing_elements` for element selection); pure-ifcopenshell
+reimplementations exist only as *standalone shims* (headless use without bpy)
+and are throwaway code at merge time. Before writing new logic, check whether
+`tool.Drawing` / `ifcopenshell.util` already has it.
 Two independent extraction pipelines (`ifc_dxf/core/approximate/`, `ifc_dxf/core/accurate/`)
 share the same DXF writer, template handling, materials classification and
 annotation writer (`ifc_dxf/core/dxf_writer.py`, `dxf_template.py`, `materials.py`,
@@ -11,6 +19,17 @@ Accurate uses ifcopenshell's own native HLR serializer.
 |----------|--------|----------|
 | **A — Approximate** | ✓ implemented | IFC-native traversal: 2D reprs as BLOCK/INSERT, sections via Shapely profile extraction |
 | **B — Accurate** | ✓ v1 (linework only) | OCC/HLR via `ifcopenshell.geom.serializers.svg` — matches Bonsai's own SVG export engine |
+
+**Convergence plan (decided lug 2026):** the two-pipeline split is temporary.
+Accurate keeps being developed until it reaches feature parity with Approximate
+(overhead fills, slab/covering/roof footprints, material-layer decomposition —
+see roadmap items 9/11/12). Then the pipelines merge into a single one where
+the section-cut extractor is a strategy — HLR (default, Bonsai's own engine) or
+Shapely profile projection — and Approximate stops existing as a separate
+pipeline: its extractor survives as the fallback strategy (it already powers
+below-cut view walls, which HLR structurally cannot produce, and remains the
+second opinion when HLR misbehaves on a model). `wall_mode="flat"` will be
+dropped in the merge.
 
 ---
 
@@ -124,11 +143,11 @@ To be implemented
 
 ### Element selection according to the view limits
 
-**Input:** the element list from `tool.Drawing.get_drawing_elements()` (Blender/Bonsai) or from spatial culling in standalone mode (`get_elements` in `ifc_query.py`).
+**Primary path (inside Blender):** `get_elements` delegates to Bonsai's own `tool.Drawing.get_drawing_elements(drawing)` whenever Bonsai is importable, its loaded file is the *same object* passed to the exporter, and the drawing has a Blender camera object. This reuses Bonsai's exact selection semantics: full Blender `bound_box` AABB vs camera box culling (`is_in_camera_view`), `Include`/`Exclude` handling including the `filter_structure` JSON form (via `tool.Search`), and aggregate re-addition — so DXF and SVG exports agree on what is in view. Bonsai re-adds the drawing's own annotations to the set (its SVG pipeline draws them inline); we strip them since annotations are handled separately as Bucket D.
 
-**Frustum 3D bbox culling:** a world-space bounding box `(x_min, x_max, y_min, y_max, z_min, z_max)` is derived from the camera body geometry (`IfcCsgSolid` / `IfcExtrudedAreaSolid`) transformed by the camera's `ObjectPlacement`. Each element's `ObjectPlacement` origin is tested against this box. Elements outside are excluded.
+**Fallback path (standalone, no bpy/Bonsai):** pure-ifcopenshell reproduction of the same pipeline. A world-space bounding box `(x_min, x_max, y_min, y_max, z_min, z_max)` is derived from the camera body geometry (`IfcCsgSolid` / `IfcExtrudedAreaSolid`) transformed by the camera's `ObjectPlacement`. Each element's `ObjectPlacement` origin is tested against this box. Elements outside are excluded.
 
-**Known limitation:** `element_in_frustum` tests only the `ObjectPlacement` origin point. Elements whose origin is outside the frustum but whose body extends into view (e.g. a long wall starting outside) may be incorrectly excluded. A full AABB fallback is planned.
+**Two-pass culling (fallback path):** pass 1 is the cheap `ObjectPlacement`-origin test (`element_in_frustum`); elements whose origin falls outside are not discarded but re-tested in pass 2 with a real world-AABB overlap check from tessellated body geometry (`filter_elements_in_frustum` → `_aabb_overlap_pass`, one batched multicore `ifcopenshell.geom.iterator` run over only the failed candidates). This keeps long walls/slabs/beams whose placement origin lies outside the view but whose body extends into it. Elements the iterator yields no shape for stay excluded. The export log reports how many elements the AABB pass rescued.
 
 **Overhead fill re-addition:** windows/doors that fill openings entirely above `cut_z` are excluded by frustum culling (`z_max = cut_z` for the camera box) but must appear as overhead elements. In `export_drawing`, before `classify_elements` is called, walls/columns are inspected for openings with `z_min_opening > cut_z`; any filling elements not already in the element list are re-added.
 
@@ -398,7 +417,11 @@ same `IfcTypeObject`.
 **Pipeline A:**
 1. Add `IfcStairFlight` to Bucket B section path.
 2. Report elements with deep boolean chains (> threshold) during export.
-3. Frustum culling AABB fallback: test full geometry bounding box when origin test fails.
+3. ~~Frustum culling AABB fallback: test full geometry bounding box when origin
+   test fails~~ — FATTO (lug 2026), two ways: inside Blender, Bonsai's own
+   `tool.Drawing.get_drawing_elements` (Blender bound_box AABB culling) is
+   reused; standalone, `filter_elements_in_frustum` adds a batched
+   geometry-AABB second pass for origin-outside elements.
 4. Material-agnostic wall fusion option (`unary_union` regardless of material).
 5. Bucket D — D3: symbols, markers, hatches.
 6. More IFC test fixtures (rotated walls, overhead elements, text annotations, sections, different scales).
@@ -423,9 +446,28 @@ same `IfcTypeObject`.
 13. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
 14. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
 
+**Upstream-merge principle — remaining reimplementations to convert to Bonsai
+reuse (guarded import, own code demoted to standalone shim), same pattern as
+`_get_elements_via_bonsai`:**
+- `_get_drawing_annotations` (`ifc_query.py`) → `tool.Drawing.get_drawing_group`
+  + `get_group_elements`. Bonsai's version also reads `drawing.HasAssignments`
+  directly instead of scanning every `IfcRelAssignsToGroup` in the file.
+- `get_assigned_product` (`ifc_query.py`) → `tool.Drawing.get_assigned_product`.
+  Bonsai's version additionally resolves `IfcGrid` axis assignments
+  (`rel.Name` vs `AxisTag`), which ours misses.
+- `_parse_scale_factor` (`dxf_template.py`) → check `tool.Drawing` /
+  `ifcopenshell.util.unit` scale helpers before keeping our parser.
+- Any *new* logic: check `tool.Drawing` / `ifcopenshell.util` first (see
+  Upstream-merge principle at the top).
+
+**Convergence (after Pipeline B reaches parity — items 9/11/12):**
+15. Merge A and B into a single pipeline: shared orchestration (selection,
+    classification, symbols, annotations, writer), section-cut extractor as a
+    strategy ("hlr" default / "profile" fallback). Drop `wall_mode="flat"`.
+
 **Future pipelines:**
-15. Section view / Elevation: non-zenithal camera logic.
-16. Reflected Ceiling Plan, Axonometric.
+16. Section view / Elevation: non-zenithal camera logic.
+17. Reflected Ceiling Plan, Axonometric.
 
 ---
 

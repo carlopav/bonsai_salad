@@ -7,7 +7,7 @@ import ifcopenshell
 import ifcopenshell.util.element
 import ifcopenshell.util.selector
 
-from .camera import get_camera_frustum_bbox, element_in_frustum
+from .camera import get_camera_frustum_bbox, filter_elements_in_frustum
 
 
 # Each entry: (ContextType, ContextIdentifier, TargetView).
@@ -178,14 +178,60 @@ def get_material_name(element):
     return ""
 
 
-def get_elements(ifc, drawing, pset):
-    """Reproduce Bonsai's get_drawing_elements + get_elements_in_camera_view
-    in pure ifcopenshell, without requiring a Blender camera object.
+def _get_elements_via_bonsai(ifc, drawing):
+    """Reuse Bonsai's own tool.Drawing.get_drawing_elements when running inside
+    Blender with Bonsai loaded and `ifc` being the exact file Bonsai has open.
 
-    Selection pipeline:
-    1. Include/Exclude query filters (from EPset_Drawing pset)
-    2. Spatial culling: element origin inside camera frustum bbox (from body geom)
+    This is the same element selection Bonsai's SVG export uses: full Blender
+    bound_box AABB vs camera box culling (is_in_camera_view), Include/Exclude
+    handling including the "filter_structure" JSON form (tool.Search), and
+    aggregate re-addition -- so DXF and SVG exports agree on what is in view,
+    and long walls whose placement origin lies outside the view are kept.
+
+    Returns a set of elements, or None when Bonsai is unavailable / the file
+    doesn't match / anything fails, so the caller falls back to the
+    pure-ifcopenshell path.
     """
+    try:
+        import bpy  # noqa: F401
+        from bonsai import tool
+    except ImportError:
+        return None
+    try:
+        if tool.Ifc.get() is not ifc:
+            return None  # different file object -> Blender scene can't be trusted
+        if tool.Ifc.get_object(drawing) is None:
+            return None  # no Blender camera object for this drawing
+        return set(tool.Drawing.get_drawing_elements(drawing))
+    except Exception:
+        return None
+
+
+def get_elements(ifc, drawing, pset):
+    """Element selection for a drawing.
+
+    Primary path (inside Blender): delegate to Bonsai's
+    tool.Drawing.get_drawing_elements -- see _get_elements_via_bonsai.
+    Bonsai re-adds the drawing's own annotations to the set (its SVG pipeline
+    draws them inline); we strip them because annotations are processed
+    separately (Bucket D, _get_drawing_annotations).
+
+    Fallback path (standalone, no bpy/Bonsai): reproduce
+    get_drawing_elements + get_elements_in_camera_view in pure ifcopenshell:
+    1. Include/Exclude query filters (from EPset_Drawing pset)
+    2. Spatial culling: two passes -- cheap origin-in-frustum test, then a
+       geometry-AABB overlap test for origin-outside elements (long walls);
+       see camera.filter_elements_in_frustum.
+    """
+    bonsai_elements = _get_elements_via_bonsai(ifc, drawing)
+    if bonsai_elements is not None:
+        bonsai_elements -= set(ifc.by_type("IfcOpeningElement"))
+        bonsai_elements = {e for e in bonsai_elements if not e.is_a("IfcAnnotation")}
+        print(f"  Selection  : Bonsai tool.Drawing.get_drawing_elements "
+              f"(Blender AABB culling) -> {len(bonsai_elements)} elements")
+        return bonsai_elements
+
+    print("  Selection  : standalone fallback (pure ifcopenshell, origin-point frustum)")
     include = pset.get("Include", None)
     exclude = pset.get("Exclude", None)
 
@@ -220,13 +266,15 @@ def get_elements(ifc, drawing, pset):
     elements -= set(ifc.by_type("IfcOpeningElement"))
     elements  = {e for e in elements if not e.is_a("IfcAnnotation")}
 
-    # Spatial culling from camera frustum (Blender-agnostic)
+    # Spatial culling from camera frustum (Blender-agnostic): cheap origin
+    # test + geometry-AABB second pass for origin-outside elements (long walls)
     frustum = get_camera_frustum_bbox(drawing)
     if frustum is not None:
         before = len(elements)
-        elements = {e for e in elements if element_in_frustum(e, frustum)}
+        elements, n_rescued = filter_elements_in_frustum(ifc, elements, frustum)
         print(f"  Frustum    : {before} -> {len(elements)} elements  "
-              f"(Z {frustum[4]:.2f}..{frustum[5]:.2f})")
+              f"(Z {frustum[4]:.2f}..{frustum[5]:.2f}, "
+              f"{n_rescued} rescued by AABB pass)")
 
     return elements
 

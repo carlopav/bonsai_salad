@@ -1,6 +1,7 @@
 """Camera and projection math — no IFC schema, no DXF, no bpy."""
 
 import math
+import multiprocessing
 
 import numpy as np
 import ifcopenshell.util.placement
@@ -91,10 +92,11 @@ def _element_origin(element):
 def element_in_frustum(element, frustum):
     """Return True if element's ObjectPlacement origin is inside the frustum bbox.
 
-    Uses element origin as proxy for full bounding box — fast and correct for
-    point-like elements (furniture, doors). For large elements (walls, slabs)
-    the ObjectPlacement is at the element's base, which is the discriminating
-    coordinate for storey assignment.
+    Fast path only: uses element origin as proxy for full bounding box —
+    correct for point-like elements (furniture, doors) but misses elements
+    whose origin is outside while their body extends into view (long walls).
+    Use filter_elements_in_frustum for full culling with the geometry-AABB
+    second pass.
     """
     if frustum is None:
         return True
@@ -106,6 +108,69 @@ def element_in_frustum(element, frustum):
     return (x_min <= x <= x_max and
             y_min <= y <= y_max and
             z_min <= z <= z_max)
+
+
+def _aabb_overlap_pass(ifc, elements, frustum):
+    """Return the subset of `elements` whose world-space geometry AABB overlaps
+    the frustum bbox.
+
+    One batched ifcopenshell.geom.iterator run (multicore, world coords) over
+    all candidates — far cheaper than per-element create_shape. Elements the
+    iterator yields no shape for are excluded (their origin already failed the
+    fast test and there is no geometry evidence to rescue them).
+    """
+    by_guid = {e.GlobalId: e for e in elements if hasattr(e, "GlobalId")}
+    if not by_guid:
+        return set()
+    x_min, x_max, y_min, y_max, z_min, z_max = frustum
+
+    kept = set()
+    try:
+        s = ifcopenshell.geom.settings()
+        s.set('use-world-coords', True)
+        it = ifcopenshell.geom.iterator(
+            s, ifc, multiprocessing.cpu_count(), include=list(by_guid.values())
+        )
+        if it.initialize():
+            while True:
+                shape = it.get()
+                elem = by_guid.get(shape.guid)
+                if elem is not None:
+                    v = np.array(shape.geometry.verts).reshape(-1, 3)
+                    if len(v) and not (
+                        v[:, 0].max() < x_min or v[:, 0].min() > x_max or
+                        v[:, 1].max() < y_min or v[:, 1].min() > y_max or
+                        v[:, 2].max() < z_min or v[:, 2].min() > z_max
+                    ):
+                        kept.add(elem)
+                if not it.next():
+                    break
+    except Exception:
+        pass
+    return kept
+
+
+def filter_elements_in_frustum(ifc, elements, frustum):
+    """Frustum culling in two passes; returns (kept_elements, n_rescued).
+
+    Pass 1: cheap ObjectPlacement-origin test (element_in_frustum) — admits
+    most in-view elements without touching geometry.
+    Pass 2: elements whose origin fell outside get a real world-AABB overlap
+    test from tessellated body geometry (batched iterator). This keeps long
+    walls/slabs/beams whose placement origin lies outside the view but whose
+    body extends into it — the failure mode of the origin-only test.
+    """
+    if frustum is None:
+        return set(elements), 0
+    inside = set()
+    failed = []
+    for e in elements:
+        if element_in_frustum(e, frustum):
+            inside.add(e)
+        else:
+            failed.append(e)
+    rescued = _aabb_overlap_pass(ifc, failed, frustum) if failed else set()
+    return inside | rescued, len(rescued)
 
 
 def world_matrix_col_major(element):
