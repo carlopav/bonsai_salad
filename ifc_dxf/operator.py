@@ -10,6 +10,7 @@ import bpy
 import numpy as np
 
 from .core import export_drawing_approximate, export_drawing_accurate, find_drawings
+from .core.audit import audit_dxf_file
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,13 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         description="Open the exported file with the system's default application",
         default=False,
     )
+    run_audit: bpy.props.BoolProperty(
+        name="Audit DXF After Export",
+        description="Run ezdxf's structural audit on the written file; if any "
+                    "non-compliance is found, warn and copy the report to the "
+                    "clipboard",
+        default=False,
+    )
 
     @classmethod
     def poll(cls, context):
@@ -126,6 +134,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         layout = self.layout
         layout.prop(self, "dxf_version")
         layout.prop(self, "open_after_export")
+        layout.prop(self, "run_audit")
 
     def execute(self, context):
         ifc = _get_ifc()
@@ -187,6 +196,22 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported to {output_path}")
+
+        if self.run_audit:
+            try:
+                is_clean, report = audit_dxf_file(output_path)
+            except Exception as exc:
+                self.report({"WARNING"}, f"DXF audit could not run: {exc}")
+            else:
+                if is_clean:
+                    self.report({"INFO"}, "DXF audit passed: no issues found.")
+                else:
+                    context.window_manager.clipboard = report
+                    self.report(
+                        {"WARNING"},
+                        "DXF audit found non-compliance -- report copied to "
+                        "clipboard.",
+                    )
 
         if self.open_after_export:
             _open_file(output_path)

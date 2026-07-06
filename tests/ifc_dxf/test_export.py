@@ -26,7 +26,10 @@ _OUT_DIR = os.path.join(_REPO_ROOT, "output", "test_runs")
 _TEMPLATE_PATH = os.path.join(_REPO_ROOT, "ifc_dxf", "templates", "ifc_dxf_template_metric.dxf")
 
 from ifc_dxf.core.ifc_query import find_drawings
-from ifc_dxf.core.writer import export_drawing
+# Import from the concrete subpackage, not the package root: the test harness
+# (root conftest.py) stubs `ifc_dxf.core` as an empty namespace and never runs
+# its real __init__.py, so the `export_drawing` alias defined there is absent.
+from ifc_dxf.core.approximate import export_drawing
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +120,41 @@ class TestCase01BasicPlan:
         msp = self.doc.modelspace()
         dims = [e for e in msp if e.dxftype() == "DIMENSION"]
         assert len(dims) >= 1
+
+    def test_dxf_passes_ezdxf_audit(self):
+        """Exported DXF is structurally clean per ezdxf's Auditor."""
+        from ifc_dxf.core.audit import audit_dxf_file
+        is_clean, report = audit_dxf_file(self.out)
+        assert is_clean, report
+
+    def test_hatch_boundaries_have_no_duplicate_vertices(self):
+        """No HATCH boundary polyline has consecutive duplicate vertices.
+
+        ezdxf's Auditor does not check this, but BricsCAD's audit rejects it,
+        so assert it explicitly (locks in _dedup_ring)."""
+        msp = self.doc.modelspace()
+        for hatch in (e for e in msp if e.dxftype() == "HATCH"):
+            for path in hatch.paths:
+                verts = getattr(path, "vertices", None)
+                if not verts:
+                    continue
+                pts = [(round(v[0], 6), round(v[1], 6)) for v in verts]
+                for a, b in zip(pts, pts[1:] + pts[:1]):
+                    assert a != b, f"duplicate hatch vertex {a} on layer {hatch.dxf.layer}"
+
+    def test_annotation_context_data_has_owner(self):
+        """Every annotation context-data object has a non-null owner handle.
+
+        Guards the Owner Id (0) defect BricsCAD's audit flagged and repaired."""
+        ctx_types = (
+            "ACDB_TEXTOBJECTCONTEXTDATA_CLASS",
+            "ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS",
+        )
+        for obj in self.doc.objects:
+            if obj.dxftype() in ctx_types:
+                owner = obj.dxf.get("owner", None)
+                assert owner not in (None, "0"), \
+                    f"{obj.dxftype()} has invalid owner {owner!r}"
 
     def test_a1_layout_cartiglio_date(self):
         """A1 paper-space layout has a date TEXT entity (cartiglio filled)."""

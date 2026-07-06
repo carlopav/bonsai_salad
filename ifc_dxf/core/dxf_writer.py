@@ -30,6 +30,27 @@ from .annotations import (
 # _write_dxf
 # ---------------------------------------------------------------------------
 
+def _dedup_ring(pts, tol=0.0005):
+    """Drop consecutive duplicate vertices (and a wrap-around closing duplicate).
+
+    Shapely buffer/union with mitre joins can leave coincident vertices in a
+    ring; a HATCH boundary polyline with those is rejected by BricsCAD's audit
+    ("Polyline Hatch boundary has duplicated vertices"). This collapses points
+    within `tol` (default 0.5 mm, matching SNAP_TOL) to a clean ring.
+    """
+    out = []
+    for x, y in pts:
+        if out and abs(x - out[-1][0]) <= tol and abs(y - out[-1][1]) <= tol:
+            continue
+        out.append((x, y))
+    # Ring endpoints are stored open here (callers pass coords[:-1]); still guard
+    # against the first/last coinciding after the pass above.
+    if len(out) >= 2 and abs(out[0][0] - out[-1][0]) <= tol \
+            and abs(out[0][1] - out[-1][1]) <= tol:
+        out.pop()
+    return out
+
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key,
                annotations=None, cam_inv_np=None,
@@ -179,8 +200,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         for poly in geoms:
             if poly.geom_type != 'Polygon':
                 continue
-            exterior = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
-            holes    = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
+            exterior = _dedup_ring([(float(x), float(y)) for x, y in poly.exterior.coords[:-1]], SNAP_TOL)
+            holes    = [_dedup_ring([(float(x), float(y)) for x, y in ring.coords[:-1]], SNAP_TOL)
                         for ring in poly.interiors]
             if len(exterior) < 3:
                 continue
@@ -188,6 +209,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             hatch.set_solid_fill(color=256)
             hatch.paths.add_polyline_path(exterior, is_closed=True, flags=1)
             for hole in holes:
+                if len(hole) < 3:
+                    continue
                 hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
 
     # Pass 1 -- hatches (drawn first -> below everything else)
@@ -235,12 +258,16 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         for poly in geoms:
             if poly.geom_type != 'Polygon':
                 continue
-            exterior = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
-            holes    = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
+            exterior = _dedup_ring([(float(x), float(y)) for x, y in poly.exterior.coords[:-1]], SNAP_TOL)
+            holes    = [_dedup_ring([(float(x), float(y)) for x, y in ring.coords[:-1]], SNAP_TOL)
                         for ring in poly.interiors]
+            if len(exterior) < 3:
+                continue
             msp.add_lwpolyline(exterior,
                                dxfattribs={"closed": True, "layer": outline_layer})
             for hole in holes:
+                if len(hole) < 3:
+                    continue
                 msp.add_lwpolyline(hole,
                                    dxfattribs={"closed": True, "layer": outline_layer})
 
@@ -289,6 +316,14 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                                      current_scale_handle)
         _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                                 current_scale_handle)
+
+    # Clearing the template modelspace (delete_all_entities) leaves the sample
+    # entities' OBJECTS-section satellites -- AcDbContextDataManager /
+    # ACDB_ANNOTATIONSCALES dicts, per-scale context data, the SUN object --
+    # orphaned with dangling owner handles; later steps can orphan more. ezdxf's
+    # Auditor purges these cleanly (BricsCAD's audit otherwise flags/repairs
+    # them). Our own generated content is well-formed and survives the audit.
+    doc.audit()
 
     doc.saveas(output_path)
 
