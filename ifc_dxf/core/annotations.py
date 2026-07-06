@@ -96,28 +96,86 @@ def _annotation_polylines_2d(ann, cam_inv_np):
     return polylines
 
 
-def _mark_dim_annotative(dim_entity, doc):
-    """Add AcadAnnotative XDATA to a DIMENSION entity.
+def _make_dim_annotative(doc, dim_entity, scale_handle):
+    """Add a single annotative scale representation to a DIMENSION entity.
 
-    This is the minimum flag BricsCAD/AutoCAD need to treat the entity as
-    annotative and display it at the correct paper size for the current scale.
+    Dimension analogue of _make_text_annotative: builds the extension-dict chain
+      entity -> AcDbContextDataManager -> ACDB_ANNOTATIONSCALES -> *A1
+    where *A1 is an ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS referencing the current
+    drawing-scale SCALE handle, plus the dimension's own geometry block and text
+    midpoint. This is what makes BricsCAD/AutoCAD treat the DIMENSION as truly
+    annotative (rescaling per CANNOSCALE) rather than a fixed-size picture.
+
+    Only the current scale representation is written; the CAD app adds more when
+    the user changes the annotation scale interactively -- same contract as
+    _make_text_annotative.
     """
     from ezdxf.lldxf.types import DXFTag
-    try:
+    from ezdxf.lldxf.tags import Tags
+
+    if scale_handle is None:
+        # No annotation scale to reference -- fall back to the bare flag so the
+        # entity is at least tagged annotative.
         if "AcadAnnotative" not in doc.appids:
             doc.appids.new("AcadAnnotative")
         dim_entity.set_xdata("AcadAnnotative", [
-            DXFTag(1000, "AnnotativeData"),
-            DXFTag(1002, "{"),
-            DXFTag(1070, 1),
-            DXFTag(1070, 1),
-            DXFTag(1002, "}"),
+            DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
+            DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
         ])
-    except Exception:
-        pass
+        return
+
+    if dim_entity.has_extension_dict:
+        ext_dict = dim_entity.get_extension_dict()
+    else:
+        ext_dict = dim_entity.new_extension_dict()
+
+    d = ext_dict.dictionary
+    ctx_mgr     = d.add_new_dict("AcDbContextDataManager")
+    anno_scales = ctx_mgr.add_new_dict("ACDB_ANNOTATIONSCALES")
+
+    # The dimension's baked geometry block (*Dnn) and text position, so the
+    # context data describes where this scale's picture lives.
+    geom_block = dim_entity.dxf.get("geometry", "")
+    tm = dim_entity.dxf.get("text_midpoint", (0.0, 0.0, 0.0))
+    dp = dim_entity.dxf.get("defpoint", (0.0, 0.0, 0.0))
+    tmx, tmy = float(tm[0]), float(tm[1])
+    dpx, dpy = float(dp[0]), float(dp[1])
+
+    ctx = doc.objects.new_entity("ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS", dxfattribs={})
+    ctx.__class__ = type("CTX", (ctx.__class__,),
+                         {"DXFTYPE": "ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS"})
+    ctx.xtags.subclasses = [Tags(), Tags([
+        DXFTag(100, "AcDbObjectContextData"),
+        DXFTag(70, 4),
+        DXFTag(290, 1),   # 1 = active / current scale
+    ]), Tags([
+        DXFTag(100, "AcDbAnnotScaleObjectContextData"),
+        DXFTag(340, scale_handle),
+    ]), Tags([
+        DXFTag(100, "AcDbDimensionObjectContextData"),
+        DXFTag(2, geom_block),           # this scale's picture block
+        DXFTag(10, dpx), DXFTag(20, dpy), DXFTag(30, 0.0),
+        DXFTag(11, tmx), DXFTag(21, tmy), DXFTag(31, 0.0),
+        DXFTag(70, 0),
+        DXFTag(71, 0),
+        DXFTag(280, 0),
+    ])]
+    anno_scales.add(key="*A1", entity=ctx)
+    # Dictionary.add() does not set the owner on a DXFTagStorage entity, leaving
+    # Owner Id = 0 (BricsCAD audit flags this and repairs it). Set it explicitly.
+    ctx.dxf.owner = anno_scales.dxf.handle
+
+    # BricsCAD/AutoCAD also require the AcadAnnotative XDATA flag on the entity.
+    if "AcadAnnotative" not in doc.appids:
+        doc.appids.new("AcadAnnotative")
+    dim_entity.set_xdata("AcadAnnotative", [
+        DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
+        DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
+    ])
 
 
-def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor):
+def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
+                                 current_scale_handle):
     """Write DIMENSION annotations as native DXF DIMENSION entities.
 
     Each IfcAnnotation(ObjectType='DIMENSION') stores a chain of 2D points
@@ -177,7 +235,7 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                     dxfattribs={"layer": _DIM_LAYER},
                 )
                 dim.render()
-                _mark_dim_annotative(dim.dimension, doc)
+                _make_dim_annotative(doc, dim.dimension, current_scale_handle)
 
 
 def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0.0):
@@ -221,6 +279,9 @@ def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0
         DXFTag(11, 0.0), DXFTag(21, 0.0), DXFTag(31, 0.0),
     ])]
     anno_scales.add(key="*A1", entity=ctx)
+    # Dictionary.add() does not set the owner on a DXFTagStorage entity, leaving
+    # Owner Id = 0 (BricsCAD audit flags this and repairs it). Set it explicitly.
+    ctx.dxf.owner = anno_scales.dxf.handle
 
     # BricsCAD/AutoCAD check for the AcadAnnotative XDATA block on the entity
     # to recognise it as annotative -- the extension dict alone is not enough.

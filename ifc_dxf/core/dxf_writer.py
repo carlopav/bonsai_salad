@@ -285,7 +285,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
 
     # Bucket D: annotations
     if annotations and cam_inv_np is not None:
-        _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor)
+        _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
+                                     current_scale_handle)
         _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                                 current_scale_handle)
 
