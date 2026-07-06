@@ -361,7 +361,7 @@ HLR's single `addDrawing` pass only returns geometry actually sliced by the
 cut plane (empirically verified: an isolated below-cut element produces
 nothing at all). Rather than build a second HLR configuration for this, view
 elements reuse Pipeline A's `_extract_wall_polygon_with_openings` Shapely
-profile projection directly (cross-import from `approximate/geometry.py`) —
+profile projection directly (from the shared `core/geometry.py`) —
 for a simple vertical wall/column prism this gives the exact same silhouette a
 true top-down HLR projection would, so it's not a loss of accuracy for the
 common case. Grouped into `wall_polys_by_key` under `f"{ifc_class}_View"`,
@@ -373,8 +373,8 @@ different floor levels never fuse together.
 Same code as Pipeline A's Bucket A, factored out into `plan_symbols.place_plan_symbol()`
 (shared module, used by both pipelines): `find_plan_repr` looks up the
 element's or its type's Plan/Body representation, `curves._extract_local_curves`
-extracts exact arcs/circles/ellipses (moved out of `approximate/geometry.py`
-into `curves.py` for this reuse), one BLOCK is shared across instances of the
+extracts exact arcs/circles/ellipses (factored into `curves.py` for this
+reuse), one BLOCK is shared across instances of the
 same `IfcTypeObject`.
 
 **v1 limitations (by design, to revisit):**

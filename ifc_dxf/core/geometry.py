@@ -1,8 +1,14 @@
 """Wall/opening/slab geometry extraction (Shapely-based section profiles).
 
-Curve extraction (_extract_local_curves and friends) has moved to
-../curves.py so it can be shared with the accurate pipeline's plan-symbol
-handling (see ../plan_symbols.py). Depends on: camera.py (world_matrix_col_major).
+Shared by both pipelines: the approximate pipeline uses the full set, while the
+accurate pipeline reuses _wall_z_range and _extract_wall_polygon_with_openings
+to feed HLR section polygons through the same Shapely fusion/hatch path (see
+../README.md, Pipeline B). Lives in core/ so both approximate/ and accurate/
+import down from a common parent instead of one pipeline importing the other.
+
+Curve extraction (_extract_local_curves and friends) lives in curves.py so it
+can be shared with the accurate pipeline's plan-symbol handling (see
+plan_symbols.py). Depends on: camera.py (world_matrix_col_major).
 """
 
 import math
@@ -17,7 +23,7 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-from ..camera import world_matrix_col_major
+from .camera import world_matrix_col_major
 
 # Maximum nesting depth when unwrapping IfcBooleanResult chains to reach the
 # base IfcExtrudedAreaSolid.  Each level typically corresponds to one opening

@@ -24,7 +24,7 @@ from ..ifc_query import (
     _get_drawing_annotations,
 )
 from ..curves import _extract_local_curves
-from .geometry import (
+from ..geometry import (
     SHAPELY_AVAILABLE,
     _wall_z_range,
     _extract_wall_polygon_with_openings,

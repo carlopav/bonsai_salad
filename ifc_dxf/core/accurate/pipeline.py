@@ -51,7 +51,7 @@ from ..ifc_query import get_elements, get_material_name, _get_drawing_annotation
 from ..dxf_template import _parse_scale_factor
 from ..dxf_writer import _write_dxf
 from ..plan_symbols import place_plan_symbol
-from ..approximate.geometry import _wall_z_range, _extract_wall_polygon_with_openings
+from ..geometry import _wall_z_range, _extract_wall_polygon_with_openings
 
 
 _SVG_NS = "{http://www.w3.org/2000/svg}"

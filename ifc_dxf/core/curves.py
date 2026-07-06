@@ -4,9 +4,9 @@ Shared between pipelines: no Shapely, no wall/section-specific logic. Only
 depends on ifcopenshell (direct item walking, with a create_shape fallback
 for meshes) and numpy (crease-edge detection on tessellated faces).
 
-Moved verbatim out of approximate/geometry.py so both the approximate and
-accurate pipelines can build BLOCK/INSERT plan symbols from native 2D
-representations (see plan_symbols.py).
+Factored out of the shared geometry.py so both the approximate and accurate
+pipelines can build BLOCK/INSERT plan symbols from native 2D representations
+(see plan_symbols.py).
 """
 
 import math
