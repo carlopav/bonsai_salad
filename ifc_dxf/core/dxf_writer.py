@@ -271,12 +271,17 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 msp.add_lwpolyline(hole,
                                    dxfattribs={"closed": True, "layer": outline_layer})
 
-    # Footprint polygons: closed LWPOLYLINE entities grouped per element
+    # Footprint polygons: closed LWPOLYLINE entities grouped per element.
+    # An element may contribute several entries (disjoint HLR loops), all
+    # sharing its gid -- collect them into one GROUP per element.
     if footprint_polys:
+        entities_by_gid = {}
         for gid, layer, exterior, holes in footprint_polys:
-            entities = [msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": layer})]
+            entities = entities_by_gid.setdefault(gid, [])
+            entities.append(msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": layer}))
             for hole in holes:
                 entities.append(msp.add_lwpolyline(hole, dxfattribs={"closed": True, "layer": layer}))
+        for gid, entities in entities_by_gid.items():
             doc.groups.new(f"fp_{gid[:8]}").extend(entities)
 
     # zoom extents

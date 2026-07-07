@@ -254,13 +254,15 @@ class IfcDxfProperties(bpy.types.PropertyGroup):
         items=[
             ("ACCURATE",
              "Accurate",
-             "Matches Bonsai's own SVG export: real OCC Hidden Line Removal "
-             "(ifcopenshell.geom's native SVG serializer) for wall/column section "
-             "cuts, fused and hatched like Approximate; native 2D plan symbols "
-             "(shared BLOCK per type) for doors, windows, furniture, sanitary "
-             "fixtures, etc. Correct occlusion for any BRep geometry at the cost "
-             "of tessellated (faceted) section linework and a slower pipeline. "
-             "Default pipeline"),
+             "Matches Bonsai's own SVG export: one global OCC Hidden Line "
+             "Removal pass over the whole drawing (ifcopenshell.geom's native "
+             "SVG serializer, Bonsai's exact configuration). Elements hidden "
+             "under slabs/coverings are omitted like in the SVG; wall/column "
+             "sections are fused and hatched; below-cut walls keep only their "
+             "visible parts; slabs/coverings/roofs become footprint polylines; "
+             "doors, windows, furniture etc. stay native 2D plan symbols "
+             "(shared BLOCK per type) when visible. Slower than Approximate "
+             "and section linework is tessellated. Default pipeline"),
             ("APPROXIMATE",
              "Approximate",
              "Reads native 2D representations where available (exact arcs/circles/"

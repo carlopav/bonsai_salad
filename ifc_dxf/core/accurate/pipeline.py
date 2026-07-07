@@ -1,28 +1,61 @@
-"""Accurate pipeline: OCC/HLR-based, matches Bonsai's own SVG export.
+"""Accurate pipeline v2: one global OCC/HLR scene pass, used as a visibility
+oracle — mirrors Bonsai's own SVG export architecture.
 
-Calls ifcopenshell's native SVG/HLR serializer (ifcopenshell.geom.serializers.svg,
-built on OpenCASCADE's HLRBRep engine -- the same engine Bonsai's own SVG export
-uses) for elements that need a true 3D section (walls, columns) and whose Z
-range actually straddles the cut plane. Everything else uses the same
-native-2D-representation BLOCK/INSERT logic as the approximate pipeline's
-Bucket A (doors, windows, furniture, sanitary fixtures, ...) -- see
-plan_symbols.py. Walls/columns entirely below the cut plane ("viewed", not
-cut) reuse the approximate pipeline's Shapely profile-projection instead of
-HLR, for the same reason plan symbols do: HLR's single addDrawing pass only
-returns geometry actually sliced by the cut plane (empirically verified --
-an isolated below-cut element produces nothing), and for a simple vertical
-wall prism the profile projection is already the exact same silhouette a
-true top-down HLR projection would give.
+The whole drawing element set plus the camera annotation element is written
+into ifcopenshell's native SVG/HLR serializer, configured exactly like
+Bonsai's ``setup_serialiser`` (bonsai/bim/module/drawing/operator.py): no
+manual ``addDrawing`` — instead ``setElevationRefGuid(drawing.GlobalId)`` and
+the camera element itself define the drawing plane — plus
+``setSubtractionSettings(ALWAYS)``, ``setUsePrefiltering``, ``setUnifyInputs``,
+``setSegmentProjection``, ``setProfileThreshold``. ``finalize()`` then runs
+OpenCASCADE hidden-line removal over the whole scene at once, giving the same
+global occlusion as Bonsai's SVG plans: elements fully hidden under a slab or
+covering produce no output at all.
 
-All three paths (HLR section, view-wall profile, plan symbol) resolve to the
-same shared inputs consumed by _write_dxf: HLR and view-wall polygons both
-feed wall_polys_by_key (get Shapely-fused outlines + standard hatch, same as
-the approximate pipeline), plan symbols feed block_defs/block_inserts.
+(Historical note: v1 believed the serializer's ``projection`` group was
+mispositioned and that below-cut elements produced nothing. Both were
+artifacts of v1's manual ``addDrawing`` configuration — disproven empirically;
+see ifc_dxf/README.md, Pipeline B.)
 
-v1 scope (see ifc_dxf/README.md, Pipeline B): still no material-layer hatch
-decomposition (IfcMaterialLayerSet strips) for HLR/view walls, and the
-serializer's "projection" catch-all group is dropped, not drawn -- see the
-README for why.
+The serializer emits two kinds of geometry, and both must be kept: *closed
+loops* (section outlines, full silhouettes) and *open segments* — viewed
+geometry arrives as individual 2-point paths (``setSegmentProjection(True)``),
+and above-``ProfileThreshold`` objects come as wireframe. Parsing only closed
+loops silently discards every viewed element (the v2.0 bug: "no viewed walls,
+no terrain in the DXF").
+
+Per-guid SVG output is consumed four ways:
+
+- **visibility oracle**: an element with no output at all (loops *or*
+  segments) is hidden -> skipped. Replaces any slab-occlusion heuristic, with
+  exact void / double-height behavior, because it *is* the same HLR result
+  Bonsai renders.
+- **walls/columns** (`_HLR_SECTION_CLASSES`): ``<g class="{IfcClass}">`` loops
+  -> ``_Section`` polygons (fused + hatched by the shared writer); closed
+  ``projection`` loops minus the section area -> ``_View`` polygons; open
+  segments -> chained polylines on the ``_View`` layer (HLR already clipped
+  their hidden parts, i.e. correct *partial* occlusion for free).
+- **slabs/coverings/roofs** (`_FOOTPRINT_CLASSES`): closed loops -> footprint
+  LWPOLYLINE groups (shared writer path); open segments -> chained polylines
+  on the class layer.
+- **everything else**: native 2D BLOCK/INSERT plan symbols (shared
+  ``plan_symbols.place_plan_symbol``), gated by the oracle — a partially
+  visible symbol INSERTs its full block (normal CAD convention). Visible
+  elements with no usable 2D representation fall back to their HLR output as
+  direct polylines (wireframe fallback).
+
+SVG coordinates with this configuration are paper-frame (mm at drawing scale,
+y down, origin at the camera box top-left), not camera metres. They are mapped
+back deterministically from the camera body's local extents
+(``camera.camera_body_local_extents``) — computed, not calibrated.
+
+Only PLAN_VIEW / REFLECTED_PLAN_VIEW are exercised; the transform for mirrored
+or non-zenithal views is untested.
+
+Remaining v1 parity gaps (see README roadmap): material-layer hatch
+decomposition (item 9) and overhead-fill re-addition (item 11 — note: overhead
+elements sit above the cut plane, so they must *bypass* the oracle when
+implemented, HLR cannot see them).
 """
 
 import os
@@ -42,26 +75,27 @@ except ImportError:
     _SHAPELY_AVAILABLE = False
 
 from ..camera import (
-    camera_pos_dir_ref,
     camera_matrix_inv_col_major,
-    camera_dir_pos,
     world_matrix_col_major,
+    camera_body_local_extents,
 )
 from ..ifc_query import get_elements, get_material_name, _get_drawing_annotations
 from ..dxf_template import _parse_scale_factor
 from ..dxf_writer import _write_dxf
-from ..plan_symbols import place_plan_symbol
-from ..geometry import _wall_z_range, _extract_wall_polygon_with_openings
+from ..plan_symbols import place_plan_symbol, _chain_segments
+from ..geometry import _wall_z_range
 
 
 _SVG_NS = "{http://www.w3.org/2000/svg}"
 _IFC_NS = "{http://www.ifcopenshell.org/ns}"
 
-# Elements needing a true 3D section cut go through HLR (if they cross the
-# cut plane) or Shapely profile projection (if they don't). Matches the
-# approximate pipeline's own _SECTION_CLASSES exactly, so both pipelines
-# agree on which classes get a real section/view vs. a native 2D plan symbol.
+# Walls/columns: HLR section loops -> _Section, projection loops -> _View.
+# Matches the approximate pipeline's _SECTION_CLASSES.
 _HLR_SECTION_CLASSES = frozenset({"IfcWall", "IfcWallStandardCase", "IfcColumn"})
+
+# Horizontal build-up: HLR loops -> footprint LWPOLYLINE groups, matching the
+# approximate pipeline's footprint path (README, Bucket A output rule 2).
+_FOOTPRINT_CLASSES = frozenset({"IfcSlab", "IfcCovering", "IfcRoof"})
 
 # Matches "M-1.23,4.56" / "L1.23,-4.56" tokens in a polygonal (straight-
 # segment-only) SVG path 'd' attribute. setPolygonal(True) + setUseHlrPoly(True)
@@ -72,110 +106,181 @@ _PATH_CMD_RE = re.compile(
 
 
 def _parse_svg_path_subpaths(d):
-    """Split a polygonal SVG path 'd' attribute into point-loops.
+    """Split a polygonal SVG path 'd' attribute into point sequences.
 
-    A single 'd' may contain several M-delimited subpaths (disjoint loops);
-    each M starts a new loop. HLR body outlines close each loop back to its
-    start point, so each loop can be built directly into a Shapely Polygon.
+    A single 'd' may contain several M-delimited subpaths; each M starts a new
+    one. Two kinds occur in the serializer output and both are returned here
+    (>= 2 points each): *closed loops* (section outlines and full silhouettes;
+    the last point repeats the first) and *open segments* (visible-edge
+    linework of viewed geometry: setSegmentProjection(True) splits projection
+    output into individual 2-point paths, and above-ProfileThreshold objects
+    are emitted as wireframe). Callers must distinguish the two — treating
+    only closed loops as real output silently discards every viewed element.
     """
     subpaths = []
     current = []
     for cmd, x, y in _PATH_CMD_RE.findall(d):
         pt = (float(x), float(y))
         if cmd == "M":
-            if len(current) >= 3:
+            if len(current) >= 2:
                 subpaths.append(current)
             current = [pt]
         else:  # "L"
             current.append(pt)
-    if len(current) >= 3:
+    if len(current) >= 2:
         subpaths.append(current)
     return subpaths
 
 
-def _run_hlr(ifc, drawing, cut_elements, scale_factor_val):
-    """Run the native SVG/HLR serializer over cut_elements (already known to
-    straddle the cut plane).
-
-    Returns (polys_by_guid, n_dropped): polys_by_guid maps element GlobalId ->
-    list of shapely Polygon (one per closed HLR loop in that element's "body"
-    group); n_dropped is the path count from the unreliable "projection"
-    catch-all group, discarded (see module docstring).
+def _setup_serialiser(ifc, drawing, scale_factor_val, target_view):
+    """Build the native SVG/HLR serializer configured exactly like Bonsai's
+    setup_serialiser (bonsai/bim/module/drawing/operator.py) — same settings,
+    same order, so DXF and SVG exports run the identical engine configuration.
     """
-    pos, view_dir, ref_dir = camera_pos_dir_ref(drawing)
-
     gs = ifcopenshell.geom.settings()
     gs.set("dimensionality", ifcopenshell.ifcopenshell_wrapper.CURVES_SURFACES_AND_SOLIDS)
     gs.set("iterator-output", ifcopenshell.ifcopenshell_wrapper.NATIVE)
-
     buf = ifcopenshell.geom.serializers.buffer()
     ss  = ifcopenshell.geom.serializer_settings()
     serialiser = ifcopenshell.geom.serializers.svg(buf, gs, ss)
+    serialiser.setWithoutStoreys(True)
     serialiser.setPolygonal(True)
     serialiser.setUseHlrPoly(True)
+    # Objects with more edges are rendered as wireframe instead of HLR (perf)
+    serialiser.setProfileThreshold(10000)
+    serialiser.setUseNamespace(True)
     serialiser.setAlwaysProject(True)
     serialiser.setAutoElevation(False)
     serialiser.setAutoSection(False)
+    serialiser.setPrintSpaceNames(False)
+    serialiser.setPrintSpaceAreas(False)
     serialiser.setDrawDoorArcs(False)
     serialiser.setNoCSS(True)
-    serialiser.setUseNamespace(True)
-    serialiser.setWithoutStoreys(True)
+    serialiser.setElevationRefGuid(drawing.GlobalId)
     serialiser.setScale(scale_factor_val)
+    serialiser.setSubtractionSettings(ifcopenshell.ifcopenshell_wrapper.ALWAYS)
+    serialiser.setUsePrefiltering(True)  # See IfcOpenShell #3359
+    serialiser.setUnifyInputs(True)
+    serialiser.setSegmentProjection(True)
+    if target_view == "REFLECTED_PLAN_VIEW":
+        serialiser.setMirrorY(True)
     serialiser.setFile(ifc)
-    serialiser.addDrawing(pos, view_dir, ref_dir, getattr(drawing, "Name", None) or "drawing", True)
+    return gs, buf, serialiser
+
+
+def _run_hlr_scene(ifc, drawing, elements, scale_factor_val, target_view):
+    """Write the whole element set + the camera element into one serializer
+    run and parse the per-guid output.
+
+    Returns (out, n_written, t_hlr) where out maps element GlobalId ->
+    {"section": [Polygon], "projection": [Polygon]} in camera-space metres.
+    An element absent from `out` produced no visible output: it is fully
+    hidden by the global HLR pass (or has no geometry) and must not be drawn.
+    """
+    gs, buf, serialiser = _setup_serialiser(ifc, drawing, scale_factor_val, target_view)
 
     t0 = time.perf_counter()
     n_written = 0
-    if cut_elements:
-        it = ifcopenshell.geom.iterator(gs, ifc, multiprocessing.cpu_count(), include=cut_elements)
-        if it.initialize():
-            while True:
-                serialiser.write(it.get())
-                n_written += 1
-                if not it.next():
-                    break
+    include = list(elements) + [drawing]
+    it = ifcopenshell.geom.iterator(gs, ifc, multiprocessing.cpu_count(), include=include)
+    if it.initialize():
+        while True:
+            serialiser.write(it.get())
+            n_written += 1
+            if not it.next():
+                break
     serialiser.finalize()
     svg_text = buf.get_value()
-    print(f"  HLR gen    : {time.perf_counter() - t0:.2f}s  ({n_written} elements written to serializer)")
+    t_hlr = time.perf_counter() - t0
 
+    ext = camera_body_local_extents(drawing)
+    if ext is None:
+        raise RuntimeError(
+            "accurate pipeline: camera body geometry unavailable, cannot "
+            "derive the paper->camera transform"
+        )
+    x_min_l, _x_max_l, _y_min_l, y_max_l = ext
+    factor = 1000.0 * scale_factor_val  # svg units (paper mm) per metre
+
+    # Closed-loop test in svg units (paper mm): serializer loops repeat their
+    # first point exactly, so a tight tolerance is safe.
+    _CLOSE_TOL = 1e-6
+
+    out = {}
     root = ET.fromstring(svg_text)
-
-    polys_by_guid = {}
-    n_dropped = 0
     for g in root.iter(f"{_SVG_NS}g"):
-        cls = g.get("class")
-        if cls in (None, "section"):
-            continue
-        paths = g.findall(f"{_SVG_NS}path")
-        if not paths:
-            continue
-        if cls == "projection":
-            n_dropped += len(paths)
-            continue
         guid = g.get(f"{_IFC_NS}guid")
-        for path in paths:
+        if guid is None:
+            continue  # storey/section wrapper groups carry no product guid
+        classes = (g.get("class") or "").split()
+        kind = "projection" if "projection" in classes else "section"
+        for path in g.findall(f"{_SVG_NS}path"):
             d = path.get("d")
             if not d:
                 continue
-            for loop in _parse_svg_path_subpaths(d):
+            for sub in _parse_svg_path_subpaths(d):
+                is_closed = (len(sub) >= 4
+                             and abs(sub[0][0] - sub[-1][0]) <= _CLOSE_TOL
+                             and abs(sub[0][1] - sub[-1][1]) <= _CLOSE_TOL)
+                pts = [(x / factor + x_min_l, y_max_l - y / factor)
+                       for x, y in sub]
+                rec = out.setdefault(
+                    guid, {"section": [], "projection": [], "lines": []})
+                if not is_closed:
+                    # Open visible-edge linework (setSegmentProjection splits
+                    # viewed geometry into segments; wireframe output too).
+                    rec["lines"].append(pts)
+                    continue
                 try:
-                    poly = shapely.Polygon(loop)
+                    poly = shapely.Polygon(pts)
                     if not poly.is_valid:
                         poly = poly.buffer(0)
                     if poly.is_empty:
                         continue
                 except Exception:
                     continue
-                polys_by_guid.setdefault(guid, []).append(poly)
+                polys = ([poly] if isinstance(poly, shapely.Polygon)
+                         else [p for p in getattr(poly, "geoms", [])
+                               if isinstance(p, shapely.Polygon)])
+                rec[kind].extend(polys)
+    return out, n_written, t_hlr
 
-    return polys_by_guid, n_dropped
+
+def _polys_to_polylines(polys):
+    """Closed polyline point lists (first point repeated last) from polygons,
+    exterior + interior rings, for the direct_entities wireframe fallback."""
+    polylines = []
+    for poly in polys:
+        polylines.append([(float(x), float(y)) for x, y in poly.exterior.coords])
+        for ring in poly.interiors:
+            polylines.append([(float(x), float(y)) for x, y in ring.coords])
+    return polylines
+
+
+def _chain_lines(lines):
+    """Chain open visible-edge polylines into longer runs by shared endpoints.
+
+    setSegmentProjection emits viewed geometry as individual 2-point paths;
+    exploding into segments and rechaining (plan_symbols._chain_segments)
+    merges e.g. a viewed wall's four edges back into one closed outline.
+    """
+    segs = []
+    for pts in lines:
+        for i in range(len(pts) - 1):
+            if pts[i] != pts[i + 1]:
+                segs.append((pts[i], pts[i + 1]))
+    return _chain_segments(segs)
 
 
 def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_angle_deg=15.0):
-    """Export a single Bonsai drawing to DXF using the accurate (OCC/HLR) pipeline."""
+    """Export a single Bonsai drawing to DXF using the accurate (global HLR
+    oracle) pipeline."""
+    if not _SHAPELY_AVAILABLE:
+        raise RuntimeError("accurate pipeline requires shapely")
+
     target_view = pset.get("TargetView", "PLAN_VIEW")
     human_scale = pset.get("HumanScale", "NTS")
-    print(f"  TargetView : {target_view}   Scale: {human_scale}   Pipeline: accurate (HLR)")
+    print(f"  TargetView : {target_view}   Scale: {human_scale}   Pipeline: accurate (HLR oracle)")
 
     if template_path is None:
         pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -191,57 +296,11 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")
 
-    hlr_classed     = [e for e in elements if e.is_a() in _HLR_SECTION_CLASSES]
-    symbol_elements = [e for e in elements if e.is_a() not in _HLR_SECTION_CLASSES]
-
-    cam_dir, cam_pos = camera_dir_pos(drawing)
-    cut_z = cam_pos[2]
-
-    # Split wall/column classes into cut (straddles the plane -> real HLR
-    # section) vs viewed (entirely below it -> Shapely profile projection),
-    # exactly like the approximate pipeline's classify_elements.
-    cut_elements, view_elements = [], []
-    for elem in hlr_classed:
-        wm = world_matrix_col_major(elem)
-        z_min, z_max = _wall_z_range(elem, wm)
-        is_cut = z_min is None or (z_min <= cut_z <= z_max)
-        (cut_elements if is_cut else view_elements).append(elem)
-
-    wall_polys_by_key = {}
-
-    # --- Section (cut) walls/columns: real HLR ---
-    polys_by_guid, n_dropped = _run_hlr(ifc, drawing, cut_elements, scale_factor_val)
-    n_hlr_polys = 0
-    for elem in cut_elements:
-        polys = polys_by_guid.get(elem.GlobalId)
-        if not polys:
-            continue
-        ifc_class = elem.is_a()
-        key = (ifc_class, get_material_name(elem), f"{ifc_class}_Section", None)
-        wall_polys_by_key.setdefault(key, []).extend(polys)
-        n_hlr_polys += len(polys)
-    print(f"  HLR paths  : {n_hlr_polys} polygons from {len(cut_elements)} elements, "
-          f"{n_dropped} projection paths dropped (unreliable position)")
-
-    # --- View walls/columns: Shapely profile projection (same as approximate) ---
-    n_view_placed = 0
-    if _SHAPELY_AVAILABLE:
-        col_major = camera_matrix_inv_col_major(drawing)
-        for elem in view_elements:
-            wm = world_matrix_col_major(elem)
-            try:
-                poly, _ = _extract_wall_polygon_with_openings(elem, wm, col_major, cut_z, cam_dir)
-            except Exception:
-                poly = None
-            if poly is None:
-                continue
-            ifc_class = elem.is_a()
-            _, z_max = _wall_z_range(elem, wm)
-            z_top_key = round(z_max, 3) if z_max is not None else None
-            key = (ifc_class, get_material_name(elem), f"{ifc_class}_View", z_top_key)
-            wall_polys_by_key.setdefault(key, []).append(poly)
-            n_view_placed += 1
-    print(f"  View walls : {n_view_placed}/{len(view_elements)} placed via profile projection")
+    hlr_out, n_written, t_hlr = _run_hlr_scene(
+        ifc, drawing, elements, scale_factor_val, target_view
+    )
+    print(f"  HLR scene  : {t_hlr:.2f}s  ({n_written} elements written, "
+          f"{len(hlr_out)} with visible output — global occlusion)")
 
     col_major   = camera_matrix_inv_col_major(drawing)
     _cam_inv_np = np.array(col_major, dtype=float).reshape(4, 4, order='F')
@@ -249,25 +308,113 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     _cam_x_proj = _cam_R @ np.array([1.0, 0.0, 0.0])
     _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]), float(_cam_x_proj[0]))))
 
+    wall_polys_by_key = {}
+    footprint_polys   = []  # [(gid, layer, exterior_pts, [hole_pts])]
     block_defs    = {}
     block_order   = []
     block_inserts = {}
     seen_blocks   = {}
-    direct_entities = []  # [{layer, polylines, arcs, circles, ellipses}] -- non-type symbols
-    n_symbols_placed = 0
-    for element in symbol_elements:
-        try:
-            placed = place_plan_symbol(
-                element, element.is_a(), target_view, crease_angle_deg,
-                _cam_R, _cam_inv_np, _cam_rot_deg,
-                block_defs, block_order, block_inserts, seen_blocks,
-                direct_entities,
-            )
-        except Exception:
-            placed = False
-        if placed:
-            n_symbols_placed += 1
-    print(f"  Plan symbols: {n_symbols_placed}/{len(symbol_elements)} placed via native 2D representation")
+    direct_entities = []  # [{layer, polylines, arcs, circles, ellipses}]
+
+    n_hidden = n_cut = n_view = n_fp = n_sym = n_wire = n_viewlines = 0
+    hidden_classes = {}
+
+    # Sorted iteration keeps block_order (and thus the DXF) deterministic.
+    for element in sorted(elements, key=lambda e: getattr(e, "GlobalId", "")):
+        ifc_class = element.is_a()
+        gid = getattr(element, "GlobalId", None)
+        rec = hlr_out.get(gid)
+
+        # --- Visibility oracle: no HLR output at all -> hidden (or no geom).
+        # Open segments count as output: viewed geometry arrives as segments
+        # (setSegmentProjection), not closed loops.
+        if rec is None or not (rec["section"] or rec["projection"] or rec["lines"]):
+            n_hidden += 1
+            hidden_classes[ifc_class] = hidden_classes.get(ifc_class, 0) + 1
+            continue
+
+        sec, proj, lines = rec["section"], rec["projection"], rec["lines"]
+
+        if ifc_class in _HLR_SECTION_CLASSES:
+            material = get_material_name(element)
+            if sec:
+                key = (ifc_class, material, f"{ifc_class}_Section", None)
+                wall_polys_by_key.setdefault(key, []).extend(sec)
+                n_cut += 1
+            # Closed projection loops beyond the section area = visible
+            # below-cut parts (or the whole wall, if not cut at all).
+            view_polys = proj
+            if sec and proj:
+                try:
+                    diff = shapely.unary_union(proj).difference(shapely.unary_union(sec))
+                except Exception:
+                    diff = None
+                if diff is None or diff.is_empty:
+                    view_polys = []
+                else:
+                    geoms = diff.geoms if hasattr(diff, "geoms") else [diff]
+                    view_polys = [g for g in geoms
+                                  if isinstance(g, shapely.Polygon) and g.area > 1e-6]
+            if view_polys:
+                wm = world_matrix_col_major(element)
+                _, z_max = _wall_z_range(element, wm)
+                z_top_key = round(z_max, 3) if z_max is not None else None
+                key = (ifc_class, material, f"{ifc_class}_View", z_top_key)
+                wall_polys_by_key.setdefault(key, []).extend(view_polys)
+            # Open visible-edge segments (the common form for viewed walls):
+            # HLR already clipped the hidden parts, draw them as-is on _View.
+            if lines:
+                chained = _chain_lines(lines)
+                if chained:
+                    direct_entities.append({"layer": f"{ifc_class}_View",
+                                            "polylines": chained,
+                                            "arcs": [], "circles": [], "ellipses": []})
+                    n_viewlines += len(chained)
+            if (view_polys or lines) and not sec:
+                n_view += 1
+
+        elif ifc_class in _FOOTPRINT_CLASSES:
+            for poly in sec + proj:
+                ext_pts = [(float(x), float(y)) for x, y in poly.exterior.coords[:-1]]
+                holes = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
+                         for ring in poly.interiors]
+                if len(ext_pts) >= 3:
+                    footprint_polys.append((gid, ifc_class, ext_pts, holes))
+            if lines:
+                chained = _chain_lines(lines)
+                if chained:
+                    direct_entities.append({"layer": ifc_class,
+                                            "polylines": chained,
+                                            "arcs": [], "circles": [], "ellipses": []})
+            n_fp += 1
+
+        else:
+            try:
+                placed = place_plan_symbol(
+                    element, ifc_class, target_view, crease_angle_deg,
+                    _cam_R, _cam_inv_np, _cam_rot_deg,
+                    block_defs, block_order, block_inserts, seen_blocks,
+                    direct_entities,
+                )
+            except Exception:
+                placed = False
+            if placed:
+                n_sym += 1
+            else:
+                # Wireframe fallback: visible per the oracle but no usable 2D
+                # representation -> draw its HLR output directly.
+                polylines = _polys_to_polylines(sec + proj) + _chain_lines(lines)
+                if polylines:
+                    direct_entities.append({"layer": ifc_class, "polylines": polylines,
+                                            "arcs": [], "circles": [], "ellipses": []})
+                    n_wire += 1
+
+    print(f"  Hidden(HLR): {n_hidden} elements fully occluded or without geometry")
+    if hidden_classes:
+        print(f"  Hidden(HLR): { {k: v for k, v in sorted(hidden_classes.items())} }")
+    print(f"  Drawn      : {n_cut} section walls, {n_view} view walls "
+          f"({n_viewlines} view polylines), {n_fp} footprints, "
+          f"{n_sym} plan symbols, {n_wire} HLR wireframes")
 
     annotations = _get_drawing_annotations(ifc, drawing)
     if annotations:
@@ -282,6 +429,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
                drawing_name=getattr(drawing, "Name", None),
                drawing_identification=getattr(drawing, "Identification", None),
                drawing_scale=human_scale,
+               footprint_polys=footprint_polys or None,
                direct_entities=direct_entities or None)
     print(f"  DXF gen    : {time.perf_counter() - t1:.2f}s")
     size_kb = os.path.getsize(output_path) // 1024

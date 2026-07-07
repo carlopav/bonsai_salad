@@ -18,7 +18,7 @@ Accurate uses ifcopenshell's own native HLR serializer.
 | Pipeline | Status | Approach |
 |----------|--------|----------|
 | **A — Approximate** | ✓ implemented | IFC-native traversal: 2D reprs as BLOCK/INSERT, sections via Shapely profile extraction |
-| **B — Accurate** | ✓ v1 (linework only) | OCC/HLR via `ifcopenshell.geom.serializers.svg` — matches Bonsai's own SVG export engine |
+| **B — Accurate** | ✓ v2 (HLR oracle) | One global OCC/HLR scene pass (`ifcopenshell.geom.serializers.svg`, Bonsai's exact config) — global occlusion + visibility oracle |
 
 **Convergence plan (decided lug 2026):** the two-pipeline split is temporary.
 Accurate keeps being developed until it reaches feature parity with Approximate
@@ -326,16 +326,62 @@ everything else (doors, windows, furniture, sanitary fixtures, ...) reuses
 Pipeline A's Bucket A logic verbatim — native 2D plan representation, shared
 BLOCK per `IfcTypeObject` — via the shared `plan_symbols.place_plan_symbol()`.
 
-**Why hybrid:** the HLR serializer's `class="projection"` catch-all group
-(meant for below-cut visible-but-not-sliced geometry) was found to place its
-paths at coordinates unrelated to the element's real position — verified even
-for a single isolated element written to the serializer alone, so it is not a
-camera/parsing bug on this side. Root cause suspected to be in how the native
-serializer handles shared/mapped Type representations, not yet diagnosed
-further. Rather than draw misleading linework, these classes skip HLR entirely
-and use the same native-representation path as Pipeline A, which is both
-reliable and (for door/window/furniture symbols) usually what you want to see
-in a plan anyway.
+**Why hybrid (v1), and the disproven "projection bug":** v1 believed the HLR
+serializer's `class="projection"` group placed paths at wrong coordinates and
+that below-cut elements produced nothing. **Both findings were artifacts of our
+serializer configuration** (empirically disproven lug 2026 on a real model):
+with our manual `addDrawing(pos, view_dir, ref_dir)` call, below-cut elements
+indeed produce nothing — but with **Bonsai's own configuration** the projection
+group is emitted at exactly the right coordinates (verified to the cm against
+camera-space element origins). Bonsai's config differs in that it never calls
+`addDrawing`: it sets `setElevationRefGuid(drawing.GlobalId)` and **writes the
+camera annotation element itself into the serializer**, letting it derive the
+drawing plane from IFC; plus `setSubtractionSettings(ALWAYS)`,
+`setUsePrefiltering(True)`, `setUnifyInputs(True)`, `setSegmentProjection(True)`,
+`setProfileThreshold(10000)` (see `setup_serialiser` in Bonsai's
+`drawing/operator.py`). Output classes with this config: section geometry in
+`<g class="{IfcClass}">`, below-cut visible geometry in
+`<g class="projection {IfcClass}">`, both per-guid.
+
+**Global HLR occlusion (verified):** when the occluding slabs/coverings are
+written into the same serializer scene, `finalize()` runs hidden-line removal
+globally — ground-floor elements under a first-floor slab produce **zero
+output** (verified: wall + furniture fully suppressed with 32 occluders in the
+scene; identical elements produce correct projection paths without them). This
+is exactly where Bonsai's SVG plan "hides" the storey below: not selection
+(Blender AABB culling includes everything in the camera box), not a slab
+heuristic — pure HLR. The Blender viewport hides those elements the same way
+any opaque render does (z-buffer), also not via selection.
+
+**v2 — HLR as visibility oracle (IMPLEMENTED lug 2026):** the *whole* drawing
+element set + camera element is written in one serializer run with Bonsai's
+config (`_setup_serialiser` mirrors Bonsai's method 1:1); per-guid output is
+consumed as: (a) elements with **no output** are hidden → skipped entirely
+(replaces the `_is_occluded_by_slab` heuristic, with exact void/double-height
+handling); (b) **walls/columns**: section loops → `_Section` polygons, closed
+projection loops minus the section area → `_View` polygons, open segments →
+chained polylines on `_View` — correct partial occlusion for free; (c)
+**slabs/coverings/roofs**: closed loops → footprint LWPOLYLINE groups (closes
+roadmap item 12 for Pipeline B), open segments → chained polylines on the
+class layer; (d) **symbols**: native-2D BLOCK/INSERT path gated by the oracle
+(any output → INSERT the full block, CAD convention for partially visible
+symbols); visible elements with no usable 2D repr fall back to their HLR
+output as direct polylines (wireframe fallback). The paper-frame →
+camera-metres affine is *computed* from the camera body's local extents
+(`camera.camera_body_local_extents`), not calibrated:
+`x_cam = x_svg/(1000·scale) + x_min_local`,
+`y_cam = y_max_local − y_svg/(1000·scale)`.
+
+**Serializer output kinds (hard-won detail):** the serializer emits *closed
+loops* (section outlines, full silhouettes) **and *open 2-point segments*** —
+`setSegmentProjection(True)` splits all viewed-geometry linework into
+individual segments, and objects above `setProfileThreshold` are emitted as
+wireframe. A parser that keeps only closed loops silently discards every
+viewed element (v2.0 shipped with exactly this bug: no viewed walls, no
+terrain, no below-cut stairs in the DXF, all misclassified as "hidden" by the
+oracle). Open segments are re-chained by shared endpoints
+(`plan_symbols._chain_segments`) into polylines — a viewed wall's four edges
+merge back into one closed outline.
 
 ### HLR section cut (Wall / WallStandardCase / Column, cut by the plane)
 
@@ -404,11 +450,15 @@ same `IfcTypeObject`.
   is entirely above the cut plane, marked `_Overhead`); Pipeline B's shared
   `get_elements()` call doesn't perform this step yet, so such elements are
   currently missing from the accurate export.
-- `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction (Pipeline A's Shapely-
-  based `_slab_footprint_world` path) isn't ported to Pipeline B; these classes
-  fall back to `place_plan_symbol` only, or are skipped if that fails.
-- Root cause of the `class="projection"` mispositioning is still undiagnosed;
-  worth a proper upstream investigation before relying on it for anything.
+- ~~`IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction isn't ported to
+  Pipeline B~~ — FATTO (lug 2026, v2): these classes now draw their HLR loops
+  as footprint LWPOLYLINE groups (occlusion-correct, unlike Pipeline A's
+  profile extraction).
+- ~~Root cause of the `class="projection"` mispositioning is still undiagnosed~~
+  — disproven lug 2026: it was our serializer configuration (manual `addDrawing`
+  instead of Bonsai's `setElevationRefGuid` + camera-element write). See "Why
+  hybrid (v1)" above; v1 code still drops the projection group until the v2
+  oracle work lands.
 
 ---
 
@@ -432,10 +482,14 @@ same `IfcTypeObject`.
 8. ~~Below-cut "view" geometry (elements not crossing the cut plane)~~ — FATTO (lug 2026),
    via Pipeline A's Shapely profile projection, not a second HLR pass
 9. Material-layer hatch decomposition (`IfcMaterialLayerSet` strips) for HLR/view walls.
-10. Diagnose the `class="projection"` mispositioning (shared/mapped Type
-    representations?) — currently dropped rather than attributed.
+10. ~~Diagnose the `class="projection"` mispositioning~~ — FATTO (lug 2026):
+    no serializer bug; our `addDrawing` config was the cause. ~~HLR visibility
+    oracle~~ — FATTO (lug 2026): implemented as Pipeline B v2, see the
+    "v2 — HLR as visibility oracle" section above.
 11. Overhead-fill re-addition, matching Pipeline A.
-12. `IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching Pipeline A.
+12. ~~`IfcSlab`/`IfcCovering`/`IfcRoof` footprint extraction, matching
+    Pipeline A~~ — FATTO (lug 2026, v2): via HLR loops → footprint LWPOLYLINE
+    groups.
 13. ~~Naming convention for dxf blocks: ClassNameSenzaIfc_TypeNameSenzaIfc_GuidLast8Chars
     for example: FurnitureType_Bigtablewithchairs_851asdas~~ — FATTO (lug 2026),
     via `make_block_name` in `core/ifc_query.py` (type-based and per-instance blocks)

@@ -30,6 +30,7 @@ from ifc_dxf.core.ifc_query import find_drawings
 # (root conftest.py) stubs `ifc_dxf.core` as an empty namespace and never runs
 # its real __init__.py, so the `export_drawing` alias defined there is absent.
 from ifc_dxf.core.approximate import export_drawing
+from ifc_dxf.core.accurate import export_drawing as export_drawing_accurate
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,26 @@ def test_export_all_drawings(ifc_filename, tmp_path):
         doc = ezdxf.readfile(out)
         msp = doc.modelspace()
         assert len(list(msp)) > 0, f"Model space is empty for {drawing.Name}"
+
+
+@pytest.mark.parametrize("ifc_filename", _ifc_files())
+def test_export_all_drawings_accurate(ifc_filename, tmp_path):
+    """Same smoke test through the accurate (global HLR oracle) pipeline."""
+    ifc_path = os.path.join(_FILES_DIR, ifc_filename)
+    ifc = ifcopenshell.open(ifc_path)
+
+    drawings = find_drawings(ifc)
+    assert drawings, f"No drawings found in {ifc_filename}"
+
+    for drawing, pset in drawings:
+        out = _output_path(ifc_filename, (drawing.Name or "unnamed") + "_accurate")
+        export_drawing_accurate(ifc, drawing, pset, out)
+
+        assert os.path.isfile(out), f"Output DXF not created for {drawing.Name}"
+        assert os.path.getsize(out) > 1000, f"Output DXF suspiciously small for {drawing.Name}"
+
+        doc = ezdxf.readfile(out)
+        assert len(list(doc.modelspace())) > 0, f"Model space is empty for {drawing.Name}"
 
 
 # ---------------------------------------------------------------------------

@@ -77,6 +77,30 @@ def get_camera_frustum_bbox(drawing):
         return None
 
 
+def camera_body_local_extents(drawing):
+    """Return (x_min, x_max, y_min, y_max) of the camera body geometry in the
+    drawing placement's local frame, or None if unavailable.
+
+    Used to map the native SVG serializer's paper-frame output back to
+    camera-space metres deterministically (no empirical calibration): with the
+    ElevationRefGuid configuration the SVG origin is the top-left corner of
+    this box, x growing right and y growing down, at 1000*scale units per
+    metre. So x_cam = x_svg/(1000*scale) + x_min and
+    y_cam = y_max - y_svg/(1000*scale).
+    """
+    try:
+        s = ifcopenshell.geom.settings()
+        s.set('use-world-coords', False)
+        shape = ifcopenshell.geom.create_shape(s, drawing)
+        v = np.array(shape.geometry.verts).reshape(-1, 3)
+        if not len(v):
+            return None
+        return (float(v[:, 0].min()), float(v[:, 0].max()),
+                float(v[:, 1].min()), float(v[:, 1].max()))
+    except Exception:
+        return None
+
+
 def _element_origin(element):
     """Return (x, y, z) world origin of element's ObjectPlacement, or None."""
     try:
