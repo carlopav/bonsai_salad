@@ -58,7 +58,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                drawing_name=None, drawing_identification=None,
                drawing_scale=None, footprint_polys=None,
                wall_layer_polys=None, wall_subdivision_lines=None,
-               direct_entities=None):
+               direct_entities=None, section_patch_union=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -185,6 +185,55 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
         decompose_key = (ifc_class, layer, z_top)
         wall_geom_groups.append((outline_layer, hatch_layer, is_section, geoms, decompose_key))
+
+    # Pinhole-void patching: HLR occasionally loses thin miter wedges at wall
+    # joints, leaving small interior rings in the fused section polygons that
+    # no element's output covers (unhatched slivers at corners). A hole is
+    # filled only when ALL of: it is small (< 1 m2), the authored-geometry
+    # union says the area is solid, and no other drawn group covers it.
+    # Genuine voids (shafts, cavities between walls) fail one of the tests.
+    if _SHAPELY_AVAILABLE and section_patch_union is not None and wall_geom_groups:
+        # Only hatched (section) geometry counts as "covered": unhatched _View
+        # outlines (e.g. a spatial zone boundary spanning the whole plan) must
+        # not veto the patch.
+        try:
+            all_drawn = shapely.ops.unary_union(
+                [g for _, _, is_sec, geoms, _ in wall_geom_groups
+                 for g in geoms if is_sec])
+        except Exception:
+            all_drawn = None
+        if all_drawn is not None:
+            n_patched = 0
+            for gi, (ol, hl, is_sec, geoms, dk) in enumerate(wall_geom_groups):
+                if not is_sec:
+                    continue
+                new_geoms = []
+                group_changed = False
+                for poly in geoms:
+                    if poly.geom_type == 'Polygon' and poly.interiors:
+                        keep = []
+                        poly_changed = False
+                        for ring in poly.interiors:
+                            try:
+                                hole = shapely.Polygon(ring)
+                                if (hole.area < 1.0
+                                        and hole.difference(section_patch_union).area < 1e-3
+                                        and hole.difference(all_drawn).area > hole.area * 0.5):
+                                    n_patched += 1
+                                    poly_changed = True
+                                    continue  # drop the ring -> fill the void
+                            except Exception:
+                                pass
+                            keep.append(ring)
+                        if poly_changed:
+                            poly = shapely.Polygon(poly.exterior, keep)
+                            group_changed = True
+                    new_geoms.append(poly)
+                if group_changed:
+                    wall_geom_groups[gi] = (ol, hl, is_sec, new_geoms, dk)
+            if n_patched:
+                print(f"  Hatch patch: filled {n_patched} pinhole void(s) "
+                      f"confirmed solid by authored geometry")
 
     # Keys whose standard hatch was replaced by per-material-layer hatches (Pass 1b).
     # Elements without a material layer set (e.g. IfcColumn, or walls with no

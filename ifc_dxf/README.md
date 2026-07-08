@@ -358,19 +358,80 @@ element set + camera element is written in one serializer run with Bonsai's
 config (`_setup_serialiser` mirrors Bonsai's method 1:1); per-guid output is
 consumed as: (a) elements with **no output** are hidden → skipped entirely
 (replaces the `_is_occluded_by_slab` heuristic, with exact void/double-height
-handling); (b) **walls/columns**: section loops → `_Section` polygons, closed
-projection loops minus the section area → `_View` polygons, open segments →
-chained polylines on `_View` — correct partial occlusion for free; (c)
-**slabs/coverings/roofs**: closed loops → footprint LWPOLYLINE groups (closes
-roadmap item 12 for Pipeline B), open segments → chained polylines on the
-class layer; (d) **symbols**: native-2D BLOCK/INSERT path gated by the oracle
-(any output → INSERT the full block, CAD convention for partially visible
-symbols); visible elements with no usable 2D repr fall back to their HLR
-output as direct polylines (wireframe fallback). The paper-frame →
+handling); (b) **priority 1 — authored 2D representation** (`_has_2d_plan_repr`:
+Plan context, or FootPrint/Axis — the Model/Body/MODEL_VIEW fallback rows
+deliberately do *not* qualify, they match any 3D body): shared BLOCK/INSERT
+plan symbol, gated by the oracle (any output → INSERT the full block, CAD
+convention for partially visible symbols); (c) **priority 2 — output-driven,
+no class whitelist**: whatever HLR reports per element — section loops →
+`{Class}_Section` fused + hatched (walls, columns, but equally cut slabs,
+beams, stairs, coverings, building-element parts, proxies), closed projection
+loops minus the section area → `{Class}_View` polygons, open segments →
+chained polylines on `_View` — correct partial occlusion for free; (d) **view
+profile** (styling only, `_VIEW_PROFILE`): in plan-family views the *viewed*
+closed loops of slabs/coverings/roofs become footprint LWPOLYLINE GROUPs
+(roadmap item 12); `_LINEWORK_ONLY_CLASSES` (terrain, spatial elements) are
+never hatched — their cut loops draw as unhatched outlines. The paper-frame →
 camera-metres affine is *computed* from the camera body's local extents
 (`camera.camera_body_local_extents`), not calibrated:
 `x_cam = x_svg/(1000·scale) + x_min_local`,
 `y_cam = y_max_local − y_svg/(1000·scale)`.
+
+**Hatch conventions (decided lug 2026):** section hatch is gated by the IFC
+schema's fabric-vs-contents taxonomy (`_is_hatchable`: `IfcBuildingElement` /
+IFC4X3 `IfcBuiltElement`, plus `IfcBuildingElementPart` explicitly so cut wall
+layers can hatch) — furniture, sanitary terminals, appliances, transport,
+terrain and spatial elements can never hatch, cut or not. On top of that the
+plan profile's `no_hatch` set (stairs, stair flights, ramps, ramp flights,
+railings) draws conventionally-unhatched fabric as linework in plans; future
+SECTION/ELEVATION profiles will hatch them normally.
+
+**Linework cleaning (decided lug 2026 — conservative by policy):** polygonal
+HLR stays (segmented arcs accepted, incl. elevations); the quality issue is
+dense mesh tessellation. Three passes:
+1. **Crease mask** (`_build_keep_edge_masks` + `_filter_lines_by_mask`): a
+   second geometry pass classifies each mesh edge in 3D — kept if boundary,
+   crease (dihedral ≥ `crease_angle_deg`, same semantics as the approximate
+   pipeline's mesh handling) or view-dependent silhouette; HLR segments not
+   lying on a kept edge (1 mm tolerance) are smooth-tessellation noise and
+   dropped. Needed because the serializer has no dihedral filter (roadmap
+   item 15) and its 2D output carries no face adjacency. Verified: terrain
+   linework −50%, straight geometry (walls/slabs) untouched.
+2. Same-layer exact segment **dedup** (`seen_segments` in `_chain_lines`):
+   HLR emits a shared edge once per element showing it (BricsCAD OVERKILL
+   flagged those); cross-layer duplicates are kept deliberately.
+3. **Paper-scale culling/simplify** in `_chain_lines`: whole polylines
+   smaller than 0.15 mm on paper are culled; Douglas-Peucker removes vertices
+   within 0.05 mm paper. Both below plot resolution, so no renderable
+   geometry can be lost — when in doubt, keep everything.
+
+**Footprint recomposition (lug 2026) — "HLR decides visibility, authored
+geometry decides shape":** coplanar horizontal surfaces z-fight inside HLR (a
+flooring covering flush with its slab suppresses BOTH elements' boundary
+edges — verified: a slab kept 7 of 31 boundary segments purely because of the
+coincident covering), and what survives is fragmented segments. For
+slabs/coverings/roofs in plan views the visibility problem is really 2.5D, so
+`_recompose_plan_footprints` solves it exactly instead: each oracle-visible
+element's authored footprint (`_slab_footprint_world`) minus every footprint
+above it (painter's algorithm, z_top descending, finish-over-structure on
+coplanar ties via `_FOOTPRINT_PRIORITY`) minus the section-hatch areas. One
+clean closed outline per element (GROUP-mapped), no duplicate fragments — on a
+real 1:100 plan this replaced ~500 fragmented HLR segments with 37 closed
+footprints (−25% total polylines). Elements without an extractable authored
+footprint (BReps) keep their HLR output.
+
+**Pinhole-void hatch patching (lug 2026):** HLR occasionally loses thin miter
+wedges at wall joints (coincident boolean clip planes between connected
+walls), leaving small interior rings in the fused section hatch that *no*
+element's output covers — an unhatched sliver at the corner (verified on a
+real model: the wedge belonged to a wall per its authored profile+clips, but
+appeared in no HLR section loop; Bonsai's SVG, same engine, shows the same
+pinhole). Fix in `_write_dxf(section_patch_union=...)`: the accurate pipeline
+passes the union of authored section profiles (`
+_extract_wall_polygon_with_openings`, the approximate pipeline's machinery) as
+a correctness oracle, and the writer fills fused-group holes only when ALL of:
+hole < 1 m², authored union says the area is solid, and no other *hatched*
+group covers it. Genuine voids (shafts, cavities) fail a test and are kept.
 
 **Serializer output kinds (hard-won detail):** the serializer emits *closed
 loops* (section outlines, full silhouettes) **and *open 2-point segments*** —
@@ -499,6 +560,11 @@ same `IfcTypeObject`.
 **Upstream:**
 13. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
 14. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
+15. PR IfcOpenShell: expose a crease/dihedral angle on the SVG serializer
+    (OCC's `HLRBRep_PolyAlgo` has the parameter internally; no setter in the
+    SWIG API — verified lug 2026). Would filter smooth-tessellation edges at
+    the source and let us drop `_build_keep_edge_masks` (the Python-side
+    second geometry pass in `accurate/pipeline.py`).
 
 **Upstream-merge principle — remaining reimplementations to convert to Bonsai
 reuse (guarded import, own code demoted to standalone shim), same pattern as
