@@ -24,6 +24,7 @@ from .annotations import (
     _write_dimension_annotations,
     _write_text_annotations,
 )
+from .xdata import ensure_xdata_appid, set_ifc_xdata
 
 
 # ---------------------------------------------------------------------------
@@ -67,12 +68,20 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
 
     block_defs:    name -> {ifc_class, material, lines, arcs, circles, ellipses}
     block_order:   list of block names in insertion order
-    block_inserts: name -> [(pos_2d, rot_deg, layer), ...]
-    direct_entities: [{layer, polylines, arcs, circles, ellipses}, ...] --
-                   world-space geometry for elements that don't match a reusable
-                   type symbol, drawn straight onto their IfcClass layer.
+    block_inserts: name -> [(pos_2d, rot_deg, layer, gid), ...]
+    direct_entities: [{layer, gid, ifc_class, polylines, arcs, circles,
+                   ellipses}, ...] -- world-space geometry for elements that
+                   don't match a reusable type symbol, drawn straight onto
+                   their IfcClass layer.
     flat_edges:    [(p0, p1, layer), ...]
-    wall_polys_by_key: {(ifc_class, material, layer, z_top) -> [shapely Polygon, ...]}
+    wall_polys_by_key: {(ifc_class, material, layer, z_top) ->
+                   [(shapely Polygon, gid), ...]}
+    footprint_polys: [(gid, ifc_class, layer, exterior_pts, [hole_pts]), ...]
+
+    Every model-space entity that originates from IFC element(s) carries their
+    identity as XDATA under appid IFC_DXF (see core/xdata.py) -- the DXF
+    counterpart of Bonsai's SVG ifc:guid/class attributes. Fused wall
+    outlines/hatches list every contributing GlobalId.
     annotations:   list of IfcAnnotation elements (optional, Bucket D)
     cam_inv_np:    4x4 numpy camera inverse matrix (needed for annotations)
     template_path: path to ifc_dxf_template.dxf (None -> minimal fallback)
@@ -113,6 +122,10 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         denom = int(round(1.0 / scale_factor))
         current_scale_handle = scale_handles.get(f"1:{denom}")
 
+    # IFC identity travels on every entity as XDATA; the appid must be
+    # registered or the audit pass strips it.
+    ensure_xdata_appid(doc)
+
     # block definitions + inserts
     for block_name in block_order:
         bd  = block_defs[block_name]
@@ -136,30 +149,39 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             )
 
         # Each insert carries its own layer (may be IfcWindow, IfcWindow_Overhead, ...)
-        for pos, rot, layer in block_inserts.get(block_name, []):
-            msp.add_blockref(block_name, pos,
-                             dxfattribs={"rotation": rot, "layer": layer})
+        # and the *instance* GlobalId as XDATA (the block description above
+        # holds the shared type's GlobalId).
+        for pos, rot, layer, gid in block_inserts.get(block_name, []):
+            ins = msp.add_blockref(block_name, pos,
+                                   dxfattribs={"rotation": rot, "layer": layer})
+            set_ifc_xdata(ins, bd.get("ifc_class"), gid)
 
     # Direct geometry (elements not matching a reusable type symbol): entities
     # drawn straight onto their IfcClass layer, inheriting its colour/linetype.
     for ent in (direct_entities or []):
         layer = ent["layer"]
+        gid   = ent.get("gid")
+        cls   = ent.get("ifc_class")
         for pts in ent.get("polylines", []):
             if len(pts) < 2:
                 continue
             closed = (len(pts) >= 4
                       and abs(pts[0][0] - pts[-1][0]) < SNAP_TOL
                       and abs(pts[0][1] - pts[-1][1]) < SNAP_TOL)
-            msp.add_lwpolyline(pts[:-1] if closed else pts,
-                               dxfattribs={"layer": layer, "closed": closed})
+            e = msp.add_lwpolyline(pts[:-1] if closed else pts,
+                                   dxfattribs={"layer": layer, "closed": closed})
+            set_ifc_xdata(e, cls, gid)
         for cx, cy, r, a_s, a_e in ent.get("arcs", []):
-            msp.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": layer})
+            e = msp.add_arc((cx, cy), r, a_s, a_e, dxfattribs={"layer": layer})
+            set_ifc_xdata(e, cls, gid)
         for cx, cy, r in ent.get("circles", []):
-            msp.add_circle((cx, cy), r, dxfattribs={"layer": layer})
+            e = msp.add_circle((cx, cy), r, dxfattribs={"layer": layer})
+            set_ifc_xdata(e, cls, gid)
         for cx, cy, mx, my, ratio, t1, t2 in ent.get("ellipses", []):
-            msp.add_ellipse(center=(cx, cy, 0), major_axis=(mx, my, 0),
-                            ratio=ratio, start_param=t1, end_param=t2,
-                            dxfattribs={"layer": layer})
+            e = msp.add_ellipse(center=(cx, cy, 0), major_axis=(mx, my, 0),
+                                ratio=ratio, start_param=t1, end_param=t2,
+                                dxfattribs={"layer": layer})
+            set_ifc_xdata(e, cls, gid)
 
     # flat wall edges (wall_mode='flat')
     for p0, p1, layer in flat_edges:
@@ -168,10 +190,14 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # wall polygons (wall_mode='shapely')
     # Pre-process all wall groups into (outline_layer, hatch_layer, geoms_list).
     # Then write in two passes: hatches first (bottom of draw order), outlines on top.
+    # Each geom is paired with the GlobalIds of the source polygons the union
+    # fused into it (a merged run of walls legitimately lists several), so the
+    # written outline/hatch entities can carry their IFC identity as XDATA.
     wall_geom_groups = []
-    for (ifc_class, material, layer, z_top), polys in wall_polys_by_key.items():
-        if not polys:
+    for (ifc_class, material, layer, z_top), poly_gids in wall_polys_by_key.items():
+        if not poly_gids:
             continue
+        polys = [p for p, _g in poly_gids]
         try:
             expanded = [p.buffer(SNAP_TOL, join_style=2) for p in polys]
             merged   = shapely.ops.unary_union(expanded).buffer(-SNAP_TOL, join_style=2)
@@ -182,7 +208,21 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         is_section    = layer.endswith("_Section")
         outline_layer = layer
         hatch_layer   = f"{ifc_class}_Hatches"
-        geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
+        merged_polys = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
+        geoms = []
+        for g in merged_polys:
+            gids, seen_gids = [], set()
+            for p, gid in poly_gids:
+                if not gid or gid in seen_gids:
+                    continue
+                try:
+                    hit = p.intersects(g)
+                except Exception:
+                    hit = False
+                if hit:
+                    gids.append(gid)
+                    seen_gids.add(gid)
+            geoms.append((g, gids))
         decompose_key = (ifc_class, layer, z_top)
         wall_geom_groups.append((outline_layer, hatch_layer, is_section, geoms, decompose_key))
 
@@ -199,7 +239,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         try:
             all_drawn = shapely.ops.unary_union(
                 [g for _, _, is_sec, geoms, _ in wall_geom_groups
-                 for g in geoms if is_sec])
+                 for g, _gids in geoms if is_sec])
         except Exception:
             all_drawn = None
         if all_drawn is not None:
@@ -209,7 +249,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                     continue
                 new_geoms = []
                 group_changed = False
-                for poly in geoms:
+                for poly, gids in geoms:
                     if poly.geom_type == 'Polygon' and poly.interiors:
                         keep = []
                         poly_changed = False
@@ -228,7 +268,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                         if poly_changed:
                             poly = shapely.Polygon(poly.exterior, keep)
                             group_changed = True
-                    new_geoms.append(poly)
+                    new_geoms.append((poly, gids))
                 if group_changed:
                     wall_geom_groups[gi] = (ol, hl, is_sec, new_geoms, dk)
             if n_patched:
@@ -245,8 +285,9 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             for (ifc_class, _mat_name, layer, z_top) in wall_layer_polys.keys()
         }
 
-    def _write_hatch(msp, hatch_layer, geoms):
-        for poly in geoms:
+    def _write_hatch(msp, hatch_layer, ifc_class, geoms):
+        """geoms: [(Polygon, gids-or-None), ...]; gids become IFC_DXF XDATA."""
+        for poly, gids in geoms:
             if poly.geom_type != 'Polygon':
                 continue
             exterior = _dedup_ring([(float(x), float(y)) for x, y in poly.exterior.coords[:-1]], SNAP_TOL)
@@ -261,6 +302,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 if len(hole) < 3:
                     continue
                 hatch.paths.add_polyline_path(hole, is_closed=True, flags=16)
+            set_ifc_xdata(hatch, ifc_class, gids)
 
     # Pass 1 -- hatches (drawn first -> below everything else)
     # Only groups actually decomposed into per-material-layer hatches (Pass 1b)
@@ -269,7 +311,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     for outline_layer, hatch_layer, is_section, geoms, decompose_key in wall_geom_groups:
         if not is_section or decompose_key in decomposed_keys:
             continue
-        _write_hatch(msp, hatch_layer, geoms)
+        _write_hatch(msp, hatch_layer, decompose_key[0], geoms)
 
     # Pass 1b -- per-material-layer hatches (IfcWall_Hatches_Calcestruzzo, …)
     # These layers don't exist in the template (material names are arbitrary),
@@ -292,8 +334,11 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
             except Exception:
                 dxf_layer = doc.layers.add(hatch_layer)
             dxf_layer.color = classify_material_color(mat_name)
-            geoms = list(merged.geoms) if merged.geom_type == 'MultiPolygon' else [merged]
-            _write_hatch(msp, hatch_layer, geoms)
+            # Material-layer strips carry no per-element gid (a strip may span
+            # several fused walls) -- no XDATA on these.
+            geoms = [(g, None) for g in
+                     (merged.geoms if merged.geom_type == 'MultiPolygon' else [merged])]
+            _write_hatch(msp, hatch_layer, ifc_class, geoms)
 
     # Pass 1c -- material-layer subdivision lines (fixed layer, styled by template)
     if wall_subdivision_lines:
@@ -303,8 +348,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 msp.add_lwpolyline(pts, dxfattribs={"layer": "IfcWall_LayersSubdivision"})
 
     # Pass 2 -- outlines (drawn last -> on top of hatches)
-    for outline_layer, hatch_layer, is_section, geoms, _decompose_key in wall_geom_groups:
-        for poly in geoms:
+    for outline_layer, hatch_layer, is_section, geoms, decompose_key in wall_geom_groups:
+        for poly, gids in geoms:
             if poly.geom_type != 'Polygon':
                 continue
             exterior = _dedup_ring([(float(x), float(y)) for x, y in poly.exterior.coords[:-1]], SNAP_TOL)
@@ -312,38 +357,44 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                         for ring in poly.interiors]
             if len(exterior) < 3:
                 continue
-            msp.add_lwpolyline(exterior,
-                               dxfattribs={"closed": True, "layer": outline_layer})
+            e = msp.add_lwpolyline(exterior,
+                                   dxfattribs={"closed": True, "layer": outline_layer})
+            set_ifc_xdata(e, decompose_key[0], gids)
             for hole in holes:
                 if len(hole) < 3:
                     continue
-                msp.add_lwpolyline(hole,
-                                   dxfattribs={"closed": True, "layer": outline_layer})
+                e = msp.add_lwpolyline(hole,
+                                       dxfattribs={"closed": True, "layer": outline_layer})
+                set_ifc_xdata(e, decompose_key[0], gids)
 
     # Footprint polygons: closed LWPOLYLINE entities grouped per element.
     # An element may contribute several entries (disjoint HLR loops), all
     # sharing its gid -- collect them into one GROUP per element.
     if footprint_polys:
         entities_by_gid = {}
-        for gid, layer, exterior, holes in footprint_polys:
+        for gid, ifc_class, layer, exterior, holes in footprint_polys:
             entities = entities_by_gid.setdefault(gid, [])
-            entities.append(msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": layer}))
+            e = msp.add_lwpolyline(exterior, dxfattribs={"closed": True, "layer": layer})
+            set_ifc_xdata(e, ifc_class, gid)
+            entities.append(e)
             for hole in holes:
-                entities.append(msp.add_lwpolyline(hole, dxfattribs={"closed": True, "layer": layer}))
+                e = msp.add_lwpolyline(hole, dxfattribs={"closed": True, "layer": layer})
+                set_ifc_xdata(e, ifc_class, gid)
+                entities.append(e)
         for gid, entities in entities_by_gid.items():
             doc.groups.new(f"fp_{gid[:8]}").extend(entities)
 
     # zoom extents
     xs, ys = [], []
     for _, _, _, geoms, _ in wall_geom_groups:
-        for poly in geoms:
+        for poly, _gids in geoms:
             if poly.geom_type == 'Polygon':
                 xs.extend(x for x, y in poly.exterior.coords)
                 ys.extend(y for x, y in poly.exterior.coords)
     for inserts in block_inserts.values():
-        for pos, _rot, _layer in inserts:
+        for pos, _rot, _layer, _gid in inserts:
             xs.append(float(pos[0])); ys.append(float(pos[1]))
-    for _gid, _layer, exterior, _holes in (footprint_polys or []):
+    for _gid, _cls, _layer, exterior, _holes in (footprint_polys or []):
         xs.extend(p[0] for p in exterior)
         ys.extend(p[1] for p in exterior)
     for ent in (direct_entities or []):

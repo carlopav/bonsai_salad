@@ -117,6 +117,7 @@ class TestCase01BasicPlan:
         self.has_template = tpl is not None
         export_drawing(ifc, drawing, pset, self.out, wall_mode="shapely", template_path=tpl)
         self.doc = ezdxf.readfile(self.out)
+        self.ifc = ifc
 
     def test_dxf_has_lwpolylines(self):
         """Walls exported as LWPOLYLINE (shapely mode)."""
@@ -162,6 +163,44 @@ class TestCase01BasicPlan:
                 pts = [(round(v[0], 6), round(v[1], 6)) for v in verts]
                 for a, b in zip(pts, pts[1:] + pts[:1]):
                     assert a != b, f"duplicate hatch vertex {a} on layer {hatch.dxf.layer}"
+
+    def test_entities_carry_ifc_xdata(self):
+        """Geometry carries IFC identity as XDATA under appid IFC_DXF.
+
+        Layout: first 1000-string = IfcClass, following 1000-strings = one
+        GlobalId per contributing element (fused walls list several). Every
+        GlobalId must resolve in the source IFC to an element of that class.
+        The DXF counterpart of Bonsai's SVG ifc:guid/class attributes.
+        """
+        from ezdxf.lldxf.const import DXFValueError
+
+        msp = self.doc.modelspace()
+        tagged = set()
+        for e in msp:
+            try:
+                tags = e.get_xdata("IFC_DXF")
+            except DXFValueError:
+                continue
+            values = [t.value for t in tags if t.code == 1000]
+            assert len(values) >= 2, \
+                f"IFC_DXF XDATA needs class + >=1 guid, got {values}"
+            cls, gids = values[0], values[1:]
+            assert cls.startswith("Ifc"), f"bad IFC class {cls!r}"
+            for g in gids:
+                element = self.ifc.by_guid(g)  # raises if unknown guid
+                assert element.is_a() == cls, \
+                    f"XDATA class {cls} != element class {element.is_a()} ({g})"
+            tagged.add(e.dxf.handle)
+
+        # Every INSERT (plan symbols, tag blocks) and HATCH must be tagged;
+        # wall outlines (LWPOLYLINE) too, except untagged auxiliary lines.
+        for e in msp:
+            if e.dxftype() in ("INSERT", "HATCH"):
+                assert e.dxf.handle in tagged, \
+                    f"{e.dxftype()} on layer {e.dxf.layer} lacks IFC_DXF XDATA"
+        polys_tagged = [e for e in msp
+                        if e.dxftype() == "LWPOLYLINE" and e.dxf.handle in tagged]
+        assert polys_tagged, "no LWPOLYLINE carries IFC_DXF XDATA"
 
     def test_annotation_context_data_has_owner(self):
         """Every annotation context-data object has a non-null owner handle.

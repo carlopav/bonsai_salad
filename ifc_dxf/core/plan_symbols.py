@@ -73,7 +73,9 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
             block_order.append(block_name)
             seen_blocks[block_name] = True
         pos, rot = _compute_insert(wm, cam_inv_np)
-        block_inserts.setdefault(block_name, []).append((pos, rot, layer))
+        # The tuple carries the *instance* GlobalId (-> INSERT XDATA); the
+        # block definition's description holds the shared type's GlobalId.
+        block_inserts.setdefault(block_name, []).append((pos, rot, layer, gid))
         return True
 
     # Direct draw on the IfcClass layer: bake the INSERT transform into the
@@ -83,7 +85,8 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
     if geom is None:
         return False
     pos, rot = _compute_insert(wm, cam_inv_np)
-    _append_direct(direct_entities, layer, pos, rot, geom)
+    _append_direct(direct_entities, layer, pos, rot, geom,
+                   gid=gid, ifc_class=ifc_class)
     return True
 
 
@@ -121,7 +124,8 @@ def _extract_block_geom(element, plan_repr, crease_angle_deg, cam_R, cam_rot_deg
             "circles": circles_blk, "ellipses": ellipses_blk}
 
 
-def _append_direct(direct_entities, layer, pos, rot_deg, geom):
+def _append_direct(direct_entities, layer, pos, rot_deg, geom,
+                   gid=None, ifc_class=None):
     """Bake an INSERT transform (pos, rot_deg) into geom and record it directly.
 
     Reproduces exactly what a DXF INSERT would do to the block-local geometry,
@@ -150,6 +154,8 @@ def _append_direct(direct_entities, layer, pos, rot_deg, geom):
 
     direct_entities.append({
         "layer": layer,
+        "gid": gid,
+        "ifc_class": ifc_class,
         "polylines": polylines,
         "arcs": arcs,
         "circles": circles,

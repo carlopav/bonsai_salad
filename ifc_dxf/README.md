@@ -109,6 +109,32 @@ The scale list (`ACAD_SCALELIST`) uses `SCALE`/`AcDbScale` entities (group codes
 | Bucket B — hatch fill | `<Class>_Hatches` | `IfcWall_Hatches` |
 | Geometry inside BLOCKs | `"0"` with BYBLOCK | controlled by INSERT |
 
+### IFC identity as XDATA (appid `IFC_DXF`)
+
+Every model-space entity that originates from IFC element(s) carries their
+identity as XDATA — the DXF counterpart of Bonsai's SVG semantic attributes
+(`ifc:guid` + class on every `<g>`). Selecting any entity in CAD recovers the
+originating element(s); enables round-tripping, hyperlinks, external tools.
+
+```
+1001  IFC_DXF
+1000  <IfcClass>      e.g. "IfcWall"
+1000  <GlobalId>      one per contributing element -- fused wall
+1000  <GlobalId>      outlines/hatches legitimately list several
+```
+
+Coverage (`core/xdata.py`, applied in `dxf_writer.py` + `annotations.py`):
+INSERTs carry the *instance* GlobalId (the shared type's GlobalId stays in the
+BLOCK description, group code 4); direct-drawn geometry, footprint LWPOLYLINEs
+and fused wall outlines/HATCHes carry their element GUID(s) — for fused groups
+each merged polygon lists every source element whose polygon intersects it;
+DIMENSION/TEXT/tag-INSERT entities carry the `IfcAnnotation`'s GlobalId (the
+tag's assigned product stays recoverable in IFC via `IfcRelAssignsToProduct`).
+Per-material-layer hatches carry none (a strip may span several fused walls).
+The appid is registered in the APPID table at export (ezdxf's Auditor strips
+XDATA under unregistered appids). Locked by
+`test_entities_carry_ifc_xdata`.
+
 ---
 
 ## Pipeline A — Approximate

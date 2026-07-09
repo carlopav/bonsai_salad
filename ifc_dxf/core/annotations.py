@@ -10,6 +10,7 @@ import ifcopenshell.util.selector
 from .camera import world_matrix_col_major
 from .ifc_query import _get_drawing_annotations, get_assigned_product, get_type_block_name
 from .dxf_template import _ensure_dim_style
+from .xdata import set_ifc_xdata
 
 
 # Paper-space heights in mm, mirroring the Bonsai CSS class names.
@@ -236,6 +237,7 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                 )
                 dim.render()
                 _make_dim_annotative(doc, dim.dimension, current_scale_handle)
+                set_ifc_xdata(dim.dimension, ann.is_a(), ann.GlobalId)
 
 
 def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0.0):
@@ -496,6 +498,7 @@ def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                 if halign or valign:
                     text_dxfattribs["align_point"] = (px, py)
                 text_entity = msp.add_text(item.Literal or "", dxfattribs=text_dxfattribs)
+                set_ifc_xdata(text_entity, ann.is_a(), ann.GlobalId)
                 if current_scale_handle:
                     _make_text_annotative(doc, text_entity, (px, py),
                                           current_scale_handle, angle_deg)
@@ -544,6 +547,7 @@ def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
             "layer":    _TXT_LAYER,
             "rotation": angle_deg,
         })
+        set_ifc_xdata(blockref, ann.is_a(), ann.GlobalId)
         attribs = {
             f"LITERAL_{i}": _resolve_text_literal_variables(item.Literal or "", product)
             for i, item in enumerate(literals)

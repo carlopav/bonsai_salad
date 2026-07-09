@@ -213,13 +213,13 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
     block_defs    = {}   # name -> {ifc_class, material, lines, arcs, circles, ellipses}
     block_order   = []
-    block_inserts = {}   # name -> [(pos_2d, rot_deg, layer), ...]
+    block_inserts = {}   # name -> [(pos_2d, rot_deg, layer, gid), ...]
     flat_edges    = []   # [(p0, p1, layer)] -- wall_mode='flat' only
-    wall_polys_by_key = {}  # (ifc_class, material, layer, z_top) -> [Polygon, ...]
-    footprint_polys = []  # [(gid, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
+    wall_polys_by_key = {}  # (ifc_class, material, layer, z_top) -> [(Polygon, gid), ...]
+    footprint_polys = []  # [(gid, ifc_class, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
     wall_layer_polys_by_key = {}  # (ifc_class, mat_name, layer, z_top) -> [Polygon]
     wall_subdivision_lines = []  # [LineString, ...]
-    direct_entities = []  # [{layer, polylines, arcs, circles, ellipses}] -- non-type symbols
+    direct_entities = []  # [{layer, gid, ifc_class, polylines, arcs, circles, ellipses}] -- non-type symbols
     seen_blocks   = {}
 
     bucket_a = bucket_b = bucket_c = 0
@@ -254,7 +254,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                     else:
                         z_top_key = None
                     key = (ifc_class, material, rec.layer, z_top_key)
-                    wall_polys_by_key.setdefault(key, []).append(poly)
+                    wall_polys_by_key.setdefault(key, []).append(
+                        (poly, element.GlobalId))
                     if export_material_layers and rec.layer.endswith("_Section"):
                         layer_polys = _decompose_wall_to_layer_polygons(
                             poly, element, wm, col_major
@@ -331,7 +332,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                             hole.append((float(cpt[0]), float(cpt[1])))
                         hole_pts.append(hole)
                     if len(ext_pts) >= 3:
-                        footprint_polys.append((gid, rec.layer, ext_pts, hole_pts))
+                        footprint_polys.append((gid, ifc_class, rec.layer, ext_pts, hole_pts))
                         bucket_a += 1
                         bucket_a_classes[ifc_class] = bucket_a_classes.get(ifc_class, 0) + 1
                         placed = True

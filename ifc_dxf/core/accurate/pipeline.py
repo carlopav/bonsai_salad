@@ -534,7 +534,8 @@ def _recompose_plan_footprints(candidates, cam_inv_np, sections_union):
             holes = [[(float(x), float(y)) for x, y in r.coords[:-1]]
                      for r in g.interiors]
             if len(ext) >= 3:
-                entries.append((gid, cls, ext, holes))
+                # (gid, ifc_class, layer, ...): footprints draw on the class layer
+                entries.append((gid, cls, cls, ext, holes))
     return entries, fallback
 
 
@@ -655,13 +656,13 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
           f"({len(crease_masks)}/{len(mask_elements)} line-emitting elements "
           f"have smooth tessellation to filter, angle {crease_angle_deg:.0f}°)")
 
-    wall_polys_by_key = {}
-    footprint_polys   = []  # [(gid, layer, exterior_pts, [hole_pts])]
+    wall_polys_by_key = {}  # key -> [(Polygon, gid), ...]
+    footprint_polys   = []  # [(gid, ifc_class, layer, exterior_pts, [hole_pts])]
     block_defs    = {}
     block_order   = []
     block_inserts = {}
     seen_blocks   = {}
-    direct_entities = []  # [{layer, polylines, arcs, circles, ellipses}]
+    direct_entities = []  # [{layer, gid, ifc_class, polylines, arcs, circles, ellipses}]
 
     profile = _VIEW_PROFILE.get(target_view, {})
     footprint_viewed = profile.get("footprint_viewed", frozenset())
@@ -717,7 +718,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
 
         if sec and hatchable:
             key = (ifc_class, material, f"{ifc_class}_Section", None)
-            wall_polys_by_key.setdefault(key, []).extend(sec)
+            wall_polys_by_key.setdefault(key, []).extend((p, gid) for p in sec)
             n_cut += 1
             cut_classes[ifc_class] = cut_classes.get(ifc_class, 0) + 1
 
@@ -750,7 +751,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
             _, z_max = _wall_z_range(element, wm)
             z_top_key = round(z_max, 3) if z_max is not None else None
             key = (ifc_class, material, f"{ifc_class}_View", z_top_key)
-            wall_polys_by_key.setdefault(key, []).extend(view_polys)
+            wall_polys_by_key.setdefault(key, []).extend((p, gid) for p in view_polys)
 
         # Open visible-edge segments (the common form for viewed geometry):
         # HLR already clipped the hidden parts, draw them as-is.
@@ -765,7 +766,8 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
             chained = _chain_lines(lines, scale_factor_val,
                                    seen_layer_segments.setdefault(layer, set()))
             if chained:
-                direct_entities.append({"layer": layer, "polylines": chained,
+                direct_entities.append({"layer": layer, "gid": gid,
+                                        "ifc_class": ifc_class, "polylines": chained,
                                         "arcs": [], "circles": [], "ellipses": []})
                 n_viewlines += len(chained)
 
@@ -777,7 +779,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     # footprint cannot be extracted fall back to their HLR output.
     if footprint_candidates:
         sec_polys = [p for (_c, _m, lyr, _z), ps in wall_polys_by_key.items()
-                     if lyr.endswith("_Section") for p in ps]
+                     if lyr.endswith("_Section") for p, _g in ps]
         try:
             sections_union = shapely.unary_union(sec_polys) if sec_polys else None
         except Exception:
@@ -793,12 +795,13 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
                 holes = [[(float(x), float(y)) for x, y in ring.coords[:-1]]
                          for ring in poly.interiors]
                 if len(ext_pts) >= 3:
-                    footprint_polys.append((gid, ifc_class, ext_pts, holes))
+                    footprint_polys.append((gid, ifc_class, ifc_class, ext_pts, holes))
             if rec["lines"]:
                 chained = _chain_lines(rec["lines"], scale_factor_val,
                                        seen_layer_segments.setdefault(ifc_class, set()))
                 if chained:
-                    direct_entities.append({"layer": ifc_class, "polylines": chained,
+                    direct_entities.append({"layer": ifc_class, "gid": gid,
+                                            "ifc_class": ifc_class, "polylines": chained,
                                             "arcs": [], "circles": [], "ellipses": []})
                     n_viewlines += len(chained)
             n_fp += 1
