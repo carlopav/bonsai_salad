@@ -1,21 +1,25 @@
 """
 pipe_cleaner — Bonsai / Blender.
 
-Ripulisce tubi/condotti la cui Body faccettata raggruppa più tratti fisici in
-un solo elemento (Items multipli, superfici concentriche duplicate): ricava
-gli assi Model/Axis/GRAPH_VIEW — una IfcPolyline per tratto continuo, da
-cluster di vertici collegati secondo gli spigoli della mesh — e le quantità.
+Cleans up pipes/ducts whose faceted Body groups several physical segments
+into a single element (multiple Items, duplicated concentric surfaces):
+derives the Model/Axis/GRAPH_VIEW axes — one IfcPolyline per continuous
+segment, from clusters of vertices connected by the mesh edges — and their
+quantities.
 
-SPLIT_ELEMENTS = False: assi + Qto Length sull'elemento originale.
-SPLIT_ELEMENTS = True: un nuovo elemento per tratto, della classe richiesta
-dal tipo (es. IfcPipeSegment), con Body, Axis, Length e NominalDiameter
-stimato; i figli vengono aggregati all'originale (IfcRelAggregates), che cede
-la geometria e tiene psets e Length totale. Gli oggetti Blender dei figli
-sono creati al volo e la mesh del padre svuotata: niente reload.
+SPLIT_ELEMENTS = False: axis + Qto Length added to the original element.
+SPLIT_ELEMENTS = True: one new element per segment, of the class required by
+the type (e.g. IfcPipeSegment), with Body, Axis, Length and estimated
+NominalDiameter; children are aggregated under the original
+(IfcRelAggregates). If delete_original is set, the original gives up its
+geometry and keeps only psets and total Length; otherwise it keeps its own
+Body and the children get independent copies of the split geometry. New
+Blender objects are created on the fly and, when the original is emptied,
+its mesh is cleared: no reload needed.
 
-Uso: tab Scripting, progetto IFC caricato in Bonsai, oggetti selezionati.
-La sub-context Model/Axis/GRAPH_VIEW viene creata se manca. Gira dentro un
-operatore tool.Ifc.Operator: CTRL+Z annulla tutto (transazione Bonsai).
+Usage: Scripting tab, IFC project loaded in Bonsai, objects selected. The
+Model/Axis/GRAPH_VIEW sub-context is created if missing. Runs inside a
+tool.Ifc.Operator: CTRL+Z undoes everything (Bonsai transaction).
 """
 
 import bpy
@@ -30,19 +34,19 @@ import ifcopenshell.util.unit
 import bonsai.tool as tool
 
 
-MERGE_DISTANCE = 0.03  # m - clustering sezioni: > passo vertici sulla sezione,
-#                            < distanza tra sezioni consecutive
-DEDUP_DISTANCE = 0.06  # m - assi più vicini di così = stesso tubo duplicato
-SPLIT_ELEMENTS = True  # True: un elemento per tratto, aggregati all'originale
+MERGE_DISTANCE = 0.03  # m - section clustering: > vertex spacing on a
+#                            section, < distance between consecutive sections
+DEDUP_DISTANCE = 0.06  # m - axes closer than this = same duplicated pipe
+SPLIT_ELEMENTS = True  # True: one element per segment, aggregated under the original
 
 
 # --------------------------------------------------------------------------
-# Estrazione vertici + spigoli dagli Items della Body representation
+# Extract vertices + edges from the Body representation Items
 
 
 def item_coords_edges(item, unit_scale):
-    """Vertici saldati e spigoli unici delle facce di un item, in metri;
-    (None, None) se il tipo di item non è supportato."""
+    """Welded vertices and unique face edges of an item, in metres;
+    (None, None) if the item type is unsupported."""
     pts_index = {}
     coords_list = []
     edges = set()
@@ -89,11 +93,11 @@ def item_coords_edges(item, unit_scale):
 
 
 # --------------------------------------------------------------------------
-# Scheletrizzazione: isole -> cluster -> grafo dei cluster -> catene
+# Skeletonisation: islands -> clusters -> cluster graph -> chains
 
 
 def split_islands(n_verts, edges):
-    """Componenti connesse per spigoli (union-find)."""
+    """Connected components by edge (union-find)."""
     parent = list(range(n_verts))
 
     def find(i):
@@ -114,8 +118,8 @@ def split_islands(n_verts, edges):
 
 
 def cluster_labels(coords, threshold):
-    """Cluster di vertici per distanza (merge transitivo); ritorna
-    (labels, centroidi)."""
+    """Vertex clusters by distance (transitive merge); returns (labels,
+    centroids)."""
     n = len(coords)
     labels = np.full(n, -1, dtype=int)
     th2 = threshold * threshold
@@ -139,8 +143,8 @@ def cluster_labels(coords, threshold):
 
 
 def chains_from_cluster_graph(centroids, labels, edges):
-    """Catene massimali del grafo dei cluster (archi = spigoli mesh tra
-    cluster diversi): l'ordinamento segue la superficie, non la vicinanza."""
+    """Maximal chains of the cluster graph (edges = mesh edges between
+    distinct clusters): ordering follows the surface, not proximity."""
     adj = defaultdict(set)
     for a, b in edges:
         ca, cb = labels[a], labels[b]
@@ -148,7 +152,7 @@ def chains_from_cluster_graph(centroids, labels, edges):
             adj[ca].add(cb)
             adj[cb].add(ca)
     if not adj:
-        return []  # collassato in un nodo solo (es. gomito)
+        return []  # collapsed into a single node (e.g. an elbow)
 
     used = set()
     chains = []
@@ -175,7 +179,7 @@ def chains_from_cluster_graph(centroids, labels, edges):
 
 
 # --------------------------------------------------------------------------
-# Misure sugli assi
+# Axis measurements
 
 
 def path_length(p):
@@ -183,13 +187,13 @@ def path_length(p):
 
 
 def mean_nearest_distance(a, b):
-    """Distanza media dei punti di a dal più vicino di b."""
+    """Average distance from each point of a to its nearest point in b."""
     d2 = np.sum((a[:, None, :] - b[None, :, :]) ** 2, axis=2)
     return float(np.sqrt(d2.min(axis=1)).mean())
 
 
 def points_to_segment_distance(pts, a, b):
-    """Distanza di ogni punto dal segmento a-b."""
+    """Distance of each point from the segment a-b."""
     ab = b - a
     denom = float(ab @ ab)
     if denom == 0.0:
@@ -200,7 +204,7 @@ def points_to_segment_distance(pts, a, b):
 
 
 def distance_to_paths(pts, paths):
-    """Distanza minima di ogni punto dai segmenti delle polilinee."""
+    """Minimum distance of each point from the polyline segments."""
     best = np.full(len(pts), np.inf)
     for p in paths:
         for a, b in zip(p[:-1], p[1:]):
@@ -209,18 +213,19 @@ def distance_to_paths(pts, paths):
 
 
 def estimate_diameter(coords, paths):
-    """Diametro stimato: 2x mediana della distanza dei vertici dall'asse."""
+    """Estimated diameter: 2x the median distance of the vertices from the
+    axis."""
     return 2.0 * float(np.median(distance_to_paths(coords, paths)))
 
 
 # --------------------------------------------------------------------------
-# Deduplicazione superfici concentriche e raggruppamento per tubo continuo
+# Deduplicating concentric surfaces and grouping by continuous pipe
 
 
 def dedup_paths_indexed(paths, dedup_distance):
-    """Scarta i path quasi coincidenti con uno più lungo già tenuto (test
-    asimmetrico: un asse corto su un tratto di uno lungo non è duplicato).
-    Ritorna (indici tenuti, mappa duplicato -> tenuto)."""
+    """Discards paths nearly coincident with a longer one already kept
+    (asymmetric test: a short axis over part of a long one is not a
+    duplicate). Returns (kept indices, duplicate -> kept map)."""
     order = sorted(range(len(paths)), key=lambda i: path_length(paths[i]), reverse=True)
     kept = []
     dup_of = {}
@@ -240,13 +245,13 @@ def dedup_paths_indexed(paths, dedup_distance):
 
 def extract_axis_groups(body_rep, unit_scale, merge_distance=MERGE_DISTANCE,
                         dedup_distance=DEDUP_DISTANCE):
-    """Un gruppo per tratto continuo: {"items", "paths", "coords" (capofila)}.
-    Item duplicati e raccordi collassati si accodano al gruppo più vicino.
-    Ritorna (groups, skipped_items)."""
-    item_data = []   # (item, coords) con almeno una catena
-    cand_paths = []  # (indice in item_data, path)
-    chainless = []   # (item, coords) senza catene
-    skipped = []     # item non supportati
+    """One group per continuous segment: {"items", "paths", "coords"
+    (leader)}. Duplicate items and collapsed fittings are appended to the
+    nearest group. Returns (groups, skipped_items)."""
+    item_data = []   # (item, coords) with at least one chain
+    cand_paths = []  # (index into item_data, path)
+    chainless = []   # (item, coords) with no chains
+    skipped = []     # unsupported items
 
     for item in body_rep.Items:
         coords, edges = item_coords_edges(item, unit_scale)
@@ -270,14 +275,14 @@ def extract_axis_groups(body_rep, unit_scale, merge_distance=MERGE_DISTANCE,
 
     kept, dup_of = dedup_paths_indexed([p for _, p in cand_paths], dedup_distance)
 
-    # un gruppo per item capofila (possiede almeno un path tenuto)
+    # one group per leader item (owns at least one kept path)
     groups_by_leader = {}
     for pi in kept:
         ii, path = cand_paths[pi]
         g = groups_by_leader.setdefault(ii, {"item_idxs": [ii], "paths": []})
         g["paths"].append(path)
 
-    # item con soli path duplicati: al gruppo del path che duplicano
+    # items with only duplicate paths: to the group of the path they duplicate
     for ii in range(len(item_data)):
         if ii in groups_by_leader:
             continue
@@ -295,7 +300,7 @@ def extract_axis_groups(body_rep, unit_scale, merge_distance=MERGE_DISTANCE,
             "coords": item_data[leader][1],
         })
 
-    # raccordi collassati: al gruppo con l'asse più vicino
+    # collapsed fittings: to the group with the nearest axis
     for item, coords in chainless:
         centre = coords.mean(axis=0)[None, :]
         best, best_d = None, np.inf
@@ -310,11 +315,11 @@ def extract_axis_groups(body_rep, unit_scale, merge_distance=MERGE_DISTANCE,
 
 
 # --------------------------------------------------------------------------
-# Scrittura IFC
+# Writing to IFC
 
 
 def get_or_create_axis_context(ifc_file):
-    """Sub-context Model/Axis/GRAPH_VIEW, creata se manca."""
+    """Model/Axis/GRAPH_VIEW sub-context, created if missing."""
     axis_context = ifcopenshell.util.representation.get_context(
         ifc_file, "Model", "Axis", "GRAPH_VIEW"
     )
@@ -323,7 +328,7 @@ def get_or_create_axis_context(ifc_file):
 
     model_context = ifcopenshell.util.representation.get_context(ifc_file, "Model")
     if model_context is None:
-        raise Exception("context Model non trovata nel progetto.")
+        raise Exception("Model context not found in the project.")
     axis_context = ifcopenshell.api.run(
         "context.add_context",
         ifc_file,
@@ -332,12 +337,12 @@ def get_or_create_axis_context(ifc_file):
         target_view="GRAPH_VIEW",
         parent=model_context,
     )
-    print("Sub-context Model/Axis/GRAPH_VIEW creata.")
+    print("Created Model/Axis/GRAPH_VIEW sub-context.")
     return axis_context
 
 
 def create_axis_shape(ifc_file, axis_context, paths, unit_scale):
-    """ShapeRepresentation Axis/Curve3D, una IfcPolyline per path."""
+    """Axis/Curve3D ShapeRepresentation, one IfcPolyline per path."""
     polylines = []
     for path in paths:
         ifc_points = [
@@ -354,7 +359,7 @@ def create_axis_shape(ifc_file, axis_context, paths, unit_scale):
 
 
 def write_pset(ifc_file, element, name, properties, is_qto=False):
-    """Crea o aggiorna un pset/qto dell'occorrenza."""
+    """Creates or updates an occurrence's pset/qto."""
     existing = ifcopenshell.util.element.get_pset(element, name, should_inherit=False)
     if existing:
         pset = ifc_file.by_id(existing["id"])
@@ -381,7 +386,7 @@ def set_diameter_pset(ifc_file, element, diameter_m, unit_scale):
 
 
 def add_axes_to_element(ifc_file, element, axis_context, groups, unit_scale):
-    """Modalità semplice: assi + Length totale sull'elemento originale."""
+    """Simple mode: axis + total Length added to the original element."""
     paths = [p for g in groups for p in g["paths"]]
     shape_rep = create_axis_shape(ifc_file, axis_context, paths, unit_scale)
 
@@ -393,9 +398,9 @@ def add_axes_to_element(ifc_file, element, axis_context, groups, unit_scale):
 
 
 def occurrence_class(element, element_type, ifc_file):
-    """Classe occorrenza richiesta dal tipo in IFC4 (es.
-    IfcCableCarrierSegmentType -> IfcCableCarrierSegment); quella
-    dell'elemento se già compatibile o senza tipo."""
+    """Occurrence class required by the type in IFC4 (e.g.
+    IfcCableCarrierSegmentType -> IfcCableCarrierSegment); the element's own
+    class if already compatible or typeless."""
     cls = element.is_a()
     if element_type is None:
         return cls
@@ -408,9 +413,11 @@ def occurrence_class(element, element_type, ifc_file):
 
 
 def split_into_elements(ifc_file, element, axis_context, body_rep, groups,
-                        skipped_items, unit_scale):
-    """Modalità split: un figlio per gruppo (Body, Axis, Length, diametro),
-    aggregati al padre che cede la geometria e tiene psets e Length totale."""
+                        skipped_items, unit_scale, delete_original=True):
+    """Split mode: one child per group (Body, Axis, Length, diameter),
+    aggregated under the parent. If delete_original, the parent gives up its
+    geometry and keeps only psets and total Length; otherwise it keeps its
+    own Body and children get independent copies of the split geometry."""
     element_type = ifcopenshell.util.element.get_type(element)
     child_class = occurrence_class(element, element_type, ifc_file)
     label = element.Name or element.GlobalId
@@ -429,7 +436,7 @@ def split_into_elements(ifc_file, element, axis_context, body_rep, groups,
                     related_objects=[child], relating_type=element_type,
                 )
             except Exception as e:
-                print(f"  {child.Name}: tipo non assegnabile ({e}), lasciato senza tipo")
+                print(f"  {child.Name}: type not assignable ({e}), left untyped")
         child.ObjectPlacement = ifc_file.createIfcLocalPlacement(
             PlacementRelTo=element.ObjectPlacement,
             RelativePlacement=ifc_file.createIfcAxis2Placement3D(
@@ -437,11 +444,16 @@ def split_into_elements(ifc_file, element, axis_context, body_rep, groups,
             ),
         )
 
+        # delete_original: children take the original items, ceded by the
+        # parent below; otherwise each child gets an independent deep copy.
+        body_items = list(g["items"]) if delete_original else [
+            ifcopenshell.util.element.copy_deep(ifc_file, it) for it in g["items"]
+        ]
         body = ifc_file.createIfcShapeRepresentation(
             ContextOfItems=body_rep.ContextOfItems,
             RepresentationIdentifier="Body",
             RepresentationType=body_rep.RepresentationType,
-            Items=g["items"],
+            Items=body_items,
         )
         axis = create_axis_shape(ifc_file, axis_context, g["paths"], unit_scale)
         child.Representation = ifc_file.createIfcProductDefinitionShape(
@@ -454,8 +466,8 @@ def split_into_elements(ifc_file, element, axis_context, body_rep, groups,
         diameter = estimate_diameter(g["coords"], g["paths"])
         set_diameter_pset(ifc_file, child, diameter, unit_scale)
 
-        print(f"  {child.Name}: {len(g['paths'])} polilinee, {length:.2f} m, "
-              f"D stimato {diameter * 1000:.0f} mm ({len(g['items'])} items)")
+        print(f"  {child.Name}: {len(g['paths'])} polylines, {length:.2f} m, "
+              f"estimated D {diameter * 1000:.0f} mm ({len(g['items'])} items)")
         children.append(child)
 
     ifcopenshell.api.run(
@@ -463,30 +475,31 @@ def split_into_elements(ifc_file, element, axis_context, body_rep, groups,
         products=children, relating_object=element,
     )
 
-    # il padre cede la Body: restano solo gli eventuali item non supportati
-    if skipped_items:
-        body_rep.Items = skipped_items
-    else:
-        product_shape = element.Representation
-        reps = [r for r in product_shape.Representations if r != body_rep]
-        ifc_file.remove(body_rep)
-        if reps:
-            product_shape.Representations = reps
+    if delete_original:
+        # the parent gives up its Body: only unsupported items remain, if any
+        if skipped_items:
+            body_rep.Items = skipped_items
         else:
-            element.Representation = None
-            ifc_file.remove(product_shape)
+            product_shape = element.Representation
+            reps = [r for r in product_shape.Representations if r != body_rep]
+            ifc_file.remove(body_rep)
+            if reps:
+                product_shape.Representations = reps
+            else:
+                element.Representation = None
+                ifc_file.remove(product_shape)
 
     set_length_quantity(ifc_file, element, total_length, unit_scale)
     return children
 
 
 # --------------------------------------------------------------------------
-# Aggiornamento della scena Blender senza ricaricare il progetto
+# Updating the Blender scene without reloading the project
 
 
 def create_blender_objects(elements):
-    """Oggetti Blender per i nuovi elementi (pattern append-da-libreria di
-    Bonsai: IfcImporter parziale sul file già caricato)."""
+    """Blender objects for the new elements (Bonsai's append-from-library
+    pattern: a partial IfcImporter run on the already loaded file)."""
     import logging
     from bonsai.bim.ifc import IfcStore
     import bonsai.bim.import_ifc as import_ifc
@@ -503,16 +516,17 @@ def create_blender_objects(elements):
 
 
 def clear_parent_object(obj):
-    """Mesh vuota per l'oggetto del padre (resta come contenitore linkato)."""
+    """Empty mesh for the parent object (it remains as a linked
+    container)."""
     obj.data = bpy.data.meshes.new(obj.data.name + "_container")
 
 
 # --------------------------------------------------------------------------
-# Flusso principale
+# Main flow
 
 
-def process_element(ifc_file, element, axis_context, unit_scale):
-    """Ritorna (messaggio, nuovi elementi creati)."""
+def process_element(ifc_file, element, axis_context, unit_scale, delete_original=True):
+    """Returns (message, newly created elements)."""
     body_rep = None
     if element.Representation:
         for rep in element.Representation.Representations:
@@ -520,96 +534,110 @@ def process_element(ifc_file, element, axis_context, unit_scale):
                 body_rep = rep
                 break
     if body_rep is None:
-        raise Exception("nessuna Body representation da cui ricavare gli assi.")
+        raise Exception("no Body representation to derive axes from.")
 
     groups, skipped = extract_axis_groups(body_rep, unit_scale)
     if skipped:
-        print(f"  (items non supportati, lasciati al padre: "
+        print(f"  (unsupported items, left on the parent: "
               f"{', '.join(it.is_a() for it in skipped)})")
     if not groups:
         raise Exception(
-            f"nessun asse ricavabile con MERGE_DISTANCE={MERGE_DISTANCE}. "
-            "Aumenta la soglia o controlla la mesh."
+            f"no axis could be derived with MERGE_DISTANCE={MERGE_DISTANCE}. "
+            "Increase the threshold or check the mesh."
         )
 
     if SPLIT_ELEMENTS:
         children = split_into_elements(
-            ifc_file, element, axis_context, body_rep, groups, skipped, unit_scale
+            ifc_file, element, axis_context, body_rep, groups, skipped,
+            unit_scale, delete_original=delete_original,
         )
-        return f"splittato in {len(children)} elementi aggregati", children
+        return f"split into {len(children)} aggregated elements", children
 
     paths = add_axes_to_element(ifc_file, element, axis_context, groups, unit_scale)
     tot = sum(path_length(p) for p in paths)
-    return (f"creata rappresentazione Model/Axis/GRAPH_VIEW "
-            f"({len(paths)} polilinee, {tot:.2f} m totali)"), []
+    return (f"created Model/Axis/GRAPH_VIEW representation "
+            f"({len(paths)} polylines, {tot:.2f} m total)"), []
 
 
-def main():
+def main(delete_original=True):
     ifc_file = tool.Ifc.get()
     if ifc_file is None:
-        print("Nessun progetto IFC attivo in Bonsai.")
+        print("No active IFC project in Bonsai.")
         return
 
     selected = [o for o in bpy.context.selected_objects if tool.Ifc.get_entity(o)]
     if not selected:
-        print("Nessun oggetto IFC selezionato.")
+        print("No IFC object selected.")
         return
 
     unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc_file)
     axis_context = get_or_create_axis_context(ifc_file)
 
-    created = []   # nuovi elementi IFC da materializzare in Blender
-    emptied = []   # oggetti Blender dei padri svuotati
+    created = []   # new IFC elements to materialise in Blender
+    emptied = []   # Blender objects of the emptied parents
 
     for obj in selected:
         element = tool.Ifc.get_entity(obj)
         label = element.Name or element.GlobalId
 
         if SPLIT_ELEMENTS and element.IsDecomposedBy:
-            print(f"{label}: già decomposto, salto.")
+            print(f"{label}: already decomposed, skipping.")
             continue
         already_axis = element.Representation and any(
             r.RepresentationIdentifier == "Axis" for r in element.Representation.Representations
         )
         if already_axis:
-            print(f"{label}: rappresentazione Axis già presente, salto.")
+            print(f"{label}: Axis representation already present, skipping.")
             continue
 
         try:
-            outcome, children = process_element(ifc_file, element, axis_context, unit_scale)
+            outcome, children = process_element(
+                ifc_file, element, axis_context, unit_scale,
+                delete_original=delete_original,
+            )
             if children:
                 created.extend(children)
-                emptied.append(obj)
+                if delete_original:
+                    emptied.append(obj)
             print(f"{label}: {outcome}.")
         except Exception as e:
-            print(f"{label}: ERRORE - {e}")
+            print(f"{label}: ERROR - {e}")
 
     if created:
         try:
             create_blender_objects(created)
             for obj in emptied:
                 clear_parent_object(obj)
-            print(f"Creati al volo {len(created)} oggetti Blender.")
+            print(f"Created {len(created)} Blender objects on the fly.")
         except Exception as e:
-            print(f"Aggiornamento della scena fallito ({e}): "
-                  "ricarica il progetto per vedere i nuovi oggetti.")
+            print(f"Scene update failed ({e}): "
+                  "reload the project to see the new objects.")
 
-    print("Completato.")
+    print("Done.")
 
 
 class PipeCleaner(bpy.types.Operator, tool.Ifc.Operator):
-    """Assi GRAPH_VIEW (ed eventuale split) per i tubi selezionati."""
+    """Targets IFC exports from ArchiCAD's Coordination View, which
+    merges multiple physical pipe/duct segments into a single faceted
+    element.
+    Splits a pipe/duct into one child element per segment along the
+    source facesets and aggregates the results under the original
+    element. Each child gets its own Body, axis representation,
+    segment length and estimated diameter. The original element is
+    kept as a container, retaining its GUID and property sets."""
 
     bl_idname = "bim.pipe_cleaner"
-    bl_label = "Pipe cleaner: assi GRAPH_VIEW tubi raggruppati"
+    bl_label = "Pipe Cleaner: split grouped pipes into axes"
     bl_options = {"REGISTER", "UNDO"}
 
     def _execute(self, context):
-        main()
+        props = getattr(context.scene, "ifc_cleanup", None)
+        delete_original = props.delete_original_geometry if props else True
+        main(delete_original=delete_original)
 
 
 if __name__ == "__main__":
-    # sostituisce l'eventuale classe già registrata (ri-esecuzioni)
+    # replaces any already-registered class (re-runs)
     registered = getattr(bpy.types, "BIM_OT_pipe_cleaner", None)
     if registered is not None:
         bpy.utils.unregister_class(registered)
