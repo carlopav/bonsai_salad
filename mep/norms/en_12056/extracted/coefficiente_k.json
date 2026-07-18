@@ -1,0 +1,26 @@
+{
+  "norma": "UNI EN 12056-2:2001",
+  "riferimento": "prospetto 3",
+  "coefficienti": [
+    {
+      "uso": "intermittente",
+      "descrizione": "per esempio in abitazioni, locande, uffici",
+      "k": 0.5
+    },
+    {
+      "uso": "frequente",
+      "descrizione": "per esempio in ospedali, scuole, ristoranti, alberghi",
+      "k": 0.7
+    },
+    {
+      "uso": "molto_frequente",
+      "descrizione": "per esempio in bagni e/o docce pubbliche",
+      "k": 1.0
+    },
+    {
+      "uso": "speciale",
+      "descrizione": "per esempio laboratori",
+      "k": 1.2
+    }
+  ]
+}

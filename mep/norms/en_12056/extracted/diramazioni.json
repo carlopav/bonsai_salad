@@ -1,0 +1,102 @@
+{
+  "norma": "UNI EN 12056-2:2001",
+  "riferimento": "prospetto 4",
+  "capacita": [
+    {
+      "qmax_ls": 0.4,
+      "dn": {
+        "I": null,
+        "II": 30,
+        "IV": 30
+      }
+    },
+    {
+      "qmax_ls": 0.5,
+      "dn": {
+        "I": 40,
+        "II": 40,
+        "IV": 40
+      }
+    },
+    {
+      "qmax_ls": 0.8,
+      "dn": {
+        "I": 50,
+        "II": null,
+        "IV": null
+      }
+    },
+    {
+      "qmax_ls": 1.0,
+      "dn": {
+        "I": 60,
+        "II": 50,
+        "IV": 50
+      }
+    },
+    {
+      "qmax_ls": 1.5,
+      "dn": {
+        "I": 70,
+        "II": 60,
+        "IV": 60
+      }
+    },
+    {
+      "qmax_ls": 2.0,
+      "dn": {
+        "I": 80,
+        "II": 70,
+        "IV": 70
+      },
+      "max_wc": {
+        "I": 0,
+        "II": 0,
+        "IV": 0
+      },
+      "nota": "senza WC (**)"
+    },
+    {
+      "qmax_ls": 2.25,
+      "dn": {
+        "I": 90,
+        "II": 80,
+        "IV": 80
+      },
+      "max_wc": {
+        "I": 2,
+        "II": 1,
+        "IV": 1
+      },
+      "nota": "I: massimo due WC e cambiamenti di direzione max 90° totali (***); II/IV: massimo un WC (****)"
+    },
+    {
+      "qmax_ls": 2.5,
+      "dn": {
+        "I": 100,
+        "II": 90,
+        "IV": 100
+      }
+    }
+  ],
+  "limiti": {
+    "riferimento": "prospetto 5",
+    "sistema_I": {
+      "lunghezza_max_m": 4.0,
+      "curve_90_max": 3,
+      "dislivello_max_m": 1.0,
+      "pendenza_min_percento": 1.0
+    },
+    "sistema_II": {
+      "lunghezza_max_m": 10.0,
+      "curve_90_max": 1,
+      "pendenza_min_percento": 1.5
+    },
+    "sistema_IV": {
+      "lunghezza_max_m": 10.0,
+      "curve_90_max": 3,
+      "dislivello_max_m": 1.0,
+      "pendenza_min_percento": 1.0
+    }
+  }
+}

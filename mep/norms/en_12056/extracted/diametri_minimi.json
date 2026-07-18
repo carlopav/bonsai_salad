@@ -1,0 +1,66 @@
+{
+  "norma": "UNI EN 12056-2:2001",
+  "riferimento": "prospetto 1",
+  "diametri": [
+    {
+      "dn": 30,
+      "d_min_mm": 26
+    },
+    {
+      "dn": 40,
+      "d_min_mm": 34
+    },
+    {
+      "dn": 50,
+      "d_min_mm": 44
+    },
+    {
+      "dn": 56,
+      "d_min_mm": 49
+    },
+    {
+      "dn": 60,
+      "d_min_mm": 56
+    },
+    {
+      "dn": 70,
+      "d_min_mm": 68
+    },
+    {
+      "dn": 80,
+      "d_min_mm": 75
+    },
+    {
+      "dn": 90,
+      "d_min_mm": 79
+    },
+    {
+      "dn": 100,
+      "d_min_mm": 96
+    },
+    {
+      "dn": 125,
+      "d_min_mm": 113
+    },
+    {
+      "dn": 150,
+      "d_min_mm": 146
+    },
+    {
+      "dn": 200,
+      "d_min_mm": 184
+    },
+    {
+      "dn": 225,
+      "d_min_mm": 207
+    },
+    {
+      "dn": 250,
+      "d_min_mm": 230
+    },
+    {
+      "dn": 300,
+      "d_min_mm": 290
+    }
+  ]
+}

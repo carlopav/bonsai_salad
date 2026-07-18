@@ -1,0 +1,53 @@
+{
+  "tubi": [
+    {
+      "dn_norma": 100,
+      "dn": 110,
+      "de_mm": 110,
+      "sn4_spessore_mm": 3.2,
+      "sn8_spessore_mm": 3.2
+    },
+    {
+      "dn_norma": 125,
+      "dn": 125,
+      "de_mm": 125,
+      "sn4_spessore_mm": 3.2,
+      "sn8_spessore_mm": 3.7
+    },
+    {
+      "dn_norma": 150,
+      "dn": 160,
+      "de_mm": 160,
+      "sn4_spessore_mm": 4.0,
+      "sn8_spessore_mm": 4.7
+    },
+    {
+      "dn_norma": 200,
+      "dn": 200,
+      "de_mm": 200,
+      "sn4_spessore_mm": 4.9,
+      "sn8_spessore_mm": 5.9
+    },
+    {
+      "dn_norma": 250,
+      "dn": 250,
+      "de_mm": 250,
+      "sn4_spessore_mm": 6.2,
+      "sn8_spessore_mm": 7.3
+    },
+    {
+      "dn_norma": 300,
+      "dn": 315,
+      "de_mm": 315,
+      "sn4_spessore_mm": 7.7,
+      "sn8_spessore_mm": 9.2
+    },
+    {
+      "dn": 400,
+      "de_mm": 400,
+      "sn4_spessore_mm": 9.8,
+      "sn8_spessore_mm": 11.7
+    }
+  ],
+  "raccordi": []
+}

@@ -1,0 +1,107 @@
+{
+  "norma": "UNI EN 12056-2:2001",
+  "min_dn_con_wc": {
+    "I": 100,
+    "II": 80,
+    "III": 100,
+    "IV": 100
+  },
+  "ventilazione_primaria": {
+    "riferimento": "prospetto 11",
+    "capacita": [
+      {
+        "dn": 60,
+        "qmax_braga_squadra_ls": 0.5,
+        "qmax_braga_angolo_ls": 0.7
+      },
+      {
+        "dn": 70,
+        "qmax_braga_squadra_ls": 1.5,
+        "qmax_braga_angolo_ls": 2.0
+      },
+      {
+        "dn": 80,
+        "qmax_braga_squadra_ls": 2.0,
+        "qmax_braga_angolo_ls": 2.6
+      },
+      {
+        "dn": 90,
+        "qmax_braga_squadra_ls": 2.7,
+        "qmax_braga_angolo_ls": 3.5
+      },
+      {
+        "dn": 100,
+        "qmax_braga_squadra_ls": 4.0,
+        "qmax_braga_angolo_ls": 5.2
+      },
+      {
+        "dn": 125,
+        "qmax_braga_squadra_ls": 5.8,
+        "qmax_braga_angolo_ls": 7.6
+      },
+      {
+        "dn": 150,
+        "qmax_braga_squadra_ls": 9.5,
+        "qmax_braga_angolo_ls": 12.4
+      },
+      {
+        "dn": 200,
+        "qmax_braga_squadra_ls": 16.0,
+        "qmax_braga_angolo_ls": 21.0
+      }
+    ]
+  },
+  "ventilazione_secondaria": {
+    "riferimento": "prospetto 12",
+    "capacita": [
+      {
+        "dn": 60,
+        "dn_ventilazione": 50,
+        "qmax_braga_squadra_ls": 0.7,
+        "qmax_braga_angolo_ls": 0.9
+      },
+      {
+        "dn": 70,
+        "dn_ventilazione": 50,
+        "qmax_braga_squadra_ls": 2.0,
+        "qmax_braga_angolo_ls": 2.6
+      },
+      {
+        "dn": 80,
+        "dn_ventilazione": 50,
+        "qmax_braga_squadra_ls": 2.6,
+        "qmax_braga_angolo_ls": 3.4
+      },
+      {
+        "dn": 90,
+        "dn_ventilazione": 50,
+        "qmax_braga_squadra_ls": 3.5,
+        "qmax_braga_angolo_ls": 4.6
+      },
+      {
+        "dn": 100,
+        "dn_ventilazione": 50,
+        "qmax_braga_squadra_ls": 5.6,
+        "qmax_braga_angolo_ls": 7.3
+      },
+      {
+        "dn": 125,
+        "dn_ventilazione": 70,
+        "qmax_braga_squadra_ls": 7.6,
+        "qmax_braga_angolo_ls": 10.0
+      },
+      {
+        "dn": 150,
+        "dn_ventilazione": 80,
+        "qmax_braga_squadra_ls": 12.4,
+        "qmax_braga_angolo_ls": 18.3
+      },
+      {
+        "dn": 200,
+        "dn_ventilazione": 100,
+        "qmax_braga_squadra_ls": 21.0,
+        "qmax_braga_angolo_ls": 27.3
+      }
+    ]
+  }
+}

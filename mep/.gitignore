@@ -1,0 +1,10 @@
+# Scansioni/copie della norma: NON versionare (UNI/EN sono standard a pagamento,
+# copyright dell'ente normatore). Tenere solo localmente, fuori da git.
+# Le tabelle trascritte in extracted/ (dati numerici derivati, con citazione)
+# sono invece versionate.
+norms/*/raw/*
+!norms/*/raw/.gitkeep
+
+# Report generati (output, non sorgente)
+reports/generated/*
+!reports/generated/.gitkeep

@@ -20,6 +20,10 @@ Geometries should be kept as originals, without tassellation.
 Dxf layer structure does match Ifc Classes, and can be customized using a template dxf created with your favourite dxf editor.
 Two export methods are available: **Accurate** (default) uses ifcopenshell's native OCC/HLR serializer for real wall/column section cuts (fused and hatched), with native 2D plan symbols for everything else; **Approximate** is a pure-Python fallback (Shapely profile projection, no OCC) for when accuracy on complex geometry matters less than speed.
 
+# Mep (WIP)
+Generate MEP systems in Bonsai from a topological graph (appliances → collectors → outfall), with norm-based sizing (UNI EN 12056-2 for gravity drainage), parametric pipe/fitting geometry and quantity takeoff.
+The pure-Python core (graph, norm tables with citations, sizing engine, routing sketch, IFC export with connected ports) is implemented and tested. No external Python dependencies (data tables are json).
+
 # Dxf_ifc
 The inverse of ifc_dxf: import a DXF file as an IFC representation directly on a selected Bonsai element.
 DXF entities (lines, polylines, arcs, circles, ellipses, splines, hatches, inserts, text) are converted to native IFC geometry (IfcPolyline, IfcTrimmedCurve, IfcCircle, IfcMappedItem, etc.) and assigned to the chosen representation subcontext (default: Plan / Annotation / PLAN_VIEW).

@@ -1,0 +1,182 @@
+{
+  "norma": "UNI EN 12056-2:2001",
+  "riferimento": "prospetto 2",
+  "apparecchi": [
+    {
+      "apparecchio": "lavabo",
+      "du": {
+        "I": 0.5,
+        "II": 0.3,
+        "III": 0.3,
+        "IV": 0.3
+      }
+    },
+    {
+      "apparecchio": "bide",
+      "du": {
+        "I": 0.5,
+        "II": 0.3,
+        "III": 0.3,
+        "IV": 0.3
+      }
+    },
+    {
+      "apparecchio": "doccia_senza_tappo",
+      "du": {
+        "I": 0.6,
+        "II": 0.4,
+        "III": 0.4,
+        "IV": 0.4
+      }
+    },
+    {
+      "apparecchio": "doccia_con_tappo",
+      "du": {
+        "I": 0.8,
+        "II": 0.5,
+        "III": 1.3,
+        "IV": 0.5
+      }
+    },
+    {
+      "apparecchio": "orinatoio_con_cassetta",
+      "du": {
+        "I": 0.8,
+        "II": 0.5,
+        "III": 0.4,
+        "IV": 0.5
+      }
+    },
+    {
+      "apparecchio": "orinatoio_con_valvola_di_cacciata",
+      "du": {
+        "I": 0.5,
+        "II": 0.3,
+        "III": null,
+        "IV": 0.3
+      }
+    },
+    {
+      "apparecchio": "orinatoio_a_parete",
+      "du": {
+        "I": 0.2,
+        "II": 0.2,
+        "III": 0.2,
+        "IV": 0.2
+      },
+      "nota": "valore per persona (*)"
+    },
+    {
+      "apparecchio": "vasca_da_bagno",
+      "du": {
+        "I": 0.8,
+        "II": 0.6,
+        "III": 1.3,
+        "IV": 0.5
+      }
+    },
+    {
+      "apparecchio": "lavello_da_cucina",
+      "du": {
+        "I": 0.8,
+        "II": 0.6,
+        "III": 1.3,
+        "IV": 0.5
+      }
+    },
+    {
+      "apparecchio": "lavastoviglie_domestica",
+      "du": {
+        "I": 0.8,
+        "II": 0.6,
+        "III": 0.2,
+        "IV": 0.5
+      }
+    },
+    {
+      "apparecchio": "lavatrice_max_6kg",
+      "du": {
+        "I": 0.8,
+        "II": 0.6,
+        "III": 0.6,
+        "IV": 0.5
+      }
+    },
+    {
+      "apparecchio": "lavatrice_max_12kg",
+      "du": {
+        "I": 1.5,
+        "II": 1.2,
+        "III": 1.2,
+        "IV": 1.0
+      }
+    },
+    {
+      "apparecchio": "wc_cassetta_4.0l",
+      "du": {
+        "I": null,
+        "II": 1.8,
+        "III": null,
+        "IV": null
+      },
+      "nota": "non ammesso nei sistemi I, III, IV (**)"
+    },
+    {
+      "apparecchio": "wc_cassetta_6.0l",
+      "du": {
+        "I": 2.0,
+        "II": 1.8,
+        "III": 1.7,
+        "IV": 2.0
+      },
+      "nota": "sistema III: da 1,2 a 1,7 secondo il tipo di cassetta (***); trascritto il massimo"
+    },
+    {
+      "apparecchio": "wc_cassetta_7.5l",
+      "du": {
+        "I": 2.0,
+        "II": 1.8,
+        "III": 1.8,
+        "IV": 2.0
+      },
+      "nota": "sistema III: da 1,4 a 1,8 (***); trascritto il massimo"
+    },
+    {
+      "apparecchio": "wc_cassetta_9.0l",
+      "du": {
+        "I": 2.5,
+        "II": 2.0,
+        "III": 2.0,
+        "IV": 2.5
+      },
+      "nota": "sistema III: da 1,6 a 2,0 (***); trascritto il massimo"
+    },
+    {
+      "apparecchio": "pozzetto_a_terra_dn50",
+      "du": {
+        "I": 0.8,
+        "II": 0.9,
+        "III": null,
+        "IV": 0.6
+      }
+    },
+    {
+      "apparecchio": "pozzetto_a_terra_dn70",
+      "du": {
+        "I": 1.5,
+        "II": 0.9,
+        "III": null,
+        "IV": 1.0
+      }
+    },
+    {
+      "apparecchio": "pozzetto_a_terra_dn100",
+      "du": {
+        "I": 2.0,
+        "II": 1.2,
+        "III": null,
+        "IV": 1.3
+      }
+    }
+  ]
+}

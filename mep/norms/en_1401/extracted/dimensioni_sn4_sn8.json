@@ -1,0 +1,126 @@
+{
+  "norma": "UNI EN 1401-1:2019+A1:2023",
+  "riferimento": "Table 5, Table 6",
+  "diametri": [
+    {
+      "dn_od": 110,
+      "de_max_mm": 110.3,
+      "sn4_e_min_mm": 3.2,
+      "sn4_em_max_mm": 3.8,
+      "sn8_e_min_mm": 3.2,
+      "sn8_em_max_mm": 3.8
+    },
+    {
+      "dn_od": 125,
+      "de_max_mm": 125.3,
+      "sn4_e_min_mm": 3.2,
+      "sn4_em_max_mm": 3.8,
+      "sn8_e_min_mm": 3.7,
+      "sn8_em_max_mm": 4.3
+    },
+    {
+      "dn_od": 160,
+      "de_max_mm": 160.4,
+      "sn4_e_min_mm": 4.0,
+      "sn4_em_max_mm": 4.6,
+      "sn8_e_min_mm": 4.7,
+      "sn8_em_max_mm": 5.4
+    },
+    {
+      "dn_od": 200,
+      "de_max_mm": 200.5,
+      "sn4_e_min_mm": 4.9,
+      "sn4_em_max_mm": 5.6,
+      "sn8_e_min_mm": 5.9,
+      "sn8_em_max_mm": 6.7
+    },
+    {
+      "dn_od": 250,
+      "de_max_mm": 250.5,
+      "sn4_e_min_mm": 6.2,
+      "sn4_em_max_mm": 7.1,
+      "sn8_e_min_mm": 7.3,
+      "sn8_em_max_mm": 8.3
+    },
+    {
+      "dn_od": 315,
+      "de_max_mm": 315.6,
+      "sn4_e_min_mm": 7.7,
+      "sn4_em_max_mm": 8.7,
+      "sn8_e_min_mm": 9.2,
+      "sn8_em_max_mm": 10.4
+    },
+    {
+      "dn_od": 355,
+      "de_max_mm": 355.7,
+      "sn4_e_min_mm": 8.7,
+      "sn4_em_max_mm": 9.8,
+      "sn8_e_min_mm": 10.4,
+      "sn8_em_max_mm": 11.7
+    },
+    {
+      "dn_od": 400,
+      "de_max_mm": 400.7,
+      "sn4_e_min_mm": 9.8,
+      "sn4_em_max_mm": 11.0,
+      "sn8_e_min_mm": 11.7,
+      "sn8_em_max_mm": 13.1
+    },
+    {
+      "dn_od": 450,
+      "de_max_mm": 450.8,
+      "sn4_e_min_mm": 11.0,
+      "sn4_em_max_mm": 12.3,
+      "sn8_e_min_mm": 13.2,
+      "sn8_em_max_mm": 14.8
+    },
+    {
+      "dn_od": 500,
+      "de_max_mm": 500.9,
+      "sn4_e_min_mm": 12.3,
+      "sn4_em_max_mm": 13.8,
+      "sn8_e_min_mm": 14.6,
+      "sn8_em_max_mm": 16.3
+    },
+    {
+      "dn_od": 630,
+      "de_max_mm": 631.1,
+      "sn4_e_min_mm": 15.4,
+      "sn4_em_max_mm": 17.2,
+      "sn8_e_min_mm": 18.4,
+      "sn8_em_max_mm": 20.5
+    },
+    {
+      "dn_od": 710,
+      "de_max_mm": 711.2,
+      "sn4_e_min_mm": 17.4,
+      "sn4_em_max_mm": 19.4,
+      "sn8_e_min_mm": 20.8,
+      "sn8_em_max_mm": 23.2
+    },
+    {
+      "dn_od": 800,
+      "de_max_mm": 801.3,
+      "sn4_e_min_mm": 19.6,
+      "sn4_em_max_mm": 21.8,
+      "sn8_e_min_mm": 23.4,
+      "sn8_em_max_mm": 27.0
+    },
+    {
+      "dn_od": 900,
+      "de_max_mm": 901.5,
+      "sn4_e_min_mm": 22.0,
+      "sn4_em_max_mm": 24.4,
+      "sn8_e_min_mm": 26.3,
+      "sn8_em_max_mm": 30.3
+    },
+    {
+      "dn_od": 1000,
+      "de_max_mm": 1001.6,
+      "sn4_e_min_mm": 24.5,
+      "sn4_em_max_mm": 27.2,
+      "sn8_e_min_mm": 29.2,
+      "sn8_em_max_mm": 33.6
+    }
+  ]
+}

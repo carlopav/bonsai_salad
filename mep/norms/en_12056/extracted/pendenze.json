@@ -1,0 +1,16 @@
+{
+  "norma": "UNI EN 12056-2:2001",
+  "diramazioni": {
+    "riferimento": "prospetto 5",
+    "pendenza_min_percento": {
+      "sistema_I": 1.0,
+      "sistema_II": 1.5,
+      "sistema_IV": 1.0
+    }
+  },
+  "collettori": {
+    "riferimento": "prospetti B.1, B.2",
+    "pendenza_min_cm_m": 0.5,
+    "pendenza_max_cm_m": 5.0
+  }
+}
