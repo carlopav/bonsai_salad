@@ -1,50 +1,16 @@
-# Bonsai - OpenBIM 5D Blender Add-on based on Bonsai
+# Bonsai Salad — sheets_to_pdf tool
 # Copyright (C) 2026 Carlo Pavan <carlopav@gmail.com>
-#
-# This file is part of Bonsai5D+.  GNU GPL v3 or later.
-
-"""Self-contained "convert sheet SVGs to PDF" operator.
-
-This feature is intentionally isolated in its own module: it does not belong to
-the cost-management domain and is slated to be removed from this add-on and
-moved elsewhere. Keep all of its dependencies local to this package so it can be
-dropped without touching the rest of the code base.
-"""
+# GPL-3.0
 
 import os
-import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
 import bpy
+from bonsai import tool
 
 _SVG_NS = "http://www.w3.org/2000/svg"
 _XLINK_NS = "http://www.w3.org/1999/xlink"
-
-
-def _open_file(path):
-    if sys.platform == "win32":
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.run(["open", path], check=False)
-    else:
-        subprocess.run(["xdg-open", path], check=False)
-
-
-def _get_ifc():
-    try:
-        from bonsai import tool
-        return tool.Ifc.get()
-    except Exception:
-        return None
-
-
-def _get_ifc_path():
-    try:
-        from bonsai import tool
-        return tool.Ifc.get_path()
-    except Exception:
-        return None
 
 
 def _ensure_typst():
@@ -68,10 +34,10 @@ def _ensure_typst():
 
 
 def _find_sheet_svgs():
-    ifc = _get_ifc()
+    ifc = tool.Ifc.get()
     if ifc is None:
         return []
-    ifc_path = _get_ifc_path()
+    ifc_path = tool.Ifc.get_path()
     if not ifc_path:
         return []
     ifc_dir = os.path.dirname(os.path.abspath(ifc_path))
@@ -224,7 +190,7 @@ class ExportSheetsToPdfOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _get_ifc() is not None
+        return tool.Ifc.get() is not None
 
     def execute(self, context):
         if not _ensure_typst():
@@ -237,7 +203,7 @@ class ExportSheetsToPdfOperator(bpy.types.Operator):
 
         svgs = _find_sheet_svgs()
         if not svgs:
-            ifc = _get_ifc()
+            ifc = tool.Ifc.get()
             if ifc:
                 sheets = [
                     d for d in ifc.by_type("IfcDocumentInformation")
@@ -267,9 +233,9 @@ class ExportSheetsToPdfOperator(bpy.types.Operator):
         if generated:
             if len(generated) <= 3:
                 for pdf in generated:
-                    _open_file(pdf)
+                    bpy.ops.wm.path_open(filepath=pdf)
             else:
-                _open_file(os.path.dirname(generated[0]))
+                bpy.ops.wm.path_open(filepath=os.path.dirname(generated[0]))
         return {"FINISHED"}
 
 

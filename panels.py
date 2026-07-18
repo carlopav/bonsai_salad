@@ -1,5 +1,5 @@
 import bpy
-from .sheets_to_pdf.operator import _get_ifc
+from bonsai import tool
 
 
 class BONSAI_SALAD_PT_main(bpy.types.Panel):
@@ -14,7 +14,7 @@ class BONSAI_SALAD_PT_main(bpy.types.Panel):
 
         col = layout.column(align=True)
         col.label(text="Sheets to PDF")
-        if _get_ifc() is None:
+        if tool.Ifc.get() is None:
             col.label(text="No IFC file loaded.", icon="ERROR")
         else:
             col.operator("bim.export_sheets_to_pdf", icon="FILE_BLANK")

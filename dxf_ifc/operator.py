@@ -6,6 +6,8 @@
 
 import bpy
 
+from bonsai import tool
+
 from .core import import_dxf_as_representation, get_or_create_subcontext
 
 
@@ -13,23 +15,8 @@ from .core import import_dxf_as_representation, get_or_create_subcontext
 # Blender / Bonsai context helpers
 # ---------------------------------------------------------------------------
 
-def _get_ifc():
-    try:
-        from bonsai import tool
-        return tool.Ifc.get()
-    except Exception:
-        return None
-
-
 def _get_selected_element():
-    try:
-        from bonsai import tool
-        obj = bpy.context.active_object
-        if obj is None:
-            return None
-        return tool.Ifc.get_entity(obj)
-    except Exception:
-        return None
+    return tool.Ifc.get_entity(bpy.context.active_object)
 
 
 def _get_element_subcontext(ifc, element):
@@ -202,7 +189,7 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _get_ifc() is not None
+        return tool.Ifc.get() is not None
 
     def draw(self, _context):
         layout = self.layout
@@ -247,7 +234,7 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator):
     def invoke(self, context, event):
         global _subcontext_items
 
-        ifc = _get_ifc()
+        ifc = tool.Ifc.get()
         element = _get_selected_element()
 
         if element is None:
@@ -274,7 +261,7 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        ifc = _get_ifc()
+        ifc = tool.Ifc.get()
         if ifc is None:
             self.report({"ERROR"}, "No IFC file loaded.")
             return {"CANCELLED"}

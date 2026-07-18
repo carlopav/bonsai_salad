@@ -1,7 +1,6 @@
-# Bonsai - OpenBIM 5D Blender Add-on based on Bonsai
+# Bonsai Salad — sheets_to_pdf tool
 # Copyright (C) 2026 Carlo Pavan <carlopav@gmail.com>
-#
-# This file is part of Bonsai5D+.  GNU GPL v3 or later.
+# GPL-3.0
 
 import bpy
 from .operator import classes as _op_classes

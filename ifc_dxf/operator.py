@@ -9,6 +9,8 @@ import os
 import bpy
 import numpy as np
 
+from bonsai import tool
+
 from .core import export_drawing_approximate, export_drawing_accurate, find_drawings
 from .core.audit import audit_dxf_file
 
@@ -17,19 +19,9 @@ from .core.audit import audit_dxf_file
 # Blender / Bonsai context helpers
 # ---------------------------------------------------------------------------
 
-def _get_ifc():
-    """Return the currently loaded ifcopenshell.file from Bonsai, or None."""
-    try:
-        from bonsai import tool
-        return tool.Ifc.get()
-    except Exception:
-        return None
-
-
 def _get_active_drawing():
     """Return the active IfcAnnotation drawing from Bonsai, or None."""
     try:
-        from bonsai import tool
         item = tool.Drawing.get_active_drawing_item()
         if item is None:
             return None
@@ -41,7 +33,6 @@ def _get_active_drawing():
 def _get_camera_obj(drawing):
     """Return the Blender camera object for the given drawing annotation."""
     try:
-        from bonsai import tool
         return tool.Ifc.get_object(drawing)
     except Exception:
         return None
@@ -50,26 +41,9 @@ def _get_camera_obj(drawing):
 def _get_target_view(drawing):
     """Return the TargetView string for the given drawing annotation."""
     try:
-        from bonsai import tool
         return tool.Drawing.get_drawing_target_view(drawing)
     except Exception:
         return "PLAN_VIEW"
-
-
-def _open_file(path):
-    """Open a file with the OS default application, cross-platform."""
-    import sys
-    import subprocess
-
-    try:
-        if sys.platform == "win32":
-            os.startfile(path)  # noqa: S606
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +82,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _get_ifc() is not None and _get_active_drawing() is not None
+        return tool.Ifc.get() is not None and _get_active_drawing() is not None
 
     def _default_filepath(self, drawing):
         try:
@@ -137,7 +111,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         layout.prop(self, "run_audit")
 
     def execute(self, context):
-        ifc = _get_ifc()
+        ifc = tool.Ifc.get()
         if ifc is None:
             self.report({"ERROR"}, "No IFC file loaded.")
             return {"CANCELLED"}
@@ -214,7 +188,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
                     )
 
         if self.open_after_export:
-            _open_file(output_path)
+            bpy.ops.wm.path_open(filepath=output_path)
 
         return {"FINISHED"}
 
@@ -245,10 +219,6 @@ class SelectDxfTemplateOperator(bpy.types.Operator):
 
 
 class IfcDxfProperties(bpy.types.PropertyGroup):
-    show_options: bpy.props.BoolProperty(
-        name="Show Options",
-        default=False,
-    )
     export_method: bpy.props.EnumProperty(
         name="Method",
         items=[
