@@ -15,6 +15,7 @@ from . import ifc_dxf
 from . import dxf_ifc
 from . import mep
 from . import ifc_cleanup
+from . import drawing_diff
 
 
 def register():
@@ -23,11 +24,13 @@ def register():
     dxf_ifc.register()
     mep.register()
     ifc_cleanup.register()
+    drawing_diff.register()
     panels.register()
 
 
 def unregister():
     panels.unregister()
+    drawing_diff.unregister()
     ifc_cleanup.unregister()
     mep.unregister()
     dxf_ifc.unregister()
