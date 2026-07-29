@@ -19,6 +19,33 @@ def _get_selected_element():
     return tool.Ifc.get_entity(bpy.context.active_object)
 
 
+def _create_annotation_object(context, name: str, object_type: str = "LINEWORK"):
+    """Create a Blender object linked to a new IfcAnnotation. Returns (obj, element)."""
+    import bonsai.core.geometry as core_geometry
+    import bonsai.core.root as core_root
+
+    obj = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+    context.scene.collection.objects.link(obj)
+    element = core_root.assign_class(
+        tool.Ifc,
+        tool.Collector,
+        tool.Root,
+        obj=obj,
+        ifc_class="IfcAnnotation",
+        predefined_type=object_type,
+        should_add_representation=False,
+    )
+    # Products need an ObjectPlacement before they carry a representation.
+    core_geometry.edit_object_placement(tool.Ifc, tool.Geometry, tool.Surveyor, obj=obj)
+    return obj, element
+
+
+def _reload_object_geometry(obj, representation) -> None:
+    import bonsai.core.geometry as core_geometry
+
+    core_geometry.switch_representation(tool.Ifc, tool.Geometry, obj=obj, representation=representation)
+
+
 def _get_element_subcontext(ifc, element):
     """Return the best subcontext to overwrite: Plan/Annotation preferred, else first found."""
     try:
@@ -137,7 +164,7 @@ def _build_subcontext_items(ifc) -> list[tuple]:
 # Operator
 # ---------------------------------------------------------------------------
 
-class ImportDxfAsRepresentationOperator(bpy.types.Operator):
+class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
     """Import a DXF file as IFC representation on the active element."""
 
     bl_idname = "bim.import_dxf_as_representation"
@@ -260,7 +287,7 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator):
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
-    def execute(self, context):
+    def _execute(self, context):
         ifc = tool.Ifc.get()
         if ifc is None:
             self.report({"ERROR"}, "No IFC file loaded.")
@@ -274,26 +301,33 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator):
             return {"CANCELLED"}
 
         if self.target_mode == "NEW":
-            import ifcopenshell.api
-
             name = Path(filepath).stem
             try:
-                element = ifcopenshell.api.run(
-                    "root.create_entity", ifc, ifc_class="IfcAnnotation", name=name
-                )
+                obj, element = _create_annotation_object(context, name)
             except Exception as exc:
                 self.report({"ERROR"}, f"Failed to create IfcAnnotation: {exc}")
                 return {"CANCELLED"}
 
-            container = _find_spatial_container(ifc)
-            if container is not None:
-                ifcopenshell.api.run(
-                    "spatial.assign_container", ifc,
-                    products=[element], relating_structure=container,
-                )
+            if element is None:
+                self.report({"ERROR"}, "Failed to create IfcAnnotation.")
+                return {"CANCELLED"}
+
+            # assign_class already containers non-drawing annotations when a default
+            # container is set; fall back to any spatial element otherwise.
+            import ifcopenshell.api
+            import ifcopenshell.util.element
+
+            if not tool.Root.is_drawing_annotation(element) and not ifcopenshell.util.element.get_container(element):
+                container = _find_spatial_container(ifc)
+                if container is not None:
+                    ifcopenshell.api.run(
+                        "spatial.assign_container", ifc,
+                        products=[element], relating_structure=container,
+                    )
 
             subcontext = get_or_create_subcontext(ifc)
         else:
+            obj = context.active_object
             element = _get_selected_element()
             if element is None:
                 self.report({"ERROR"}, "No active IFC element selected.")
@@ -327,11 +361,19 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator):
             self.report({"ERROR"}, f"DXF import failed: {exc}")
             return {"CANCELLED"}
 
-        try:
-            ifc_path = bpy.path.abspath(bpy.context.scene.BIMProperties.ifc_file)
-            ifc.write(ifc_path)
-        except Exception:
-            pass
+        # Without this the IFC holds the geometry but the viewport still shows the old mesh.
+        if obj is not None:
+            try:
+                _reload_object_geometry(obj, new_repr)
+            except Exception as exc:
+                self.report({"WARNING"}, f"Representation written but reload failed: {exc}")
+
+        if self.target_mode == "NEW":
+            # switch_representation may swap the object data-block, so re-fetch it.
+            new_obj = tool.Ifc.get_object(element)
+            if new_obj is not None:
+                new_obj.select_set(True)
+                context.view_layer.objects.active = new_obj
 
         n_items = len(new_repr.Items) if new_repr else 0
         self.report({"INFO"}, f"Imported {n_items} items into {getattr(element, 'Name', element)} — visible in 2D Drawing view")
