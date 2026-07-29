@@ -11,11 +11,14 @@ from .operator import _get_active_drawing
 
 
 class IfcDxfPanel(bpy.types.Panel):
-    bl_label = "Export Drawing to DXF"
+    bl_label = "Drawing to DXF"
     bl_idname = "BONSAI_SALAD_PT_ifc_dxf"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Bonsai Salad"
+    bl_parent_id = "BONSAI_SALAD_PT_drawings"
+    bl_order = 0
+    bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
         layout = self.layout

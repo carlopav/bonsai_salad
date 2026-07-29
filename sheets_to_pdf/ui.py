@@ -8,10 +8,12 @@ from bonsai import tool
 
 class SheetsToPdfPanel(bpy.types.Panel):
     bl_label = "Sheets to PDF"
-    bl_idname = "SCENE_PT_sheets_to_pdf"
+    bl_idname = "BONSAI_SALAD_PT_sheets_to_pdf"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Bonsai Salad"
+    bl_parent_id = "BONSAI_SALAD_PT_drawings"
+    bl_order = 1
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):

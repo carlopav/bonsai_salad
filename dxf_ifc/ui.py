@@ -6,11 +6,13 @@ import bpy
 
 
 class DxfIfcPanel(bpy.types.Panel):
-    bl_label = "Import DXF as Representation"
+    bl_label = "DXF as Representation"
     bl_idname = "BONSAI_SALAD_PT_dxf_ifc"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Bonsai Salad"
+    bl_parent_id = "BONSAI_SALAD_PT_geometry"
+    bl_order = 0
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):

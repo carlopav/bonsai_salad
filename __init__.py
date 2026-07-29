@@ -19,20 +19,21 @@ from . import drawing_diff
 
 
 def register():
+    # The category panels first: a tool panel's bl_parent_id must already exist.
+    panels.register()
     sheets_to_pdf.register()
     ifc_dxf.register()
     dxf_ifc.register()
     mep.register()
     ifc_cleanup.register()
     drawing_diff.register()
-    panels.register()
 
 
 def unregister():
-    panels.unregister()
     drawing_diff.unregister()
     ifc_cleanup.unregister()
     mep.unregister()
     dxf_ifc.unregister()
     ifc_dxf.unregister()
     sheets_to_pdf.unregister()
+    panels.unregister()

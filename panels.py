@@ -1,26 +1,44 @@
 import bpy
-from bonsai import tool
 
 
-class BONSAI_SALAD_PT_main(bpy.types.Panel):
-    bl_label = "Bonsai Salad"
-    bl_idname = "BONSAI_SALAD_PT_main"
+class BONSAI_SALAD_PT_geometry(bpy.types.Panel):
+    bl_label = "Geometry"
+    bl_idname = "BONSAI_SALAD_PT_geometry"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Bonsai Salad"
+    bl_order = 0
 
-    def draw(self, _context):
-        layout = self.layout
-
-        col = layout.column(align=True)
-        col.label(text="Sheets to PDF")
-        if tool.Ifc.get() is None:
-            col.label(text="No IFC file loaded.", icon="ERROR")
-        else:
-            col.operator("bim.export_sheets_to_pdf", icon="FILE_BLANK")
+    def draw(self, context):
+        pass
 
 
-classes = (BONSAI_SALAD_PT_main,)
+class BONSAI_SALAD_PT_drawings(bpy.types.Panel):
+    bl_label = "Drawings and Documents"
+    bl_idname = "BONSAI_SALAD_PT_drawings"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Bonsai Salad"
+    bl_order = 1
+
+    def draw(self, context):
+        pass
+
+
+class BONSAI_SALAD_PT_energy_mep(bpy.types.Panel):
+    bl_label = "Energy and MEP"
+    bl_idname = "BONSAI_SALAD_PT_energy_mep"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Bonsai Salad"
+    bl_order = 2
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        pass
+
+
+classes = (BONSAI_SALAD_PT_geometry, BONSAI_SALAD_PT_drawings, BONSAI_SALAD_PT_energy_mep)
 
 
 def register():

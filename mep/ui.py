@@ -14,6 +14,8 @@ class MepPanel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Bonsai Salad"
+    bl_parent_id = "BONSAI_SALAD_PT_energy_mep"
+    bl_order = 0
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
