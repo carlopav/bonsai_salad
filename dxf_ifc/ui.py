@@ -6,7 +6,8 @@ import bpy
 
 
 class DxfIfcPanel(bpy.types.Panel):
-    bl_label = "DXF as Representation"
+    # Generic on purpose: DXF is the first format supported here, not the only one planned.
+    bl_label = "Import External Geometry as Representation"
     bl_idname = "BONSAI_SALAD_PT_dxf_ifc"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
