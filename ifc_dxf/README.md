@@ -88,7 +88,17 @@ IfcGeometricRepresentationContext   (ContextType = "Model" | "Plan")
 ### DXF Template
 
 `ifc_dxf_template_metric.dxf` (maintained in BricsCAD):
-- Layers, annotative text styles, dimstyle `dimensions_metric_m`.
+- 33 layers: one per IFC class an authoring tool creates today, plus the six
+  fixed ones (`0`, `Defpoints`, `Annotation_noplot`, `IfcAnnotation_Dimension`,
+  `IfcAnnotation_Text`, `IfcWall_LayersSubdivision`). Deprecated classes
+  (`IfcWallStandardCase`, `IfcFurnishingElement` — still declared in IFC4X3,
+  superseded in practice) are left to runtime creation, so a legacy IFC2X3 file
+  still exports correctly. Hatch layers are **not** declared: they are created
+  when a hatch is actually written, so a drawing that cuts nothing carries no
+  empty fill layers.
+- `layers.ensure_layer` creates only what is missing and never restyles a
+  declared layer: a template — ours or a customised one — always wins.
+- Annotative text styles, dimstyle `dimensions_metric_m`.
 - A1 layout with 1:100 viewport and title block (cartiglio): `{{Identification}}`, `{{Name}}`, `{{scale}}`, `{{date}}`.
 - Annotation scale in viewport via XREC `ASDK_XREC_ANNOTATION_SCALE_INFO`.
 
@@ -98,16 +108,45 @@ Current annotation scale written to `AcDbVariableDictionary → DictionaryVariab
 
 The scale list (`ACAD_SCALELIST`) uses `SCALE`/`AcDbScale` entities (group codes 300/140/141/290) not natively supported by ezdxf; workaround via `new_entity("SCALE")` + manual subclass setup.
 
-### Layer Naming
+### Layer Naming and drawing roles
 
-| Type | Format | Example |
+Two orthogonal dimensions (`core/layers.py`), deliberately kept apart:
+
+- **the layer says what an entity is** — one layer per IFC class, so freezing a
+  layer hides a class;
+- **the entity style says how it prints** — the drawing *role*, written
+  explicitly on the entity (colour, linetype, lineweight), not BYLAYER.
+
+| role | colour | linetype | lineweight | what lands there |
+|---|---|---|---|---|
+| `section` | 7 | Continuous | 0.30 | cut loops (HLR or authored profile) |
+| `view` | 1 | Continuous | 0.09 | viewed linework, footprints |
+| `overhead` | 2 | Dashed | 0.09 | elements above the cut plane |
+
+**BLOCKs are the exception: they are always BYLAYER.** A symbol placed as an
+INSERT carries *no* explicit colour, linetype or lineweight — its content stays
+BYBLOCK and the INSERT reads everything from its layer. A symbol whose role is
+not the plain view therefore says so through its layer instead
+(`layers.insert_layer`): an overhead filling goes to `<Class>_Overhead`,
+created at runtime with the overhead style. Locked by `test_blocks_are_bylayer`.
+
+| Type | Layer | Example |
 |---|---|---|
-| Bucket A — INSERT elements | IFC class name | `IfcDoor`, `IfcFurniture` |
-| Bucket A — overhead fill | `<Class>_Overhead` | `IfcWindow_Overhead` |
-| Bucket B — section cut | `<Class>_Section` | `IfcWall_Section` |
-| Bucket B — view (below cut) | `<Class>_View` | `IfcWall_View` |
-| Bucket B — hatch fill | `<Class>_Hatches` | `IfcWall_Hatches` |
-| Geometry inside BLOCKs | `"0"` with BYBLOCK | controlled by INSERT |
+| Any element geometry | IFC class name | `IfcDoor`, `IfcWall` |
+| Overhead symbol (INSERT) | `<Class>_Overhead` | `IfcWindow_Overhead` |
+| Hatch fill | `<Class>_Hatches` | `IfcWall_Hatches` |
+| Per-material hatch | `<Class>_Hatches_<Material>` | `IfcWall_Hatches_Calcestruzzo` |
+| Material-layer boundaries | fixed | `IfcWall_LayersSubdivision` |
+| Geometry inside BLOCKs | `"0"` with BYBLOCK | inherits the INSERT's layer |
+
+Encoding both dimensions in the layer name (the old `IfcWall_Section` /
+`IfcWall_View` scheme) required the cartesian product of classes × roles in the
+template; every combination the template missed produced entities on an
+undeclared layer, drawn with CAD defaults — no error anywhere, just no style.
+Locked by `test_every_used_layer_is_declared`.
+
+Trade-off accepted: freezing a layer now switches off a **class**, not a role.
+"Every cut line" is a QSELECT by colour, or a filter on the IFC XDATA below.
 
 ### IFC identity as XDATA (appid `IFC_DXF`)
 
@@ -246,9 +285,9 @@ Future: wireframe fallback from projected 3D Body.
 
 **Slab occlusion:** before assigning a Bucket A element, check whether it is hidden under a floor slab. For each `IfcSlab` / `IfcCovering(FLOOR)` with `Z_top ≤ cut_z`: if the element's XY origin falls inside the slab footprint and `z_element < z_top`, the element is sent to Bucket C.
 
-**Section vs View (Bucket B):** a section-class element whose Z range straddles `cut_z` is *cut* → layer `<Class>_Section` (thick line + hatch). An element entirely below `cut_z` is *viewed* → layer `<Class>_View` (thin line, no hatch).
+**Section vs View (Bucket B):** a section-class element whose Z range straddles `cut_z` is *cut* → `section` role (thick line + hatch). An element entirely below `cut_z` is *viewed* → `view` role (thin line, no hatch). Both draw on the element's class layer.
 
-**Overhead fill (Bucket A):** windows/doors re-added after culling (see Element selection) are placed on layer `<Class>_Overhead` with dashed linetype, to indicate they are above the cut plane.
+**Overhead fill (Bucket A):** windows/doors re-added after culling (see Element selection) take the `overhead` role (dashed), to indicate they are above the cut plane.
 
 ---
 
@@ -279,7 +318,7 @@ Entities on layer `"0"`, `color=0` (BYBLOCK), `linetype="BYBLOCK"`, `lineweight=
 
 #### Bucket B output
 
-Closed `LWPOLYLINE` → `<Class>_Section` or `<Class>_View`. Solid `HATCH` → `<Class>_Hatches` (sectioned elements only).
+Closed `LWPOLYLINE` on `<Class>`, in the `section` or `view` role. Solid `HATCH` → `<Class>_Hatches` (sectioned elements only).
 
 #### Annotations (Bucket D)
 
@@ -389,44 +428,124 @@ Plan context, or FootPrint/Axis — the Model/Body/MODEL_VIEW fallback rows
 deliberately do *not* qualify, they match any 3D body): shared BLOCK/INSERT
 plan symbol, gated by the oracle (any output → INSERT the full block, CAD
 convention for partially visible symbols); (c) **priority 2 — output-driven,
-no class whitelist**: whatever HLR reports per element — section loops →
-`{Class}_Section` fused + hatched (walls, columns, but equally cut slabs,
+no class whitelist**: whatever HLR reports per element — section loops → the
+`section` role, fused + hatched (walls, columns, but equally cut slabs,
 beams, stairs, coverings, building-element parts, proxies), closed projection
-loops minus the section area → `{Class}_View` polygons, open segments →
-chained polylines on `_View` — correct partial occlusion for free; (d) **view
+loops minus the section area → `view` polygons, open segments → chained
+polylines, also `view` — correct partial occlusion for free; (d) **view
 profile** (styling only, `_VIEW_PROFILE`): in plan-family views the *viewed*
 closed loops of slabs/coverings/roofs become footprint LWPOLYLINE GROUPs
-(roadmap item 12); `_LINEWORK_ONLY_CLASSES` (terrain, spatial elements) are
-never hatched — their cut loops draw as unhatched outlines. The paper-frame →
+(roadmap item 12); elements outside the hatchable set (spatial elements,
+furnishing) are never hatched — their cut loops draw as unhatched outlines.
+The paper-frame →
 camera-metres affine is *computed* from the camera body's local extents
 (`camera.camera_body_local_extents`), not calibrated:
 `x_cam = x_svg/(1000·scale) + x_min_local`,
 `y_cam = y_max_local − y_svg/(1000·scale)`.
 
-**Hatch conventions (decided lug 2026):** section hatch is gated by the IFC
-schema's fabric-vs-contents taxonomy (`_is_hatchable`: `IfcBuildingElement` /
-IFC4X3 `IfcBuiltElement`, plus `IfcBuildingElementPart` explicitly so cut wall
-layers can hatch) — furniture, sanitary terminals, appliances, transport,
-terrain and spatial elements can never hatch, cut or not. On top of that the
-plan profile's `no_hatch` set (stairs, stair flights, ramps, ramp flights,
-railings) draws conventionally-unhatched fabric as linework in plans; future
-SECTION/ELEVATION profiles will hatch them normally.
+**Wall fusion grouping (ago 2026):** section polygons are fused per
+`(class, material, role, z_top)` and `material` is **None by default** — every
+touching wall fuses with every other wall, every slab with every slab, whatever
+they are made of, which is how a plan reads. `z_top` still separates viewed
+outlines so polygons from different storeys never weld together. The
+`fuse_by_material` option (UI: *Fuse by Material*) restores per-material groups,
+and then keys on the element's **whole material assignment**
+(`get_material_key`: the layer/profile *set*, a single material by name) — not
+its first material. Keying by the first material silently fused unrelated wall
+types that happened to start with the same lining: verified on a real model,
+WAL390-Divisorio Garage and WAL330-Muri esterni garage both start with
+'Controparete in cartongesso' and merged, while the same type mirrored would
+not have. Locked by `TestMaterialFusionKey`.
+
+**Spaces and zones never take part in the visibility pass (ago 2026):**
+`IfcSpace` / `IfcSpatialZone` are analytical volumes, not fabric. Written into
+the HLR scene they behave as opaque solids and hide everything they contain —
+verified on a real plan (2T-Fontane, drawing `0GBxUdA8nE5BbFy9k81SHQ`): eight
+zones hid **59 of 84 furniture and all 13 sanitary terminals**, and removing
+them from the pass took the elements with visible output from 255 to 333. They
+are therefore excluded from the serializer entirely (`_is_space_volume`),
+neither occluding nor occluded, and drawn straight from their authored
+footprint as a plain boundary polyline on a **no-plot** layer — mesh silhouette
+(`_projected_mesh_outline`) when the footprint cannot be read (BReps,
+`IfcPolygonalFaceSet`). `IfcSite` stays in the pass: its solid is real terrain.
+Bonsai's own `get_drawing_elements` drops `IfcSpace` but not `IfcSpatialZone`.
+
+**Hatch conventions (decided lug 2026, extended ago 2026):** section hatch is
+gated by the IFC schema's fabric-vs-contents taxonomy (`_is_hatchable`:
+`IfcBuildingElement` / IFC4X3 `IfcBuiltElement`) — furniture, sanitary
+terminals, appliances, transport and spatial elements can never hatch, cut or
+not. Three classes sit outside that branch and are listed explicitly, because
+here the drafting convention decides and not the schema:
+`IfcBuildingElementPart` (so cut wall layers hatch individually),
+`IfcGeographicElement` and `IfcSite` (a cut through terrain *is* hatched). On
+top of that the plan profile's `no_hatch` set (stairs, stair flights, ramps,
+ramp flights, railings) draws conventionally-unhatched fabric as linework in
+plans; future SECTION/ELEVATION profiles will hatch them normally.
+
+Caveat on terrain: the writer only emits **solid** fills
+(`set_solid_fill`), so a cut through the ground comes out as a flat tint in the
+hatch layer's colour, not a soil pattern. Pattern support is a separate change.
 
 **Linework cleaning (decided lug 2026 — conservative by policy):** polygonal
 HLR stays (segmented arcs accepted, incl. elevations); the quality issue is
-dense mesh tessellation. Three passes:
-1. **Crease mask** (`_build_keep_edge_masks` + `_filter_lines_by_mask`): a
-   second geometry pass classifies each mesh edge in 3D — kept if boundary,
-   crease (dihedral ≥ `crease_angle_deg`, same semantics as the approximate
-   pipeline's mesh handling) or view-dependent silhouette; HLR segments not
-   lying on a kept edge (1 mm tolerance) are smooth-tessellation noise and
-   dropped. Needed because the serializer has no dihedral filter (roadmap
-   item 15) and its 2D output carries no face adjacency. Verified: terrain
-   linework −50%, straight geometry (walls/slabs) untouched.
-2. Same-layer exact segment **dedup** (`seen_segments` in `_chain_lines`):
+dense mesh tessellation. Four passes:
+1. **Edge classification, serializer-side** (the only linework filter since ago 2026,
+   IfcOpenShell PR #8608 / issue #3668 — roadmap item 15): `_setup_serialiser`
+   sets the six `svg-*` keys on the geometry settings *before* constructing the
+   serializer (the constructor reads them), in Bonsai's own order. **The values
+   are per drawing, not ours to choose:** exactly like Bonsai's
+   `setup_serialiser`, `_edge_classification_settings` reads them from the
+   drawing's `EPset_Drawing` (`UseEdgeClassification`, `RenderCreases`,
+   `ValleyAngleMinDegrees`, `RenderSharp`, `RidgeAngleMinDegrees`,
+   `RenderFlush`) and falls back to Bonsai's property defaults (off, creases
+   and sharp on, valley 12°, ridge 45°, flush not emitted) when a key is
+   absent — so the same drawing exports to DXF and to SVG with identical
+   linework, and toggling the camera's *Use Edge Classification* moves both.
+   The serializer then classifies each projection edge **pre-HLR, on the solid
+   with real faces**, into `boundary`/`outline`/`sharp`/`crease`/`flush`, and
+   emits the classes the drawing asked for (`flush` omitted by default). The
+   pipeline draws that output as it comes: **whatever the serializer emits is
+   what the drawing wants**, so a drawing that turns `RenderFlush` on gets its
+   flush edges, tessellation included. The class is written on the individual `<path>` (not on the
+   `<g>`, so Bonsai's `merge_linework_and_add_metadata` cannot clobber it);
+   `_parse_hlr_svg` reads it per path — one `d` can hold several subpaths, all
+   inheriting their path's class — and carries it through `rec["lines"]` as
+   `(pts, edge_class)` down to the writer's `direct_entities["edge_class"]`.
+   Segments are chained per class, never across classes. Only the projection
+   linework is classified; cut-plane edges are unaffected.
+   *Next step (not done):* map edge class → lineweight (outline/boundary
+   thicker, sharp/crease thinner). That is a fourth axis on top of the three
+   drawing roles, so it needs its own decision about how the two combine —
+   today every edge class draws in the plain `view` role.
+   When classification is off — the drawing opts out, or the ifcopenshell build
+   predates #3668 and the `gs.set` calls raise — the HLR linework arrives
+   unclassified and unfiltered, and is drawn as such. The export log says which
+   of the two happened, with the per-class segment counts.
+   *Removed (ago 2026):* the Python-side **crease mask**
+   (`_build_keep_edge_masks` + `_filter_lines_by_mask`), a second multicore
+   geometry pass that rebuilt 3D face adjacency to drop smooth-tessellation
+   segments the serializer had no dihedral filter for. It was a workaround for
+   a missing upstream feature, and a second source of truth about the drawing's
+   linework next to the IFC — deleted outright rather than kept as a fallback:
+   filtering belongs to the serializer, configured by the drawing's own pset.
+2. **Buried-in-the-cut removal** (ago 2026): a wall crossing the cut plane
+   reports a section loop *and* a projection of the same prism, so both
+   describe one rectangle — the section is drawn fused and hatched, the
+   projection would double it unfused. Everything the hatched cut area covers
+   is dropped: an element's own duplicate first
+   (`_drop_lines_covered_by_section`), then, once every cut is known, whatever
+   sits under *another* element's cut — HLR segments (`from_hlr` only, so
+   authored symbols keep every stroke: a door leaf legitimately runs inside its
+   wall), viewed polygons, footprint outlines and footprint *hole* rings (a
+   hole punched by a cut is already outlined by that cut; a stairwell void
+   keeps its ring). The tolerance matches the writer's 0.5 mm fusion snap —
+   0.005 mm on paper at 1:100. On a real 1:100 plan: 932 pieces dropped,
+   `IfcWall` entities 260 → 144, `IfcColumn` 42 → 15, model space 844 → 673.
+   Locked by `test_view_linework_is_not_buried_under_a_hatched_cut`.
+3. Same-layer exact segment **dedup** (`seen_segments` in `_chain_lines`):
    HLR emits a shared edge once per element showing it (BricsCAD OVERKILL
    flagged those); cross-layer duplicates are kept deliberately.
-3. **Paper-scale culling/simplify** in `_chain_lines`: whole polylines
+4. **Paper-scale culling/simplify** in `_chain_lines`: whole polylines
    smaller than 0.15 mm on paper are culled; Douglas-Peucker removes vertices
    within 0.05 mm paper. Both below plot resolution, so no renderable
    geometry can be lost — when in doubt, keep everything.
@@ -499,7 +618,7 @@ ifc:guid="...">` gives a clean per-element HLR outline. Each `<path d="...">`
 may contain several `M`-delimited closed loops; each loop is built directly
 into a Shapely `Polygon` (HLR closes loops back to their start point, so no
 extra work is needed) and grouped into the same `wall_polys_by_key` structure
-Pipeline A uses, keyed by `(ifc_class, material, f"{ifc_class}_Section", None)`.
+Pipeline A uses, keyed by `(ifc_class, material, "section", None)`.
 `_write_dxf` then Shapely-unions (fuses adjacent/overlapping wall outlines at
 corners and T-junctions) and hatches them exactly like Pipeline A — no
 Accurate-specific fusion/hatch code was needed, only feeding HLR polygons
@@ -516,7 +635,7 @@ elements reuse Pipeline A's `_extract_wall_polygon_with_openings` Shapely
 profile projection directly (from the shared `core/geometry.py`) —
 for a simple vertical wall/column prism this gives the exact same silhouette a
 true top-down HLR projection would, so it's not a loss of accuracy for the
-common case. Grouped into `wall_polys_by_key` under `f"{ifc_class}_View"`,
+common case. Grouped into `wall_polys_by_key` under the `view` role,
 keyed additionally by `z_max` (rounded) like Pipeline A, so polygons from
 different floor levels never fuse together.
 
@@ -586,11 +705,17 @@ same `IfcTypeObject`.
 **Upstream:**
 13. PR ezdxf: native `SCALE`/`AcDbScale` entity type (group codes 300/140/141/290).
 14. PR Bonsai: fix door arc exported as `IfcEllipse` instead of `IfcCircle`.
-15. PR IfcOpenShell: expose a crease/dihedral angle on the SVG serializer
+15. ~~PR IfcOpenShell: expose a crease/dihedral angle on the SVG serializer
     (OCC's `HLRBRep_PolyAlgo` has the parameter internally; no setter in the
-    SWIG API — verified lug 2026). Would filter smooth-tessellation edges at
-    the source and let us drop `_build_keep_edge_masks` (the Python-side
-    second geometry pass in `accurate/pipeline.py`).
+    SWIG API — verified lug 2026)~~ — FATTO upstream (ago 2026) by IfcOpenShell
+    PR #8608 (issue #3668, Stephen Boddy), and better than asked: not a single
+    dihedral angle but a 5-class `boundary/outline/sharp/crease/flush` scheme
+    computed pre-HLR on real face topology, with `flush` dropped at the source.
+    Adopted as the only linework filter (see "Linework cleaning"), with the
+    settings read from the drawing's `EPset_Drawing` exactly as Bonsai does;
+    `_build_keep_edge_masks` and `_filter_lines_by_mask` were deleted, not kept
+    as a fallback. Still open: mapping the class to per-class lineweights,
+    which needs new fixed layers in the DXF template.
 
 **Upstream-merge principle — remaining reimplementations to convert to Bonsai
 reuse (guarded import, own code demoted to standalone shim), same pattern as

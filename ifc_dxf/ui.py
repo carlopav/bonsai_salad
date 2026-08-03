@@ -68,6 +68,7 @@ class IfcDxfOptionsPanel(bpy.types.Panel):
 
         layout.prop(props, "mesh_crease_angle")
         layout.prop(props, "export_material_layers")
+        layout.prop(props, "fuse_by_material")
 
 
 classes = [IfcDxfPanel, IfcDxfOptionsPanel]

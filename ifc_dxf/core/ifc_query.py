@@ -178,6 +178,30 @@ def get_material_name(element):
     return ""
 
 
+def get_material_key(element):
+    """Identity of an element's whole material assignment, for fusion grouping.
+
+    Not the first material name: a layered wall would then be keyed by whichever
+    finish its stack happens to start with, so two unrelated wall types fuse
+    when they share a plasterboard lining while the same type mirrored does not.
+    Layer/profile/constituent *sets* are keyed by the set itself, a single
+    material by its name.
+    """
+    try:
+        mat = ifcopenshell.util.element.get_material(element, should_inherit=True)
+    except Exception:
+        return ""
+    if mat is None:
+        return ""
+    for attr in ("ForLayerSet", "ForProfileSet"):
+        target = getattr(mat, attr, None)
+        if target is not None:
+            return f"set:{target.id()}"
+    if mat.is_a("IfcMaterial"):
+        return mat.Name or ""
+    return f"set:{mat.id()}"
+
+
 def _get_elements_via_bonsai(ifc, drawing):
     """Reuse Bonsai's own tool.Drawing.get_drawing_elements when running inside
     Blender with Bonsai loaded and `ifc` being the exact file Bonsai has open.

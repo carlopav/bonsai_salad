@@ -16,6 +16,8 @@ import os
 import sys
 import pytest
 import ifcopenshell
+import ifcopenshell.geom
+import ifcopenshell.guid
 import ezdxf
 
 # conftest.py at repo root registered bpy/ifc_dxf stubs before any package
@@ -31,6 +33,8 @@ from ifc_dxf.core.ifc_query import find_drawings
 # its real __init__.py, so the `export_drawing` alias defined there is absent.
 from ifc_dxf.core.approximate import export_drawing
 from ifc_dxf.core.accurate import export_drawing as export_drawing_accurate
+from ifc_dxf.core.accurate import pipeline as accurate_pipeline
+from ifc_dxf.core import layers
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +55,16 @@ def _output_path(ifc_name, drawing_name):
     safe = drawing_name.replace(" ", "_").replace("/", "-")
     stem = os.path.splitext(ifc_name)[0]
     return os.path.join(_OUT_DIR, f"{stem}__{safe}.dxf")
+
+
+def _build_has_edge_classification():
+    """True when this ifcopenshell build knows the #3668 SVG settings."""
+    settings = ifcopenshell.geom.settings()
+    try:
+        settings.set("svg-use-edge-classification", True)
+    except Exception:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +115,325 @@ def test_export_all_drawings_accurate(ifc_filename, tmp_path):
 # ---------------------------------------------------------------------------
 # Case-specific assertions
 # ---------------------------------------------------------------------------
+
+class TestEdgeClassification:
+    """SVG edge classification (IfcOpenShell PR #8608, issue #3668).
+
+    The serializer writes the class on each <path>, so the pure parsing side
+    and the crease-mask bypass are testable without a classifying build.
+    """
+
+    IFC = "test_ifc_01.ifc"
+
+    SVG = (
+        '<svg xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:ifc="http://www.ifcopenshell.org/ns">'
+        '<g class="projection IfcWall" ifc:guid="0aaa">'
+        '<path d="M0,0 L1000,0" class="sharp"/>'
+        '<path d="M0,0 L0,1000 M0,1000 L1000,1000" class="crease"/>'
+        '<path d="M2000,0 L3000,0"/>'
+        '</g></svg>'
+    )
+
+    def _drawing(self):
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        drawing, pset = find_drawings(ifc)[0]
+        return ifc, drawing, pset
+
+    def test_path_class_reaches_line_records(self):
+        """The class lives on the <path>, not the <g>, and applies to each of
+        its subpaths; an unclassified path yields None."""
+        out = accurate_pipeline._parse_hlr_svg(self.SVG, 0.0, 0.0, 1000.0)
+        lines = out["0aaa"]["lines"]
+        assert [cls for _pts, cls in lines] == ["sharp", "crease", "crease", None]
+        assert lines[0][0] == [(0.0, 0.0), (1.0, 0.0)]
+
+    def test_lines_group_by_class(self):
+        out = accurate_pipeline._parse_hlr_svg(self.SVG, 0.0, 0.0, 1000.0)
+        groups = accurate_pipeline._group_lines_by_class(out["0aaa"]["lines"])
+        assert sorted(groups, key=str) == [None, "crease", "sharp"]
+        assert len(groups["crease"]) == 2
+        assert accurate_pipeline._count_edge_classes(out) == {
+            "crease": 2, "sharp": 1, "unclassified": 1}
+
+    def test_settings_come_from_the_drawing_pset(self):
+        """Same source as Bonsai: EPset_Drawing, with its property defaults."""
+        assert accurate_pipeline._edge_classification_settings({}) == {
+            "svg-use-edge-classification": False,
+            "svg-render-crease-edges": True,
+            "svg-valley-angle-min-degrees": 12.0,
+            "svg-render-sharp-edges": True,
+            "svg-ridge-angle-min-degrees": 45.0,
+            "svg-emit-flush-edges": False,
+        }
+        values = accurate_pipeline._edge_classification_settings(
+            {"UseEdgeClassification": True, "RenderFlush": True,
+             "ValleyAngleMinDegrees": 20})
+        assert values["svg-use-edge-classification"] is True
+        assert values["svg-emit-flush-edges"] is True
+        assert values["svg-valley-angle-min-degrees"] == 20.0
+        assert values["svg-ridge-angle-min-degrees"] == 45.0  # untouched default
+
+    def test_setup_serialiser_reports_availability(self):
+        """With the drawing opted in, the flag mirrors what this ifcopenshell
+        build accepts; on older builds gs.set() raises and the pipeline falls
+        back to the crease mask."""
+        ifc, drawing, pset = self._drawing()
+        settings = accurate_pipeline._edge_classification_settings(
+            {"UseEdgeClassification": True})
+        _gs, _buf, _ser, flag = accurate_pipeline._setup_serialiser(
+            ifc, drawing, 0.01, pset.get("TargetView", "PLAN_VIEW"), settings)
+        assert flag is _build_has_edge_classification()
+
+    def test_setup_serialiser_opt_out(self):
+        """A drawing without UseEdgeClassification keeps the old linework."""
+        ifc, drawing, pset = self._drawing()
+        _gs, _buf, _ser, flag = accurate_pipeline._setup_serialiser(
+            ifc, drawing, 0.01, pset.get("TargetView", "PLAN_VIEW"),
+            accurate_pipeline._edge_classification_settings({}))
+        assert flag is False
+
+    def test_no_second_geometry_pass(self):
+        """The serializer owns the linework filtering; the pipeline must not
+        re-derive it from a second geometry pass (removed ago 2026)."""
+        assert not hasattr(accurate_pipeline, "_build_keep_edge_masks")
+        assert not hasattr(accurate_pipeline, "_filter_lines_by_mask")
+
+    @pytest.mark.parametrize("flush", [True, False])
+    def test_render_flush_is_the_drawings_call(self, flush, tmp_path):
+        """RenderFlush is honoured, not second-guessed: either way the export
+        goes through and draws whatever the serializer emitted."""
+        ifc, drawing, pset = self._drawing()
+        out = str(tmp_path / f"flush_{flush}.dxf")
+        accurate_pipeline.export_drawing(
+            ifc, drawing, dict(pset, RenderFlush=flush), out)
+        assert len(list(ezdxf.readfile(out).modelspace())) > 0
+
+
+class TestLayersAndRoles:
+    """Layer = IFC class, entity style = drawing role (core/layers.py)."""
+
+    IFC = "test_ifc_01.ifc"
+    _SUFFIXES = ("_Section", "_View", "_Overhead", "_Hatches")
+
+    def _export(self, tmp_path, accurate):
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / ("acc.dxf" if accurate else "app.dxf"))
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        if accurate:
+            export_drawing_accurate(ifc, drawing, pset, out, template_path=tpl)
+        else:
+            export_drawing(ifc, drawing, pset, out, wall_mode="shapely",
+                           template_path=tpl)
+        return ezdxf.readfile(out)
+
+    def test_template_declares_classes_only(self):
+        """The template carries one layer per IFC class -- no role suffixes."""
+        doc = ezdxf.readfile(_TEMPLATE_PATH)
+        names = [l.dxf.name for l in doc.layers]
+        assert not [n for n in names if n.endswith(self._SUFFIXES)]
+        assert "IfcWall" in names and "IfcSlab" in names
+        # Deprecated classes are left to runtime creation.
+        assert "IfcWallStandardCase" not in names
+
+    def test_apply_role_writes_the_style(self):
+        doc = ezdxf.new("R2010")
+        msp = doc.modelspace()
+        for role, (color, linetype, lineweight) in layers.ROLE_STYLES.items():
+            e = msp.add_line((0, 0), (1, 0))
+            layers.apply_role(e, role)
+            assert (e.dxf.color, e.dxf.linetype, e.dxf.lineweight) == (
+                color, linetype, lineweight), role
+
+    def test_ensure_layer_creates_but_never_restyles(self):
+        doc = ezdxf.new("R2010")
+        existing = doc.layers.add("IfcWall_Hatches")
+        existing.color = 42
+        layers.ensure_layer(doc, "IfcWall_Hatches", "hatch")
+        assert doc.layers.get("IfcWall_Hatches").color == 42, "restyled a declared layer"
+
+        layers.ensure_layer(doc, "IfcRoof_Hatches", "hatch")
+        created = doc.layers.get("IfcRoof_Hatches")
+        assert created.color == 254 and created.dxf.lineweight == 9
+
+        # A class the template leaves out (deprecated, or simply unforeseen).
+        layers.ensure_layer(doc, "IfcWallStandardCase")
+        assert doc.layers.get("IfcWallStandardCase").dxf.lineweight == 9
+
+    @pytest.mark.parametrize("accurate", [True, False])
+    def test_every_used_layer_is_declared(self, accurate, tmp_path):
+        """The regression this whole scheme exists for: an entity on a layer
+        the document never declares gets CAD defaults, silently."""
+        doc = self._export(tmp_path, accurate)
+        declared = {l.dxf.name for l in doc.layers}
+        used = {e.dxf.layer for e in doc.modelspace()}
+        for block in doc.blocks:
+            used |= {e.dxf.layer for e in block}
+        assert used - declared == set()
+
+    @pytest.mark.parametrize("accurate", [True, False])
+    def test_roles_reach_the_entities(self, accurate, tmp_path):
+        """Cut walls print thick, everything viewed thin -- on the class layer."""
+        doc = self._export(tmp_path, accurate)
+        walls = [e for e in doc.modelspace() if e.dxf.layer == "IfcWall"]
+        assert walls, "no wall geometry on the IfcWall layer"
+        section = layers.ROLE_STYLES["section"]
+        cut = [e for e in walls
+               if (e.dxf.color, e.dxf.linetype, e.dxf.lineweight) == section]
+        assert cut, "cut walls carry no section style"
+
+    def test_view_linework_is_not_buried_under_a_hatched_cut(self, tmp_path):
+        """A cut wall reports both its section loop and a projection of the
+        same prism; the section is drawn fused and hatched, so the duplicate
+        must not survive underneath it."""
+        import shapely, shapely.ops
+        doc = self._export(tmp_path, accurate=True)
+        section = layers.ROLE_STYLES["section"]
+        view = layers.ROLE_STYLES["view"]
+        cut_areas = []
+        for e in doc.modelspace():
+            if e.dxftype() != "LWPOLYLINE" or not e.closed:
+                continue
+            if (e.dxf.color, e.dxf.linetype, e.dxf.lineweight) != section:
+                continue
+            pts = [(p[0], p[1]) for p in e.get_points()]
+            if len(pts) >= 3:
+                poly = shapely.Polygon(pts)
+                cut_areas.append(poly if poly.is_valid else poly.buffer(0))
+        assert cut_areas, "no hatched cut in this drawing"
+        buried = shapely.ops.unary_union(cut_areas)
+        for e in doc.modelspace():
+            if e.dxftype() != "LWPOLYLINE":
+                continue
+            if (e.dxf.color, e.dxf.linetype, e.dxf.lineweight) != view:
+                continue
+            pts = [(p[0], p[1]) for p in e.get_points()]
+            if len(pts) > 1:
+                assert not buried.covers(shapely.LineString(pts)), (
+                    f"view linework buried under the cut on {e.dxf.layer}")
+
+    def test_blocks_are_bylayer(self, tmp_path):
+        """A BLOCK reads everything from its layer: the INSERT carries no
+        explicit colour/linetype/lineweight, its content stays BYBLOCK."""
+        doc = self._export(tmp_path, accurate=False)
+        inserts = [e for e in doc.modelspace() if e.dxftype() == "INSERT"]
+        assert inserts
+        for ins in inserts:
+            assert ins.dxf.color == 256, "INSERT carries an explicit colour"
+            assert ins.dxf.linetype == "BYLAYER"
+            assert ins.dxf.lineweight == -1  # BYLAYER
+        # Only the blocks we generate; the template ships its own (cartiglio,
+        # markers) and those keep whatever BricsCAD authored.
+        for name in {ins.dxf.name for ins in inserts}:
+            for e in doc.blocks.get(name):
+                if e.dxftype() in ("LINE", "ARC", "CIRCLE", "ELLIPSE", "LWPOLYLINE"):
+                    assert e.dxf.color == 0, f"block {name} content is not BYBLOCK"
+
+    def test_overhead_symbol_lives_on_its_own_layer(self, tmp_path):
+        """A window filling an opening above the cut plane draws dashed -- via
+        the layer, since its INSERT cannot be styled."""
+        doc = self._export(tmp_path, accurate=False)
+        color, linetype, lineweight = layers.ROLE_STYLES["overhead"]
+        overhead = [e for e in doc.modelspace()
+                    if e.dxf.layer.endswith("_Overhead")]
+        assert overhead, "no overhead entity found"
+        for e in overhead:
+            layer = doc.layers.get(e.dxf.layer)
+            assert (layer.color, layer.dxf.linetype, layer.dxf.lineweight) == (
+                color, linetype, lineweight)
+
+
+class TestMaterialFusionKey:
+    """Grouping walls for fusion by "material" must mean the whole assignment.
+
+    Real case (2T-Fontane): WAL390-Divisorio Garage and WAL330-Muri esterni
+    garage are different wall types with different layer stacks, but both start
+    with 'Controparete in cartongesso' — keyed by the first material they fused
+    into one outline, while walls of the same type mirrored would not.
+    """
+
+    def _layered_wall(self, ifc, first, second):
+        layers_ = [ifc.createIfcMaterialLayer(ifc.createIfcMaterial(name), t, None)
+                   for name, t in ((first, 0.02), (second, 0.2))]
+        layer_set = ifc.createIfcMaterialLayerSet(layers_, None)
+        usage = ifc.createIfcMaterialLayerSetUsage(layer_set, "AXIS2", "POSITIVE", 0.0)
+        wall = ifc.createIfcWall(ifcopenshell.guid.new(), None, "Wall")
+        ifc.createIfcRelAssociatesMaterial(
+            ifcopenshell.guid.new(), None, None, None, [wall], usage)
+        return wall
+
+    def test_same_first_layer_different_stack_does_not_fuse(self):
+        from ifc_dxf.core.ifc_query import get_material_key, get_material_name
+
+        ifc = ifcopenshell.file(schema="IFC4")
+        a = self._layered_wall(ifc, "Controparete in cartongesso", "Calcestruzzo armato")
+        b = self._layered_wall(ifc, "Controparete in cartongesso", "Laterizio")
+
+        assert get_material_name(a) == get_material_name(b), "premise: same first layer"
+        assert get_material_key(a) != get_material_key(b), (
+            "different layer stacks must not share a fusion group")
+
+    def test_single_material_keys_by_name(self):
+        from ifc_dxf.core.ifc_query import get_material_key
+
+        ifc = ifcopenshell.file(schema="IFC4")
+        wall = ifc.createIfcWall(ifcopenshell.guid.new(), None, "Wall")
+        ifc.createIfcRelAssociatesMaterial(
+            ifcopenshell.guid.new(), None, None, None, [wall],
+            ifc.createIfcMaterial("Calcestruzzo armato"))
+        assert get_material_key(wall) == "Calcestruzzo armato"
+
+
+class TestSpatialZones:
+    """test_ifc_02_spatial_zone.ifc — the same plan with an IfcSpatialZone
+    enclosing the room.
+
+    Zones take no part in the visibility pass: they are outlined from their
+    authored footprint on a no-plot layer, and never occlude. What these tests
+    lock is that handling. They do *not* reproduce the occlusion that motivated
+    it: written into the HLR scene, a real project's zones hid 59 of 84
+    furniture and all 13 sanitary terminals (2T-Fontane, drawing
+    0GBxUdA8nE5BbFy9k81SHQ), but this synthetic zone does not occlude, so the
+    trigger is some property of those zones that is not reproduced here.
+    """
+
+    IFC = "test_ifc_02_spatial_zone.ifc"
+
+    def _export(self, tmp_path):
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / "zone.dxf")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing_accurate(ifc, drawing, pset, out, template_path=tpl)
+        return ezdxf.readfile(out)
+
+    def test_zone_contents_are_drawn(self, tmp_path):
+        doc = self._export(tmp_path)
+        layers_used = {e.dxf.layer for e in doc.modelspace()}
+        assert "IfcFurniture" in layers_used, "the zone swallowed the furniture"
+        assert "IfcSanitaryTerminal" in layers_used
+
+    def test_zone_stays_out_of_the_hlr_pass(self, tmp_path):
+        """The guarantee that makes the occlusion impossible in the first
+        place: no zone is ever written to the serializer."""
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        drawing, pset = find_drawings(ifc)[0]
+        zones = [e for e in ifc.by_type("IfcSpatialZone")]
+        assert zones, "fixture carries no zone"
+        assert all(accurate_pipeline._is_space_volume(z) for z in zones)
+        out, _n, _t, _f = accurate_pipeline._run_hlr_scene(
+            ifc, drawing, zones, 0.01, "PLAN_VIEW",
+            accurate_pipeline._edge_classification_settings(pset))
+        assert not [z for z in zones if z.GlobalId in out]
+
+    def test_zone_is_outlined_on_a_noplot_layer(self, tmp_path):
+        doc = self._export(tmp_path)
+        outline = [e for e in doc.modelspace() if e.dxf.layer == "IfcSpatialZone"]
+        assert outline, "the zone has no boundary polyline"
+        assert all(e.dxftype() == "LWPOLYLINE" for e in outline)
+        assert doc.layers.get("IfcSpatialZone").dxf.plot == 0
+
 
 class TestCase01BasicPlan:
     """test_ifc_01.ifc — basic 1:100 plan: walls, door, window, slab, furniture."""

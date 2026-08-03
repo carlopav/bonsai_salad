@@ -29,7 +29,7 @@ from .camera import world_matrix_col_major
 def place_plan_symbol(element, layer, target_view, crease_angle_deg,
                        cam_R, cam_inv_np, cam_rot_deg,
                        block_defs, block_order, block_inserts, seen_blocks,
-                       direct_entities):
+                       direct_entities, role="view"):
     """Place one element via its native 2D plan representation.
 
     Elements whose geometry comes from the type share one BLOCK (built once)
@@ -75,7 +75,7 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
         pos, rot = _compute_insert(wm, cam_inv_np)
         # The tuple carries the *instance* GlobalId (-> INSERT XDATA); the
         # block definition's description holds the shared type's GlobalId.
-        block_inserts.setdefault(block_name, []).append((pos, rot, layer, gid))
+        block_inserts.setdefault(block_name, []).append((pos, rot, layer, gid, role))
         return True
 
     # Direct draw on the IfcClass layer: bake the INSERT transform into the
@@ -86,7 +86,7 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
         return False
     pos, rot = _compute_insert(wm, cam_inv_np)
     _append_direct(direct_entities, layer, pos, rot, geom,
-                   gid=gid, ifc_class=ifc_class)
+                   gid=gid, ifc_class=ifc_class, role=role)
     return True
 
 
@@ -125,7 +125,7 @@ def _extract_block_geom(element, plan_repr, crease_angle_deg, cam_R, cam_rot_deg
 
 
 def _append_direct(direct_entities, layer, pos, rot_deg, geom,
-                   gid=None, ifc_class=None):
+                   gid=None, ifc_class=None, role="view"):
     """Bake an INSERT transform (pos, rot_deg) into geom and record it directly.
 
     Reproduces exactly what a DXF INSERT would do to the block-local geometry,
@@ -154,6 +154,7 @@ def _append_direct(direct_entities, layer, pos, rot_deg, geom,
 
     direct_entities.append({
         "layer": layer,
+        "role": role,
         "gid": gid,
         "ifc_class": ifc_class,
         "polylines": polylines,

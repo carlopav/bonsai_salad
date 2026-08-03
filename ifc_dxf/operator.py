@@ -156,6 +156,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
                     ifc, drawing, pset, output_path,
                     template_path=template_path,
                     crease_angle_deg=props.mesh_crease_angle,
+                    fuse_by_material=props.fuse_by_material,
                 )
             else:
                 export_drawing_approximate(
@@ -164,6 +165,7 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
                     template_path=template_path,
                     crease_angle_deg=props.mesh_crease_angle,
                     export_material_layers=props.export_material_layers,
+                    fuse_by_material=props.fuse_by_material,
                 )
         except Exception as exc:
             self.report({"ERROR"}, f"DXF export failed: {exc}")
@@ -260,6 +262,16 @@ class IfcDxfProperties(bpy.types.PropertyGroup):
     export_material_layers: bpy.props.BoolProperty(
         name="Export Material Layers",
         description="Decompose layered walls into per-material-layer polygons",
+        default=False,
+    )
+    fuse_by_material: bpy.props.BoolProperty(
+        name="Fuse by Material",
+        description=(
+            "Fuse touching wall sections only when they share the same material "
+            "assignment (for a layered wall, the whole layer set — not just its "
+            "first layer). When off, touching fabric of the same class fuses into "
+            "one outline whatever it is made of"
+        ),
         default=False,
     )
 

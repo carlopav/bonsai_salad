@@ -19,7 +19,7 @@ from ..camera import (
 from ..ifc_query import (
     find_plan_repr,
     is_mapped_repr,
-    get_material_name,
+    get_material_key,
     get_elements,
     _get_drawing_annotations,
 )
@@ -46,7 +46,8 @@ from ..plan_symbols import place_plan_symbol
 ElementRecord = namedtuple("ElementRecord", [
     "element",    # IFC element
     "bucket",     # "A", "B", "C"
-    "layer",      # DXF layer: "IfcWindow", "IfcWindow_Overhead", "IfcWall_Section", ...
+    "layer",      # DXF layer = the IFC class ("IfcWindow", "IfcWall", ...)
+    "role",       # drawing role: "section" | "view" | "overhead" (core/layers.py)
     "plan_repr",  # IfcShapeRepresentation (Bucket A only, else None)
     "from_type",  # bool: repr inherited from type -> shared block name
 ])
@@ -58,14 +59,16 @@ ElementRecord = namedtuple("ElementRecord", [
 
 def classify_elements(elements, cut_z, col_major, cam_dir, target_view,
                       floor_slabs, section_classes):
-    """Classify every element into a bucket and assign its DXF layer.
+    """Classify every element into a bucket, its DXF layer and drawing role.
 
     All classification rules live here; no geometry is extracted.
     Returns list[ElementRecord] in processing order (B first, then A/C).
 
     Buckets:
-      B -- section classes (walls, ...): layer = IfcWall_Section / _View
-      A -- 2D native repr found: layer = IfcWindow / IfcWindow_Overhead / ...
+      B -- section classes (walls, ...): role = section (crossing the cut
+           plane) or view (entirely below it)
+      A -- 2D native repr found: role = view, or overhead when the element
+           fills an opening above the cut plane
       C -- no usable repr or occluded: skipped
     """
     records = []
@@ -79,7 +82,7 @@ def classify_elements(elements, cut_z, col_major, cam_dir, target_view,
         wm = world_matrix_col_major(elem)
         z_min, z_max = _wall_z_range(elem, wm)
         is_cut = z_min is None or (z_min <= cut_z <= z_max)
-        layer = f"{cls}_Section" if is_cut else f"{cls}_View"
+        role = "section" if is_cut else "view"
 
         # Openings entirely above cut_z -> filling element is overhead
         for rel in getattr(elem, 'HasOpenings', []):
@@ -96,7 +99,7 @@ def classify_elements(elements, cut_z, col_major, cam_dir, target_view,
                     if filling is not None:
                         overhead_ids.add(filling.id())
 
-        records.append(ElementRecord(elem, "B", layer, None, False))
+        records.append(ElementRecord(elem, "B", cls, role, None, False))
 
     # Pass 2: everything else -> Bucket A or C
     for elem in elements:
@@ -109,16 +112,16 @@ def classify_elements(elements, cut_z, col_major, cam_dir, target_view,
         if floor_slabs:
             x_w, y_w, z_w = float(wm[12]), float(wm[13]), float(wm[14])
             if _is_occluded_by_slab(x_w, y_w, z_w, floor_slabs):
-                records.append(ElementRecord(elem, "C", cls, None, False))
+                records.append(ElementRecord(elem, "C", cls, "view", None, False))
                 continue
 
         plan_repr, from_type = find_plan_repr(elem, target_view)
         if plan_repr is not None:
-            # Rule: overhead fill -> _Overhead layer (dashed)
-            layer = f"{cls}_Overhead" if elem.id() in overhead_ids else cls
-            records.append(ElementRecord(elem, "A", layer, plan_repr, from_type))
+            # Rule: a filling above the cut plane draws dashed (overhead role)
+            role = "overhead" if elem.id() in overhead_ids else "view"
+            records.append(ElementRecord(elem, "A", cls, role, plan_repr, from_type))
         else:
-            records.append(ElementRecord(elem, "C", cls, None, False))
+            records.append(ElementRecord(elem, "C", cls, "view", None, False))
 
     return records
 
@@ -132,7 +135,7 @@ WALL_MODES = ("flat", "shapely")
 
 def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                    template_path=None, crease_angle_deg=15.0,
-                   export_material_layers=False):
+                   export_material_layers=False, fuse_by_material=False):
     """Export a single Bonsai drawing to DXF using the approximate pipeline.
 
     Parameters
@@ -143,6 +146,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     output_path:   destination .dxf file path
     wall_mode:     "shapely" (polygon+hatch) or "flat" (line entities)
     template_path: path to DXF template (None -> use script-dir template or minimal)
+    fuse_by_material: keep touching walls of different materials as separate
+                   outlines (off by default: touching fabric reads as one solid)
     """
     if wall_mode == "shapely" and not SHAPELY_AVAILABLE:
         print("  (shapely not available -> falling back to flat wall mode)")
@@ -187,8 +192,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         print(f"  Floor slabs: {len(floor_slabs)} footprints for slab occlusion")
 
     # Re-add fill elements above the frustum: openings entirely above cut_z are
-    # overhead -> their fillings (windows/doors) need to appear on _Overhead layers
-    # but are excluded by frustum Z culling (frustum Z_max == cut_z).
+    # overhead -> their fillings (windows/doors) must be drawn dashed, but are
+    # excluded by frustum Z culling (frustum Z_max == cut_z).
     element_ids = {e.id() for e in elements}
     overhead_extras = set()
     for elem in elements:
@@ -215,7 +220,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     block_order   = []
     block_inserts = {}   # name -> [(pos_2d, rot_deg, layer, gid), ...]
     flat_edges    = []   # [(p0, p1, layer)] -- wall_mode='flat' only
-    wall_polys_by_key = {}  # (ifc_class, material, layer, z_top) -> [(Polygon, gid), ...]
+    wall_polys_by_key = {}  # (ifc_class, material, role, z_top) -> [(Polygon, gid), ...]
     footprint_polys = []  # [(gid, ifc_class, layer, exterior_pts, [hole_pts])] -- LWPOLYLINE+GROUP
     wall_layer_polys_by_key = {}  # (ifc_class, mat_name, layer, z_top) -> [Polygon]
     wall_subdivision_lines = []  # [LineString, ...]
@@ -230,7 +235,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     records = classify_elements(elements, cut_z, col_major, cam_dir, target_view,
                                 floor_slabs, _SECTION_CLASSES)
 
-    n_overhead = sum(1 for r in records if r.bucket == "A" and r.layer.endswith("_Overhead"))
+    n_overhead = sum(1 for r in records if r.bucket == "A" and r.role == "overhead")
     if n_overhead:
         print(f"  Overhead   : {n_overhead} elements fill openings above cut plane")
 
@@ -238,7 +243,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     for rec in (r for r in records if r.bucket == "B"):
         element   = rec.element
         ifc_class = element.is_a()
-        material  = get_material_name(element)
+        fuse_material = get_material_key(element) if fuse_by_material else None
         wm        = world_matrix_col_major(element)
         processed = False
 
@@ -248,21 +253,21 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                     element, wm, col_major, cut_z, cam_dir
                 )
                 if poly is not None:
-                    if rec.layer.endswith("_View"):
+                    if rec.role == "view":
                         _, z_max = _wall_z_range(element, wm)
                         z_top_key = round(z_max, 3) if z_max is not None else None
                     else:
                         z_top_key = None
-                    key = (ifc_class, material, rec.layer, z_top_key)
+                    key = (ifc_class, fuse_material, rec.role, z_top_key)
                     wall_polys_by_key.setdefault(key, []).append(
                         (poly, element.GlobalId))
-                    if export_material_layers and rec.layer.endswith("_Section"):
+                    if export_material_layers and rec.role == "section":
                         layer_polys = _decompose_wall_to_layer_polygons(
                             poly, element, wm, col_major
                         )
                         if layer_polys:
                             for mat_name, lp in layer_polys:
-                                lkey = (ifc_class, mat_name, rec.layer, z_top_key)
+                                lkey = (ifc_class, mat_name, rec.role, z_top_key)
                                 wall_layer_polys_by_key.setdefault(lkey, []).append(lp)
                         subdivision_lines = _wall_layer_subdivision_lines(
                             poly, element, wm, col_major
@@ -289,7 +294,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                             p0 = (float(pd[i, 0]), float(pd[i, 1]))
                             p1 = (float(pd[j, 0]), float(pd[j, 1]))
                             if (p0[0]-p1[0])**2 + (p0[1]-p1[1])**2 > 1e-18:
-                                flat_edges.append((p0, p1, rec.layer))
+                                flat_edges.append((p0, p1, rec.layer, rec.role))
                         bucket_b += 1
                         bucket_b_classes[ifc_class] = bucket_b_classes.get(ifc_class, 0) + 1
                         processed = True
@@ -344,7 +349,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                     element, rec.layer, target_view, crease_angle_deg,
                     _cam_R, _cam_inv_np, _cam_rot_deg,
                     block_defs, block_order, block_inserts, seen_blocks,
-                    direct_entities,
+                    direct_entities, role=rec.role,
                 )
                 if placed:
                     bucket_a += 1
@@ -372,8 +377,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
     if wall_mode == "shapely" and wall_polys_by_key:
         n_polys = sum(len(v) for v in wall_polys_by_key.values())
-        n_sec   = sum(len(v) for (_, _, lyr, _), v in wall_polys_by_key.items()
-                      if lyr.endswith("_Section"))
+        n_sec   = sum(len(v) for (_, _, role, _), v in wall_polys_by_key.items()
+                      if role == "section")
         print(f"  Wall polys : {n_polys} total ({n_sec} section, {n_polys-n_sec} view)"
               f"  in {len(wall_polys_by_key)} groups")
 

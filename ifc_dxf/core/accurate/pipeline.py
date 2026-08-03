@@ -40,16 +40,18 @@ Routing is **data- and output-driven, no class whitelist** (v3):
   qualify — they match any 3D body (walls included), and HLR output is the
   occlusion-correct replacement for that old crease-edge fallback.
 - **priority 2 — output-driven section/view**: whatever HLR says, per element:
-  section loops -> ``{Class}_Section`` polygons (fused + hatched by the shared
-  writer — walls, columns, but equally cut slabs, beams, stairs, building
-  element parts, proxies); closed ``projection`` loops minus the section area
-  -> ``_View`` polygons; open segments -> chained polylines on the ``_View``
-  layer (HLR already clipped their hidden parts: correct *partial* occlusion).
+  section loops -> polygons in the ``section`` role (fused + hatched by the
+  shared writer — walls, columns, but equally cut slabs, beams, stairs,
+  building element parts, proxies); closed ``projection`` loops minus the
+  section area -> ``view`` polygons; open segments -> chained polylines, also
+  ``view`` (HLR already clipped their hidden parts: correct *partial*
+  occlusion). Everything lands on the element's class layer; the role is
+  written as an explicit entity style (see ``core/layers.py``).
 - **view profile** (`_VIEW_PROFILE`, styling only): in plan-family views the
   *viewed* closed loops of slabs/coverings/roofs become footprint LWPOLYLINE
-  GROUPs on the class layer instead of ``_View`` polygons.
-  `_LINEWORK_ONLY_CLASSES` (terrain, spatial elements) are never hatched —
-  their cut loops draw as unhatched ``_View`` outlines.
+  GROUPs instead of ``view`` polygons. Non-fabric elements (``_is_hatchable``:
+  spatial elements, furnishing…) are never hatched — their cut loops draw as
+  unhatched outlines in the ``view`` role.
 
 SVG coordinates with this configuration are paper-frame (mm at drawing scale,
 y down, origin at the camera box top-left), not camera metres. They are mapped
@@ -67,7 +69,6 @@ implemented, HLR cannot see them).
 
 import os
 import re
-import math
 import time
 import multiprocessing
 import xml.etree.ElementTree as ET
@@ -90,7 +91,7 @@ from ..camera import (
 )
 from ..ifc_query import (
     get_elements,
-    get_material_name,
+    get_material_key,
     find_plan_repr,
     _get_drawing_annotations,
 )
@@ -135,16 +136,111 @@ _VIEW_PROFILE = {
 # Universal hatch gate, driven by the IFC schema's own fabric-vs-contents
 # taxonomy: only building fabric ever receives a section hatch. IfcFurniture
 # (IfcFurnishingElement branch), IfcSanitaryTerminal (IfcDistributionElement
-# branch), appliances, transport, terrain and spatial elements all fail the
-# test automatically -- cut through or not, they draw as outlines.
-# IfcBuiltElement is the IFC4X3 rename of IfcBuildingElement;
-# IfcBuildingElementPart (an element component, not a building element) is
-# included explicitly so cut wall layers can hatch individually.
+# branch), appliances, transport and spatial elements all fail the test
+# automatically -- cut through or not, they draw as outlines.
+# IfcBuiltElement is the IFC4X3 rename of IfcBuildingElement. The last three
+# sit outside that branch and are listed because the drafting convention, not
+# the schema, decides: IfcBuildingElementPart so cut wall layers hatch
+# individually, ground and site because a cut through terrain is hatched.
 _HATCHABLE_CLASSES = (
     "IfcBuildingElement",
     "IfcBuiltElement",
     "IfcBuildingElementPart",
+    "IfcGeographicElement",
+    "IfcSite",
 )
+
+
+# Room volumes are analytical space, not fabric. Written into the HLR scene
+# they behave as opaque solids and hide everything they contain -- verified on
+# a real plan (2T-Fontane, drawing 0GBxUdA8nE5BbFy9k81SHQ): 8 IfcSpatialZone
+# hid 59 of 84 furniture and all 13 sanitary terminals. So they take no part in
+# the visibility pass at all, neither occluding nor occluded: they are drawn
+# straight from their authored footprint as a plain boundary polyline, on a
+# no-plot layer. IfcSite stays in the pass -- its solid is real terrain.
+# (Bonsai's get_drawing_elements drops IfcSpace but not IfcSpatialZone.)
+_SPACE_VOLUME_CLASSES = ("IfcSpace", "IfcSpatialZone")
+
+
+def _is_space_volume(element):
+    for name in _SPACE_VOLUME_CLASSES:
+        try:
+            if element.is_a(name):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _projected_mesh_outline(element, cam_inv_np):
+    """Camera-space outline of an element's whole body, from its mesh.
+
+    Fallback for bodies whose authored footprint cannot be read (BReps,
+    IfcPolygonalFaceSet, unsupported profiles): project every triangle and take
+    their union, which is the silhouette for a prismatic volume.
+    """
+    try:
+        s = ifcopenshell.geom.settings()
+        s.set("use-world-coords", True)
+        shape = ifcopenshell.geom.create_shape(s, element)
+        verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
+        faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
+    except Exception:
+        return None
+    if not len(verts) or not len(faces):
+        return None
+    pts = (cam_inv_np @ np.hstack([verts, np.ones((len(verts), 1))]).T).T[:, :2]
+    tris = []
+    for a, b, c in faces:
+        tri = shapely.Polygon([tuple(pts[a]), tuple(pts[b]), tuple(pts[c])])
+        if tri.is_valid and tri.area > 1e-9:
+            tris.append(tri)
+    if not tris:
+        return None
+    try:
+        merged = shapely.unary_union(tris)
+    except Exception:
+        return None
+    return None if merged.is_empty else merged
+
+
+def _space_boundary_entries(elements, cam_inv_np):
+    """Each space/zone as a closed boundary polyline in camera space.
+
+    Authored footprint first (exact); mesh silhouette when that fails.
+    Returns footprint_polys entries: [(gid, ifc_class, layer, exterior, holes)].
+    """
+    entries = []
+    for element in elements:
+        wm = world_matrix_col_major(element)
+        z_elem = float(wm[14])
+        try:
+            fp_world = _slab_footprint_world(element, wm)
+        except Exception:
+            fp_world = None
+
+        if fp_world is not None and not fp_world.is_empty:
+            def _proj(ring):
+                return [(float(c[0]), float(c[1])) for c in
+                        (cam_inv_np @ np.array([wx, wy, z_elem, 1.0])
+                         for wx, wy in ring.coords[:-1])]
+            polys = [(_proj(fp_world.exterior),
+                      [_proj(r) for r in fp_world.interiors])]
+        else:
+            merged = _projected_mesh_outline(element, cam_inv_np)
+            if merged is None:
+                continue
+            geoms = (merged.geoms if hasattr(merged, "geoms") else [merged])
+            polys = [([(float(x), float(y)) for x, y in g.exterior.coords[:-1]],
+                      [[(float(x), float(y)) for x, y in r.coords[:-1]]
+                       for r in g.interiors])
+                     for g in geoms if isinstance(g, shapely.Polygon)]
+
+        for exterior, holes in polys:
+            if len(exterior) >= 3:
+                entries.append((element.GlobalId, element.is_a(),
+                                element.is_a(), exterior, holes))
+    return entries
 
 
 def _is_hatchable(element):
@@ -210,14 +306,66 @@ def _parse_svg_path_subpaths(d):
     return subpaths
 
 
-def _setup_serialiser(ifc, drawing, scale_factor_val, target_view):
+# SVG edge classification (IfcOpenShell PR #8608, issue #3668): the serializer
+# classifies projection edges pre-HLR from real face topology and writes the
+# class on each <path> (not on the <g>, so Bonsai's linework merge can't clobber
+# it). Which classes reach the output is the serializer's call, driven by the
+# drawing's settings — we never re-filter its linework.
+_EDGE_CLASSES = frozenset({"boundary", "outline", "sharp", "crease", "flush"})
+
+# The six settings are per-drawing in Bonsai: stored in EPset_Drawing, read into
+# the camera props by tool.Drawing.import_camera_props, applied in
+# setup_serialiser. We read the same pset so a drawing exports to DXF and to SVG
+# with identical linework. Defaults mirror Bonsai's property defaults, used
+# whenever a key is absent from the pset.
+_EDGE_SETTINGS = (
+    # (serializer setting, EPset_Drawing property, Bonsai default)
+    ("svg-use-edge-classification", "UseEdgeClassification", False),
+    ("svg-render-crease-edges", "RenderCreases", True),
+    ("svg-valley-angle-min-degrees", "ValleyAngleMinDegrees", 12.0),
+    ("svg-render-sharp-edges", "RenderSharp", True),
+    ("svg-ridge-angle-min-degrees", "RidgeAngleMinDegrees", 45.0),
+    ("svg-emit-flush-edges", "RenderFlush", False),
+)
+
+
+def _edge_classification_settings(pset):
+    """The six #3668 serializer settings for a drawing, read from its
+    EPset_Drawing with Bonsai's property defaults as fallback."""
+    values = {}
+    for key, prop, default in _EDGE_SETTINGS:
+        raw = (pset or {}).get(prop)
+        if raw is None:
+            values[key] = default
+        elif isinstance(default, bool):
+            values[key] = bool(raw)
+        else:
+            values[key] = float(raw)
+    return values
+
+
+def _setup_serialiser(ifc, drawing, scale_factor_val, target_view,
+                      edge_settings=None):
     """Build the native SVG/HLR serializer configured exactly like Bonsai's
     setup_serialiser (bonsai/bim/module/drawing/operator.py) — same settings,
     same order, so DXF and SVG exports run the identical engine configuration.
+
+    Returns (gs, buf, serialiser, edge_classification); the flag is False when
+    the drawing opts out or the ifcopenshell build predates the #3668 settings,
+    in which case the HLR linework arrives unclassified and unfiltered.
     """
+    if edge_settings is None:
+        edge_settings = _edge_classification_settings(None)
     gs = ifcopenshell.geom.settings()
     gs.set("dimensionality", ifcopenshell.ifcopenshell_wrapper.CURVES_SURFACES_AND_SOLIDS)
     gs.set("iterator-output", ifcopenshell.ifcopenshell_wrapper.NATIVE)
+    # Read by the serializer's constructor, so it must be set on gs first.
+    edge_classification = bool(edge_settings["svg-use-edge-classification"])
+    try:
+        for key, _prop, _default in _EDGE_SETTINGS:
+            gs.set(key, edge_settings[key])
+    except Exception:
+        edge_classification = False  # ifcopenshell build without #3668
     buf = ifcopenshell.geom.serializers.buffer()
     ss  = ifcopenshell.geom.serializer_settings()
     serialiser = ifcopenshell.geom.serializers.svg(buf, gs, ss)
@@ -243,23 +391,133 @@ def _setup_serialiser(ifc, drawing, scale_factor_val, target_view):
     if target_view == "REFLECTED_PLAN_VIEW":
         serialiser.setMirrorY(True)
     serialiser.setFile(ifc)
-    return gs, buf, serialiser
+    return gs, buf, serialiser, edge_classification
 
 
-def _run_hlr_scene(ifc, drawing, elements, scale_factor_val, target_view):
+# Closed-loop test in svg units (paper mm): serializer loops repeat their first
+# point exactly, so a tight tolerance is safe.
+_CLOSE_TOL = 1e-6
+
+
+def _parse_hlr_svg(svg_text, x_min_l, y_max_l, factor):
+    """Parse the serializer's SVG into per-guid camera-space records.
+
+    Returns {guid: {"section": [Polygon], "projection": [Polygon],
+    "lines": [(pts, edge_class)]}}. `edge_class` is the #3668 class carried by
+    the individual <path> (None when the build/setting emits none); a single
+    'd' may hold several subpaths, all sharing their path's class.
+    """
+    out = {}
+    root = ET.fromstring(svg_text)
+    for g in root.iter(f"{_SVG_NS}g"):
+        guid = g.get(f"{_IFC_NS}guid")
+        if guid is None:
+            continue  # storey/section wrapper groups carry no product guid
+        classes = (g.get("class") or "").split()
+        kind = "projection" if "projection" in classes else "section"
+        for path in g.findall(f"{_SVG_NS}path"):
+            d = path.get("d")
+            if not d:
+                continue
+            edge_class = next((c for c in (path.get("class") or "").split()
+                               if c in _EDGE_CLASSES), None)
+            for sub in _parse_svg_path_subpaths(d):
+                is_closed = (len(sub) >= 4
+                             and abs(sub[0][0] - sub[-1][0]) <= _CLOSE_TOL
+                             and abs(sub[0][1] - sub[-1][1]) <= _CLOSE_TOL)
+                pts = [(x / factor + x_min_l, y_max_l - y / factor)
+                       for x, y in sub]
+                rec = out.setdefault(
+                    guid, {"section": [], "projection": [], "lines": []})
+                if not is_closed:
+                    # Open visible-edge linework (setSegmentProjection splits
+                    # viewed geometry into segments; wireframe output too).
+                    rec["lines"].append((pts, edge_class))
+                    continue
+                try:
+                    poly = shapely.Polygon(pts)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if poly.is_empty:
+                        continue
+                except Exception:
+                    continue
+                polys = ([poly] if isinstance(poly, shapely.Polygon)
+                         else [p for p in getattr(poly, "geoms", [])
+                               if isinstance(p, shapely.Polygon)])
+                rec[kind].extend(polys)
+    return out
+
+
+def _count_edge_classes(hlr_out):
+    """Per-class counts of the open linework received (log / validation aid)."""
+    counts = {}
+    for rec in hlr_out.values():
+        for _pts, cls in rec["lines"]:
+            key = cls or "unclassified"
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+# Matches the writer's SNAP_TOL: section groups are fused with a 0.5 mm miter
+# snap, so what the hatch finally covers is the raw union grown by that much.
+# 0.5 mm in model metres is 0.005 mm on paper at 1:100 -- nothing drawable is
+# at risk.
+_SECTION_COVER_TOL = 5e-4
+
+
+def _drop_lines_covered_by_section(lines, section_polys):
+    """Drop the open segments that merely retrace the element's own cut.
+
+    A wall crossing the cut plane reports its section loop *and* a projection
+    of the same prism, so the two describe one rectangle: the section outline
+    is drawn fused and hatched, the segments would double it unfused. Segments
+    outside the cut area (a wall step or footing visible below it) stay.
+    """
+    if not lines or not section_polys:
+        return lines, 0
+    try:
+        area = shapely.unary_union(section_polys).buffer(_SECTION_COVER_TOL)
+    except Exception:
+        return lines, 0
+    kept = []
+    for pts, cls in lines:
+        try:
+            if area.covers(shapely.LineString(pts)):
+                continue
+        except Exception:
+            pass
+        kept.append((pts, cls))
+    return kept, len(lines) - len(kept)
+
+
+def _group_lines_by_class(lines):
+    """Split [(pts, edge_class)] into {edge_class: [pts]} — chaining must not
+    merge segments of different classes into one polyline."""
+    groups = {}
+    for pts, cls in lines:
+        groups.setdefault(cls, []).append(pts)
+    return groups
+
+
+def _run_hlr_scene(ifc, drawing, elements, scale_factor_val, target_view,
+                   edge_settings=None):
     """Write the whole element set + the camera element into one serializer
     run and parse the per-guid output.
 
-    Returns (out, n_written, t_hlr) where out maps element GlobalId ->
-    {"section": [Polygon], "projection": [Polygon]} in camera-space metres.
-    An element absent from `out` produced no visible output: it is fully
-    hidden by the global HLR pass (or has no geometry) and must not be drawn.
+    Returns (out, n_written, t_hlr, edge_classification), out as documented on
+    _parse_hlr_svg. An element absent from `out` produced no visible output: it
+    is fully hidden by the global HLR pass (or has no geometry) and must not be
+    drawn.
+
+    Space volumes never enter the pass -- see _is_space_volume.
     """
-    gs, buf, serialiser = _setup_serialiser(ifc, drawing, scale_factor_val, target_view)
+    gs, buf, serialiser, edge_classification = _setup_serialiser(
+        ifc, drawing, scale_factor_val, target_view, edge_settings)
 
     t0 = time.perf_counter()
     n_written = 0
-    include = list(elements) + [drawing]
+    include = [e for e in elements if not _is_space_volume(e)] + [drawing]
     it = ifcopenshell.geom.iterator(gs, ifc, multiprocessing.cpu_count(), include=include)
     if it.initialize():
         while True:
@@ -280,176 +538,8 @@ def _run_hlr_scene(ifc, drawing, elements, scale_factor_val, target_view):
     x_min_l, _x_max_l, _y_min_l, y_max_l = ext
     factor = 1000.0 * scale_factor_val  # svg units (paper mm) per metre
 
-    # Closed-loop test in svg units (paper mm): serializer loops repeat their
-    # first point exactly, so a tight tolerance is safe.
-    _CLOSE_TOL = 1e-6
-
-    out = {}
-    root = ET.fromstring(svg_text)
-    for g in root.iter(f"{_SVG_NS}g"):
-        guid = g.get(f"{_IFC_NS}guid")
-        if guid is None:
-            continue  # storey/section wrapper groups carry no product guid
-        classes = (g.get("class") or "").split()
-        kind = "projection" if "projection" in classes else "section"
-        for path in g.findall(f"{_SVG_NS}path"):
-            d = path.get("d")
-            if not d:
-                continue
-            for sub in _parse_svg_path_subpaths(d):
-                is_closed = (len(sub) >= 4
-                             and abs(sub[0][0] - sub[-1][0]) <= _CLOSE_TOL
-                             and abs(sub[0][1] - sub[-1][1]) <= _CLOSE_TOL)
-                pts = [(x / factor + x_min_l, y_max_l - y / factor)
-                       for x, y in sub]
-                rec = out.setdefault(
-                    guid, {"section": [], "projection": [], "lines": []})
-                if not is_closed:
-                    # Open visible-edge linework (setSegmentProjection splits
-                    # viewed geometry into segments; wireframe output too).
-                    rec["lines"].append(pts)
-                    continue
-                try:
-                    poly = shapely.Polygon(pts)
-                    if not poly.is_valid:
-                        poly = poly.buffer(0)
-                    if poly.is_empty:
-                        continue
-                except Exception:
-                    continue
-                polys = ([poly] if isinstance(poly, shapely.Polygon)
-                         else [p for p in getattr(poly, "geoms", [])
-                               if isinstance(p, shapely.Polygon)])
-                rec[kind].extend(polys)
-    return out, n_written, t_hlr
-
-
-def _build_keep_edge_masks(ifc, elements, cam_inv_np, cam_dir, crease_angle_deg):
-    """Per-element 2D masks of the mesh edges worth drawing, for filtering HLR
-    segment output below the crease threshold.
-
-    The serializer exposes no dihedral filter (its polygonal HLR emits every
-    tessellation edge it deems visible), and the 2D output carries no face
-    adjacency -- so the crease decision must be made here, in 3D, from a
-    second geometry pass (one multicore iterator over only the elements that
-    produced open segments). Per element, an edge is KEPT when it is:
-
-    - a boundary edge (adjacent to != 2 faces, incl. non-manifold),
-    - a crease edge (dihedral angle >= crease_angle_deg -- same semantics as
-      the approximate pipeline's mesh handling), or
-    - a view-dependent silhouette (the adjacent faces change facing w.r.t.
-      the camera direction; not a 3D crease but an essential outline).
-
-    Everything else is smooth-surface tessellation noise. Kept edges are
-    projected to camera 2D and returned as {guid: (STRtree, [LineString])}.
-    A guid absent from the result means "keep all its lines" -- either the
-    mesh had nothing to filter (fast path) or geometry failed (conservative).
-    """
-    masks = {}
-    if not elements:
-        return masks
-    cd = np.array(cam_dir, dtype=float)
-    cos_crease = math.cos(math.radians(crease_angle_deg))
-    try:
-        s = ifcopenshell.geom.settings()
-        s.set('use-world-coords', True)
-        s.set('weld-vertices', True)
-        it = ifcopenshell.geom.iterator(
-            s, ifc, multiprocessing.cpu_count(), include=list(elements))
-        if not it.initialize():
-            return masks
-    except Exception:
-        return masks
-
-    while True:
-        try:
-            shape = it.get()
-            guid = shape.guid
-            v = np.array(shape.geometry.verts).reshape(-1, 3)
-            f = np.array(shape.geometry.faces).reshape(-1, 3)
-            if len(v) and len(f):
-                p0, p1, p2 = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
-                n = np.cross(p1 - p0, p2 - p0)
-                ln = np.linalg.norm(n, axis=1)
-                ln[ln < 1e-12] = 1.0
-                n = n / ln[:, None]
-                facing = n @ cd
-
-                # Coordinate-keyed adjacency: robust whether or not the mesher
-                # welded coincident vertices into shared indices.
-                def vk(i):
-                    return (round(float(v[i, 0]), 5), round(float(v[i, 1]), 5),
-                            round(float(v[i, 2]), 5))
-                edge_faces = {}
-                for fi, tri in enumerate(f):
-                    for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
-                        ka, kb = vk(a), vk(b)
-                        if ka == kb:
-                            continue
-                        key = (ka, kb) if ka <= kb else (kb, ka)
-                        edge_faces.setdefault(key, []).append(fi)
-
-                keep = []
-                n_smooth = 0
-                for (ka, kb), fs in edge_faces.items():
-                    if len(fs) != 2:
-                        keep.append((ka, kb))           # boundary / non-manifold
-                        continue
-                    f1, f2 = fs
-                    if facing[f1] * facing[f2] <= 1e-12:
-                        keep.append((ka, kb))           # silhouette
-                        continue
-                    if float(np.dot(n[f1], n[f2])) < cos_crease - 1e-9:
-                        keep.append((ka, kb))           # crease
-                        continue
-                    n_smooth += 1
-                if n_smooth:  # something to filter -> build the 2D mask
-                    geoms = []
-                    for (ka, kb) in keep:
-                        pa = cam_inv_np @ np.array([ka[0], ka[1], ka[2], 1.0])
-                        pb = cam_inv_np @ np.array([kb[0], kb[1], kb[2], 1.0])
-                        a2 = (float(pa[0]), float(pa[1]))
-                        b2 = (float(pb[0]), float(pb[1]))
-                        if (a2[0] - b2[0]) ** 2 + (a2[1] - b2[1]) ** 2 > 1e-12:
-                            geoms.append(shapely.LineString((a2, b2)))
-                    if geoms:
-                        masks[guid] = (shapely.STRtree(geoms), geoms)
-        except Exception:
-            pass
-        if not it.next():
-            break
-    return masks
-
-
-# A segment must lie on a kept edge within this distance (model metres) to
-# survive the crease mask. HLR coordinates match our own projection to float
-# precision; 1 mm absorbs SVG decimal printing and vertex welding drift.
-_MASK_MATCH_TOL = 1e-3
-
-
-def _filter_lines_by_mask(lines, tree, geoms, tol=_MASK_MATCH_TOL):
-    """Keep only the sub-segments of `lines` lying on a mask edge.
-
-    Segments are checked individually (a chained path may mix kept and
-    dropped edges): both endpoints and the midpoint must sit within `tol` of
-    the same kept edge.
-    """
-    kept = []
-    for pts in lines:
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            if a == b:
-                continue
-            mid = shapely.Point((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
-            pa, pb = shapely.Point(a), shapely.Point(b)
-            seg = shapely.LineString((a, b))
-            for idx in tree.query(seg.buffer(tol)):
-                g = geoms[idx]
-                if (g.distance(pa) <= tol and g.distance(pb) <= tol
-                        and g.distance(mid) <= tol):
-                    kept.append([a, b])
-                    break
-    return kept
+    out = _parse_hlr_svg(svg_text, x_min_l, y_max_l, factor)
+    return out, n_written, t_hlr, edge_classification
 
 
 # Painter's-algorithm tie-breaker for coplanar horizontal build-up: at equal
@@ -606,9 +696,15 @@ def _chain_lines(lines, scale_factor=None, seen_segments=None):
     return cleaned
 
 
-def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_angle_deg=15.0):
+def export_drawing(ifc, drawing, pset, output_path, template_path=None,
+                   crease_angle_deg=15.0, fuse_by_material=False):
     """Export a single Bonsai drawing to DXF using the accurate (global HLR
-    oracle) pipeline."""
+    oracle) pipeline.
+
+    fuse_by_material: keep touching walls of different materials as separate
+    outlines. Off by default -- fabric that touches reads as one solid, which
+    is what a plan normally shows.
+    """
     if not _SHAPELY_AVAILABLE:
         raise RuntimeError("accurate pipeline requires shapely")
 
@@ -630,8 +726,9 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")
 
-    hlr_out, n_written, t_hlr = _run_hlr_scene(
-        ifc, drawing, elements, scale_factor_val, target_view
+    edge_settings = _edge_classification_settings(pset)
+    hlr_out, n_written, t_hlr, edge_classification = _run_hlr_scene(
+        ifc, drawing, elements, scale_factor_val, target_view, edge_settings
     )
     print(f"  HLR scene  : {t_hlr:.2f}s  ({n_written} elements written, "
           f"{len(hlr_out)} with visible output — global occlusion)")
@@ -642,19 +739,22 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     _cam_x_proj = _cam_R @ np.array([1.0, 0.0, 0.0])
     _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]), float(_cam_x_proj[0]))))
 
-    # Crease mask: second geometry pass over the elements that produced open
-    # segments, to drop tessellation edges below the crease threshold (the
-    # serializer has no dihedral filter -- see _build_keep_edge_masks).
-    t_mask = time.perf_counter()
     cam_dir, _cam_pos = camera_dir_pos(drawing)
-    lines_guids = {g for g, r in hlr_out.items() if r["lines"]}
-    mask_elements = [e for e in elements
-                     if getattr(e, "GlobalId", None) in lines_guids]
-    crease_masks = _build_keep_edge_masks(
-        ifc, mask_elements, _cam_inv_np, cam_dir, crease_angle_deg)
-    print(f"  Crease mask: {time.perf_counter() - t_mask:.2f}s  "
-          f"({len(crease_masks)}/{len(mask_elements)} line-emitting elements "
-          f"have smooth tessellation to filter, angle {crease_angle_deg:.0f}°)")
+    # Linework filtering belongs to the serializer, driven by the drawing's own
+    # EPset_Drawing settings: whatever it emits is what the drawing asked for.
+    counts = _count_edge_classes(hlr_out)
+    if edge_classification:
+        print(f"  Edge class : serializer-side (#3668), ridge >= "
+              f"{edge_settings['svg-ridge-angle-min-degrees']:.0f}° valley >= "
+              f"{edge_settings['svg-valley-angle-min-degrees']:.0f}°, flush "
+              f"{'kept' if edge_settings['svg-emit-flush-edges'] else 'dropped'} — "
+              f"segments { {k: v for k, v in sorted(counts.items())} }")
+    else:
+        why = ("drawing opts out (EPset_Drawing.UseEdgeClassification)"
+               if not edge_settings["svg-use-edge-classification"]
+               else "ifcopenshell build predates #3668")
+        print(f"  Edge class : off — {why}; unfiltered HLR linework "
+              f"({sum(counts.values())} segments)")
 
     wall_polys_by_key = {}  # key -> [(Polygon, gid), ...]
     footprint_polys   = []  # [(gid, ifc_class, layer, exterior_pts, [hole_pts])]
@@ -669,16 +769,28 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
     no_hatch = profile.get("no_hatch", frozenset())
 
     n_hidden = n_cut = n_view = n_fp = n_sym = n_viewlines = 0
-    n_mask_dropped = 0
+    n_cut_dup = 0  # view segments retracing their own element's cut
     hidden_classes = {}
     cut_classes = {}
-    seen_layer_segments = {}  # layer -> set of normalized segment keys (dedup)
+    seen_layer_segments = {}  # (layer, role) -> normalized segment keys (dedup)
     footprint_candidates = []  # oracle-visible slab/covering/roof, recomposed post-loop
+
+    # Spaces and zones take no part in the visibility pass: plain boundary
+    # polyline from the authored footprint, on their own no-plot layer.
+    space_volumes = [e for e in elements if _is_space_volume(e)]
+    if space_volumes:
+        entries = _space_boundary_entries(space_volumes, _cam_inv_np)
+        footprint_polys.extend(entries)
+        print(f"  Spaces     : {len({e[0] for e in entries})}/{len(space_volumes)} "
+              f"outlined ({len(entries)} polylines, no-plot layer, excluded "
+              f"from the HLR pass)")
 
     # Sorted iteration keeps block_order (and thus the DXF) deterministic.
     for element in sorted(elements, key=lambda e: getattr(e, "GlobalId", "")):
         ifc_class = element.is_a()
         gid = getattr(element, "GlobalId", None)
+        if _is_space_volume(element):
+            continue
         rec = hlr_out.get(gid)
 
         # --- Visibility oracle: no HLR output at all -> hidden (or no geom).
@@ -713,11 +825,11 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
         # is cut (section loops) or viewed (projection loops / open segments);
         # no class whitelist. Hatching is gated by the schema (building fabric
         # only, _is_hatchable) and the view profile's no_hatch conventions.
-        material = get_material_name(element)
+        material = get_material_key(element) if fuse_by_material else None
         hatchable = _is_hatchable(element) and ifc_class not in no_hatch
 
         if sec and hatchable:
-            key = (ifc_class, material, f"{ifc_class}_Section", None)
+            key = (ifc_class, material, "section", None)
             wall_polys_by_key.setdefault(key, []).extend((p, gid) for p in sec)
             n_cut += 1
             cut_classes[ifc_class] = cut_classes.get(ifc_class, 0) + 1
@@ -750,40 +862,61 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
             wm = world_matrix_col_major(element)
             _, z_max = _wall_z_range(element, wm)
             z_top_key = round(z_max, 3) if z_max is not None else None
-            key = (ifc_class, material, f"{ifc_class}_View", z_top_key)
+            key = (ifc_class, material, "view", z_top_key)
             wall_polys_by_key.setdefault(key, []).extend((p, gid) for p in view_polys)
 
         # Open visible-edge segments (the common form for viewed geometry):
         # HLR already clipped the hidden parts, draw them as-is.
+        if lines and sec:
+            lines, n_dropped = _drop_lines_covered_by_section(lines, sec)
+            n_cut_dup += n_dropped
         if lines:
-            mask = crease_masks.get(gid)
-            if mask is not None:
-                n_before = sum(len(p) - 1 for p in lines)
-                lines = _filter_lines_by_mask(lines, mask[0], mask[1])
-                n_mask_dropped += n_before - len(lines)
-        if lines:
-            layer = f"{ifc_class}_View"
-            chained = _chain_lines(lines, scale_factor_val,
-                                   seen_layer_segments.setdefault(layer, set()))
-            if chained:
-                direct_entities.append({"layer": layer, "gid": gid,
-                                        "ifc_class": ifc_class, "polylines": chained,
-                                        "arcs": [], "circles": [], "ellipses": []})
-                n_viewlines += len(chained)
+            # Dedup is per (layer, role): section and view share a layer now, and
+            # a segment drawn in both roles must survive in both.
+            seen = seen_layer_segments.setdefault((ifc_class, "view"), set())
+            for edge_class, cls_lines in _group_lines_by_class(lines).items():
+                chained = _chain_lines(cls_lines, scale_factor_val, seen)
+                if chained:
+                    direct_entities.append({"layer": ifc_class, "role": "view",
+                                            "gid": gid,
+                                            "ifc_class": ifc_class,
+                                            "edge_class": edge_class,
+                                            "from_hlr": True,
+                                            "polylines": chained,
+                                            "arcs": [], "circles": [], "ellipses": []})
+                    n_viewlines += len(chained)
 
         if (view_polys or lines) and not sec:
             n_view += 1
+
+    # Every hatched cut area of the drawing: what these polygons cover is
+    # filled on paper, so linework inside them cannot be seen.
+    sec_polys = [p for (_c, _m, role, _z), ps in wall_polys_by_key.items()
+                 if role == "section" for p, _g in ps]
+    try:
+        sections_union = shapely.unary_union(sec_polys) if sec_polys else None
+    except Exception:
+        sections_union = None
+
+    # Viewed outlines buried under another element's cut (a below-cut wall part
+    # under the neighbour it joins): the element's own cut was already
+    # subtracted above, this drops what other cuts hide.
+    if sections_union is not None:
+        buried = sections_union.buffer(_SECTION_COVER_TOL)
+        for key, polys in list(wall_polys_by_key.items()):
+            if key[2] != "view":
+                continue
+            kept = [(p, g) for p, g in polys if not buried.covers(p)]
+            n_cut_dup += len(polys) - len(kept)
+            if kept:
+                wall_polys_by_key[key] = kept
+            else:
+                del wall_polys_by_key[key]
 
     # --- Plan-profile footprint recomposition (single-source, painter's
     # algorithm; see _recompose_plan_footprints). Elements whose authored
     # footprint cannot be extracted fall back to their HLR output.
     if footprint_candidates:
-        sec_polys = [p for (_c, _m, lyr, _z), ps in wall_polys_by_key.items()
-                     if lyr.endswith("_Section") for p, _g in ps]
-        try:
-            sections_union = shapely.unary_union(sec_polys) if sec_polys else None
-        except Exception:
-            sections_union = None
         entries, fp_fallback = _recompose_plan_footprints(
             footprint_candidates, _cam_inv_np, sections_union)
         footprint_polys.extend(entries)
@@ -796,12 +929,16 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
                          for ring in poly.interiors]
                 if len(ext_pts) >= 3:
                     footprint_polys.append((gid, ifc_class, ifc_class, ext_pts, holes))
-            if rec["lines"]:
-                chained = _chain_lines(rec["lines"], scale_factor_val,
-                                       seen_layer_segments.setdefault(ifc_class, set()))
+            seen = seen_layer_segments.setdefault((ifc_class, "view"), set())
+            for edge_class, cls_lines in _group_lines_by_class(rec["lines"]).items():
+                chained = _chain_lines(cls_lines, scale_factor_val, seen)
                 if chained:
-                    direct_entities.append({"layer": ifc_class, "gid": gid,
-                                            "ifc_class": ifc_class, "polylines": chained,
+                    direct_entities.append({"layer": ifc_class, "role": "view",
+                                            "gid": gid,
+                                            "ifc_class": ifc_class,
+                                            "edge_class": edge_class,
+                                            "from_hlr": True,
+                                            "polylines": chained,
                                             "arcs": [], "circles": [], "ellipses": []})
                     n_viewlines += len(chained)
             n_fp += 1
@@ -809,12 +946,57 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None, crease_a
             print(f"  Footprints : {len(fp_fallback)} element(s) without extractable "
                   f"authored footprint kept their HLR output")
 
+    # HLR output buried under another element's hatched cut: invisible on
+    # paper, so it is dropped. Only HLR output (`from_hlr`) is filtered --
+    # authored 2D symbols keep every stroke, a door leaf legitimately runs
+    # inside the wall it sits in.
+    if sections_union is not None and footprint_polys:
+        buried = sections_union.buffer(_SECTION_COVER_TOL)
+
+        def _is_buried(ring):
+            try:
+                return len(ring) >= 3 and buried.covers(shapely.Polygon(ring))
+            except Exception:
+                return False
+
+        kept_fp = []
+        for gid, cls, layer, exterior, holes in footprint_polys:
+            if _is_buried(exterior):
+                n_cut_dup += 1
+                continue
+            # A hole punched by a cut is already outlined by that cut; a hole
+            # that is a real void (a stairwell) keeps its ring.
+            kept_holes = [h for h in holes if not _is_buried(h)]
+            n_cut_dup += len(holes) - len(kept_holes)
+            kept_fp.append((gid, cls, layer, exterior, kept_holes))
+        footprint_polys = kept_fp
+
+    if sections_union is not None and direct_entities:
+        buried = sections_union.buffer(_SECTION_COVER_TOL)
+        for ent in direct_entities:
+            if not ent.get("from_hlr") or not ent["polylines"]:
+                continue
+            kept = []
+            for pts in ent["polylines"]:
+                try:
+                    if len(pts) > 1 and buried.covers(shapely.LineString(pts)):
+                        continue
+                except Exception:
+                    pass
+                kept.append(pts)
+            n_cut_dup += len(ent["polylines"]) - len(kept)
+            n_viewlines -= len(ent["polylines"]) - len(kept)
+            ent["polylines"] = kept
+        direct_entities = [e for e in direct_entities
+                           if e["polylines"] or e["arcs"] or e["circles"]
+                           or e["ellipses"]]
+
     print(f"  Hidden(HLR): {n_hidden} elements fully occluded or without geometry")
     if hidden_classes:
         print(f"  Hidden(HLR): { {k: v for k, v in sorted(hidden_classes.items())} }")
     print(f"  Drawn      : {n_cut} sectioned, {n_view} viewed "
-          f"({n_viewlines} view polylines, {n_mask_dropped} smooth-tessellation "
-          f"segments masked), {n_fp} footprints, {n_sym} plan symbols")
+          f"({n_viewlines} view polylines, {n_cut_dup} dropped as buried in a "
+          f"hatched cut), {n_fp} footprints, {n_sym} plan symbols")
     if cut_classes:
         print(f"  Sectioned  : { {k: v for k, v in sorted(cut_classes.items())} }")
 
