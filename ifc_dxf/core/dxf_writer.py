@@ -16,6 +16,7 @@ except ImportError:
 
 from .layers import apply_role, ensure_layer, insert_layer, layer_name
 from .dxf_template import (
+    _make_text_styles_annotative,
     _populate_scale_list,
     _resolve_text_font,
     _fill_cartiglio,
@@ -110,6 +111,7 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         msp = doc.modelspace()
         msp.delete_all_entities()
         _resolve_text_font(doc)
+        _make_text_styles_annotative(doc)
         doc.header["$LTSCALE"] = float(scale_factor)
         scale_handles = _populate_scale_list(doc, scale_factor)
         denom = int(round(1.0 / scale_factor))

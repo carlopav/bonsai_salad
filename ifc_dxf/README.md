@@ -98,7 +98,7 @@ IfcGeometricRepresentationContext   (ContextType = "Model" | "Plan")
   empty fill layers.
 - `layers.ensure_layer` creates only what is missing and never restyles a
   declared layer: a template — ours or a customised one — always wins.
-- Annotative text styles, dimstyle `dimensions_metric_m`.
+- Annotative text styles (paper heights — see below), dimstyle `dimensions_metric_m`.
 - A1 layout with 1:100 viewport and title block (cartiglio): `{{Identification}}`, `{{Name}}`, `{{scale}}`, `{{date}}`.
 - Annotation scale in viewport via XREC `ASDK_XREC_ANNOTATION_SCALE_INFO`.
 
@@ -349,7 +349,22 @@ for rel in ifc.by_type("IfcRelAssignsToGroup"):
 | `regular` | 2.5 | 0.25 m |
 | `small` | 1.8 | 0.18 m |
 
-`txt_height = paper_mm * 0.001 / scale_factor`.
+`txt_height = paper_mm * 0.001 / scale_factor`, written on the entity as the
+model height, the way BricsCAD itself writes annotative text.
+
+**A fixed-height text style must be annotative.** The template's styles carry the
+*paper* height (`regular` = 0.0025 m = 2.5 mm), which the CAD multiplies by the
+annotation scale only for an annotative style. A plain style's fixed height is
+taken literally: it overrides the entity's height and makes `DIMTXT` ignored, so
+every text and dimension collapsed to 1/100 of its size (paper height read as
+model metres) the moment it was edited in BricsCAD. Annotative is not a `STYLE`
+group code but an `XRECORD` named `AcadAnnotative` in the style's extension
+dictionary, carrying the same `AnnotativeData` payload as the per-entity XDATA;
+`_make_text_styles_annotative` adds it at export to every fixed-height style, so
+a customised template gets it too.
+
+Corollary: `DIMTXT` never applies while `dimtxsty` points at a fixed-height style
+— dimension text is 1.8 mm (style `DIMENSION`), not the dimstyle's 2.0 mm.
 
 Two sub-cases, both `ObjectType == "TEXT"`, distinguished by whether the annotation
 has an `IfcTypeProduct` (`IsTypedBy` → `IfcRelDefinesByType`):
@@ -359,6 +374,12 @@ has an `IfcTypeProduct` (`IsTypedBy` → `IfcRelDefinesByType`):
   literal's own local `Placement` (not just the annotation origin — needed once
   an annotation carries more than one literal). Gets a single annotative-scale
   representation via `_make_text_annotative()`.
+
+  The `ACDB_TEXTOBJECTCONTEXTDATA_CLASS` object — not the `TEXT` entity — is what
+  BricsCAD actually draws, so its insertion point (10), alignment point (11) and
+  rotation (**50, in degrees**, like every other angle in a DXF file) must repeat
+  the entity's own. Written in radians, a text turned 90° came out at 1.57° in
+  BricsCAD while the entity said 90.
 
 - **Typed tags** (space tags, and any other Bonsai "tag" built from a library
   type — door tags, level tags, ...): Bonsai shares the tag's text-literal

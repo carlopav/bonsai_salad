@@ -1,6 +1,5 @@
 """Text and dimension annotation writing for DXF output."""
 
-import math
 import re
 
 import numpy as np
@@ -240,7 +239,8 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                 set_ifc_xdata(dim.dimension, ann.is_a(), ann.GlobalId)
 
 
-def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0.0):
+def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0.0,
+                          align_pt=None):
     """Add a single annotative scale representation to a TEXT entity.
 
     Creates the extension-dict chain:
@@ -249,6 +249,10 @@ def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0
     SCALE entity handle. Only one representation (current drawing scale) is
     written; BricsCAD/AutoCAD accept this and will add more when the user
     changes CANNOSCALE interactively.
+
+    The context data -- not the TEXT entity -- is what the CAD app draws for an
+    annotative text, so its rotation (group 50, **degrees** like everywhere else
+    in DXF) and alignment point (11) must repeat the entity's own values.
     """
     from ezdxf.lldxf.types import DXFTag
     from ezdxf.lldxf.tags import Tags
@@ -266,6 +270,7 @@ def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0
     ctx = doc.objects.new_entity("ACDB_TEXTOBJECTCONTEXTDATA_CLASS", dxfattribs={})
     ctx.__class__ = type("CTX", (ctx.__class__,), {"DXFTYPE": "ACDB_TEXTOBJECTCONTEXTDATA_CLASS"})
     px, py = float(insert_pt[0]), float(insert_pt[1])
+    ax, ay = (px, py) if align_pt is None else (float(align_pt[0]), float(align_pt[1]))
     ctx.xtags.subclasses = [Tags(), Tags([
         DXFTag(100, "AcDbObjectContextData"),
         DXFTag(70, 4),
@@ -274,11 +279,11 @@ def _make_text_annotative(doc, text_entity, insert_pt, scale_handle, angle_deg=0
         DXFTag(100, "AcDbAnnotScaleObjectContextData"),
         DXFTag(340, scale_handle),
         DXFTag(70, 0),
-        DXFTag(50, math.radians(angle_deg)),
+        DXFTag(50, float(angle_deg)),
         # Coordinates must be written as separate group codes (10/20/30),
         # not as a tuple -- DXFTagStorage writes raw tags without expansion.
         DXFTag(10, px), DXFTag(20, py), DXFTag(30, 0.0),
-        DXFTag(11, 0.0), DXFTag(21, 0.0), DXFTag(31, 0.0),
+        DXFTag(11, ax), DXFTag(21, ay), DXFTag(31, 0.0),
     ])]
     anno_scales.add(key="*A1", entity=ctx)
     # Dictionary.add() does not set the owner on a DXFTagStorage entity, leaving
@@ -500,8 +505,12 @@ def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                 text_entity = msp.add_text(item.Literal or "", dxfattribs=text_dxfattribs)
                 set_ifc_xdata(text_entity, ann.is_a(), ann.GlobalId)
                 if current_scale_handle:
-                    _make_text_annotative(doc, text_entity, (px, py),
-                                          current_scale_handle, angle_deg)
+                    _make_text_annotative(
+                        doc, text_entity, (px, py), current_scale_handle,
+                        angle_deg,
+                        # mirror the entity: 11 is only read for aligned text
+                        align_pt=(px, py) if (halign or valign) else (0.0, 0.0),
+                    )
             continue
 
         # Typed tag (e.g. space tag): shared BLOCK with one ATTDEF per literal

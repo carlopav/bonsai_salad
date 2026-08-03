@@ -119,6 +119,37 @@ def _setup_dxf_layers(doc, layer_styles):
             pass
 
 
+def _make_text_styles_annotative(doc):
+    """Mark every fixed-height text style as annotative.
+
+    The template's styles carry the *paper* height (`small` = 0.0018 m = 1.8 mm),
+    which is only meaningful if the CAD multiplies it by the annotation scale --
+    and it does that only for an annotative style. A plain style's fixed height
+    is taken literally instead, overriding the TEXT entity's height and making
+    DIMTXT ignored, so every text and dimension collapsed to paper size (1/100 of
+    the model size at 1:100) the moment it was edited in BricsCAD.
+
+    Annotative is not a STYLE group code: it is an XRECORD named AcadAnnotative
+    in the style's extension dictionary, carrying the same AnnotativeData payload
+    as the per-entity XDATA (see _make_text_annotative).
+    """
+    from ezdxf.lldxf.types import DXFTag
+
+    for style in doc.styles:
+        if not style.dxf.get("height", 0.0):
+            continue
+        ext_dict = (style.get_extension_dict() if style.has_extension_dict
+                    else style.new_extension_dict())
+        if "AcadAnnotative" in ext_dict:
+            continue
+        xrec = ext_dict.add_xrecord("AcadAnnotative")
+        xrec.dxf.cloning = 1
+        xrec.reset([
+            DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
+            DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
+        ])
+
+
 def _populate_scale_list(doc, scale_factor):
     """Fill ACAD_SCALELIST with SCALE objects and set the current annotation scale.
 

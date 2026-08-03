@@ -435,6 +435,93 @@ class TestSpatialZones:
         assert doc.layers.get("IfcSpatialZone").dxf.plot == 0
 
 
+class TestAnnotativeText:
+    """test_ifc_01.ifc with its TEXT annotation turned 90 degrees.
+
+    An annotative TEXT is drawn from its context data, not from the entity, so
+    the two must agree -- and the CAD app must have nothing left to resize it
+    with when the text is edited.
+    """
+
+    IFC = "test_ifc_01.ifc"
+
+    def _export(self, tmp_path, rotate=False):
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        ann = next(a for a in ifc.by_type("IfcAnnotation") if a.ObjectType == "TEXT")
+        if rotate:
+            placement = ann.ObjectPlacement.RelativePlacement
+            placement.RefDirection = ifc.createIfcDirection((0.0, 1.0, 0.0))
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / "text.dxf")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing(ifc, drawing, pset, out, wall_mode="shapely", template_path=tpl)
+        return ezdxf.readfile(out)
+
+    @staticmethod
+    def _annotative_texts(doc):
+        """[(TEXT entity, {group code: value} of its *A1 context data)]."""
+        found = []
+        for e in doc.modelspace().query("TEXT"):
+            if not e.has_extension_dict:
+                continue
+            d = e.get_extension_dict().dictionary
+            if "AcDbContextDataManager" not in d:
+                continue
+            scales = d["AcDbContextDataManager"]["ACDB_ANNOTATIONSCALES"]
+            for key in scales.keys():
+                ctx = scales.get(key)
+                tags = {t.code: t.value
+                        for sub in ctx.xtags.subclasses for t in sub}
+                found.append((e, tags))
+        return found
+
+    def test_context_data_repeats_the_entity_rotation(self, tmp_path):
+        """Group 50 is in degrees here like everywhere else in DXF.
+
+        Written in radians, a text turned 90 degrees came out at 1.57 degrees --
+        visually unrotated, since BricsCAD draws the context data.
+        """
+        doc = self._export(tmp_path, rotate=True)
+        texts = self._annotative_texts(doc)
+        assert texts, "no annotative TEXT in the export"
+        for entity, tags in texts:
+            assert abs(entity.dxf.rotation - 90.0) < 1e-3, \
+                "the annotation's own 90 degree turn was lost"
+            assert abs(tags[50] - entity.dxf.rotation) < 1e-6, \
+                f"context data rotation {tags[50]} != entity {entity.dxf.rotation}"
+
+    def test_fixed_height_text_styles_are_annotative(self, tmp_path):
+        """The styles hold the paper height (small = 1.8 mm), which the CAD only
+        multiplies by the annotation scale for an *annotative* style. Plain, that
+        fixed height overrides the entity height and DIMTXT, and every text and
+        dimension collapses to paper size as soon as it is edited."""
+        doc = self._export(tmp_path)
+        checked = 0
+        for style in doc.styles:
+            if not style.dxf.get("height", 0.0):
+                continue
+            assert style.has_extension_dict, \
+                f"fixed-height style {style.dxf.name} is not annotative"
+            xrec = style.get_extension_dict().dictionary.get("AcadAnnotative")
+            assert xrec is not None, \
+                f"fixed-height style {style.dxf.name} lacks AcadAnnotative"
+            assert [t.value for t in xrec.tags if t.code == 1070] == [1, 1]
+            checked += 1
+        assert checked, "no fixed-height text style in the export"
+
+    def test_text_height_matches_its_style_at_the_drawing_scale(self, tmp_path):
+        """Entity height (model) == style height (paper) / scale factor: the two
+        must agree, or an annotative regen resizes the text."""
+        doc = self._export(tmp_path)
+        scale = 0.01  # the fixture's drawing is 1:100
+        for entity, _tags in self._annotative_texts(doc):
+            paper = doc.styles.get(entity.dxf.style).dxf.get("height", 0.0)
+            if not paper:
+                continue
+            assert abs(entity.dxf.height - paper / scale) < 1e-9, \
+                f"{entity.dxf.text!r}: {entity.dxf.height} != {paper}/{scale}"
+
+
 class TestCase01BasicPlan:
     """test_ifc_01.ifc — basic 1:100 plan: walls, door, window, slab, furniture."""
 
