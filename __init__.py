@@ -16,6 +16,7 @@ from . import dxf_ifc
 from . import mep
 from . import ifc_cleanup
 from . import drawing_diff
+from . import urban_parameters
 
 
 def register():
@@ -27,9 +28,11 @@ def register():
     mep.register()
     ifc_cleanup.register()
     drawing_diff.register()
+    urban_parameters.register()
 
 
 def unregister():
+    urban_parameters.unregister()
     drawing_diff.unregister()
     ifc_cleanup.unregister()
     mep.unregister()
