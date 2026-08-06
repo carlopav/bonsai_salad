@@ -17,6 +17,7 @@ from . import mep
 from . import ifc_cleanup
 from . import drawing_diff
 from . import urban_parameters
+from . import daylight_ventilation
 
 
 def register():
@@ -29,9 +30,11 @@ def register():
     ifc_cleanup.register()
     drawing_diff.register()
     urban_parameters.register()
+    daylight_ventilation.register()
 
 
 def unregister():
+    daylight_ventilation.unregister()
     urban_parameters.unregister()
     drawing_diff.unregister()
     ifc_cleanup.unregister()
