@@ -252,22 +252,41 @@ def quantify(ifc_file, geom_settings=None):
     )
 
 
-def sections(ifc_file, rows):
-    """The rows grouped by the storey that contains each room, storeys in file
-    order and the rooms outside one last.
+def _storey(ifc_file, space):
+    """The storey containing a room: normally reached through Decomposes, or —
+    for a schema-invalid file that relates the space by containment instead,
+    WR31 forbids it but an imported file may still do it — by walking
+    IfcRelContainedInSpatialStructure directly.
 
-    get_container walks up through ContainedInStructure, an inverse only
-    IfcElement carries — a room reaches its storey through Decomposes instead,
-    so get_parent with an ifc_class filter is what actually finds it.
+    get_container also walks Decomposes, via get_parent, but only succeeds
+    through ContainedInStructure, an inverse no spatial element carries, so it
+    climbs past the storey and returns None; get_parent's ifc_class filter
+    stops as soon as an ancestor of that class turns up.
     """
-    order = {storey: index for index, storey in enumerate(ifc_file.by_type("IfcBuildingStorey"))}
+    storey = ifcopenshell.util.element.get_parent(space, ifc_class="IfcBuildingStorey")
+    if storey is not None:
+        return storey
+    for rel in ifc_file.by_type("IfcRelContainedInSpatialStructure"):
+        if space in rel.RelatedElements:
+            return rel.RelatingStructure
+    return None
+
+
+def _elevation(storey):
+    value = getattr(storey, "Elevation", None)
+    return (value is None, value)
+
+
+def sections(ifc_file, rows):
+    """The rows grouped by the storey that contains each room, in building
+    order by elevation — storeys with none last — and the rooms outside one,
+    last of all."""
     grouped = {}
     for row in rows:
-        storey = ifcopenshell.util.element.get_parent(row.space, ifc_class="IfcBuildingStorey")
-        grouped.setdefault(storey, []).append(row)
+        grouped.setdefault(_storey(ifc_file, row.space), []).append(row)
     labelled = [
         (storey.Name or storey.LongName or "", grouped[storey])
-        for storey in sorted((key for key in grouped if key), key=lambda s: order.get(s, 0))
+        for storey in sorted((key for key in grouped if key), key=_elevation)
     ]
     if None in grouped:
         labelled.append((NO_STOREY, grouped[None]))

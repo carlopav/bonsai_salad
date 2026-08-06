@@ -3,6 +3,7 @@ import pytest
 import ifcopenshell.api.aggregate
 import ifcopenshell.api.pset
 import ifcopenshell.api.root
+import ifcopenshell.guid
 import ifcopenshell.util.element
 
 from daylight_ventilation.core import ratios
@@ -42,10 +43,12 @@ def test_quantify_reports_what_it_did(ifc_file, project):
 
 def test_a_second_run_changes_nothing(ifc_file, project):
     ratios.quantify(ifc_file)
-    before = len(ifc_file.by_type("IfcRelSpaceBoundary")), len(ifc_file.by_type("IfcPropertySet"))
+    before_counts = len(ifc_file.by_type("IfcRelSpaceBoundary")), len(ifc_file.by_type("IfcPropertySet"))
+    before = ifc_file.to_string()
     summary = ratios.quantify(ifc_file)
     assert summary.boundaries_written == 0
-    assert (len(ifc_file.by_type("IfcRelSpaceBoundary")), len(ifc_file.by_type("IfcPropertySet"))) == before
+    assert (len(ifc_file.by_type("IfcRelSpaceBoundary")), len(ifc_file.by_type("IfcPropertySet"))) == before_counts
+    assert ifc_file.to_string() == before
 
 
 def test_a_second_run_leaves_an_override_alone(ifc_file, project):
@@ -86,6 +89,8 @@ def test_quantify_reports_an_unmeasured_void_without_raising(ifc_file, add_box, 
     fill(wall, opening, window)
     summary = ratios.quantify(ifc_file)
     assert summary.unmeasured == [window]
+    pset = ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False) or {}
+    assert ratios.CLEAR not in pset
 
 
 def test_the_room_behind_an_unmeasured_void_gets_no_verdict(ifc_file, add_box, add_tapered_opening, add_space, fill):
@@ -106,3 +111,32 @@ def test_the_room_behind_an_unmeasured_void_gets_no_verdict(ifc_file, add_box, a
     lit_pset = ifcopenshell.util.element.get_pset(lit_room, ratios.SPACE_PSET, should_inherit=False)
     assert ratios.VERIFIED not in dark_pset
     assert lit_pset[ratios.VERIFIED] is True
+
+
+def test_storeys_are_ordered_by_elevation_not_creation(ifc_file, add_space):
+    """The upper storey is created first, so file order would put it first too."""
+    upper = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcBuildingStorey", name="Primo piano")
+    upper.Elevation = 3.0
+    lower = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcBuildingStorey", name="Piano terra")
+    lower.Elevation = 0.0
+    room_upper = add_space("A1", width=2.0, depth=1.0, long_name="Camera")
+    room_lower = add_space("A2", width=2.0, depth=1.0, matrix=placement(x=10.0), long_name="Soggiorno")
+    ifcopenshell.api.aggregate.assign_object(ifc_file, products=[room_upper], relating_object=upper)
+    ifcopenshell.api.aggregate.assign_object(ifc_file, products=[room_lower], relating_object=lower)
+    rows = ratios.measure_spaces(ifc_file, [room_upper, room_lower])
+    assert [label for label, _ in ratios.sections(ifc_file, rows)] == ["Piano terra", "Primo piano"]
+
+
+def test_a_space_attached_by_containment_still_finds_its_storey(ifc_file, add_space):
+    """Schema-invalid — WR31 forbids relating an IfcSpace this way — but an
+    imported file may still do it, and the fallback is cheap."""
+    storey = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcBuildingStorey", name="Piano terra")
+    room = add_space("A1", width=2.0, depth=1.0, long_name="Camera")
+    ifc_file.create_entity(
+        "IfcRelContainedInSpatialStructure",
+        GlobalId=ifcopenshell.guid.new(),
+        RelatedElements=[room],
+        RelatingStructure=storey,
+    )
+    rows = ratios.measure_spaces(ifc_file, [room])
+    assert [label for label, _ in ratios.sections(ifc_file, rows)] == ["Piano terra"]
