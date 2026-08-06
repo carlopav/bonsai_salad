@@ -10,6 +10,8 @@ created where none exists, and only `refresh` removes one, on an explicit click.
 import ifcopenshell.api.boundary
 import ifcopenshell.api.root
 
+from . import openings
+
 EXTERNAL = "EXTERNAL"
 INTERNAL = "INTERNAL"
 PHYSICAL = "PHYSICAL"
@@ -19,24 +21,31 @@ def of(filling):
     """The filling's boundaries towards a room. IfcRelSpaceBoundary also accepts
     an IfcExternalSpatialElement as its relating space, which is not a room and
     has no floor to take a ratio over."""
-    return [
-        boundary
-        for boundary in filling.ProvidesBoundaries or []
-        if boundary.RelatingSpace and boundary.RelatingSpace.is_a("IfcSpace")
-    ]
+    return [boundary for boundary in filling.ProvidesBoundaries if boundary.RelatingSpace.is_a("IfcSpace")]
 
 
 def rooms_of(filling):
     return [boundary.RelatingSpace for boundary in of(filling)]
 
 
+def _is_filling(element):
+    return any(element.is_a(ifc_class) for ifc_class in openings.FILLING_CLASSES)
+
+
 def serves(space):
-    """The fillings that light and ventilate a room: the ones whose boundary to
-    it is EXTERNAL. The other EXTERNAL_* values are not sources of daylight."""
+    """The fillings that light and ventilate a room: the windows and doors whose
+    boundary to it is EXTERNAL. The other EXTERNAL_* values are not sources of
+    daylight.
+
+    A 2nd level boundary set — what an export from another authoring tool
+    writes — bounds the room by its walls and slabs as well, and those are not
+    fillings whose clear opening could ever be measured."""
     found = [
         boundary.RelatedBuildingElement
-        for boundary in space.BoundedBy or []
-        if boundary.InternalOrExternalBoundary == EXTERNAL and boundary.RelatedBuildingElement
+        for boundary in space.BoundedBy
+        if boundary.InternalOrExternalBoundary == EXTERNAL
+        and boundary.RelatedBuildingElement
+        and _is_filling(boundary.RelatedBuildingElement)
     ]
     return list(dict.fromkeys(found))
 
@@ -87,12 +96,29 @@ def disagreeing(proposals):
     return found
 
 
+def is_authored_elsewhere(boundary):
+    """Whether the boundary holds more than this tool could ever write back: a
+    contact surface, or the 2nd level pairing with the boundary on the other
+    side. Removing one destroys information the probe cannot recreate."""
+    return boundary.ConnectionGeometry is not None or boundary.is_a("IfcRelSpaceBoundary2ndLevel")
+
+
 def refresh(ifc_file, proposals):
     """Removes each filling's boundaries and writes the computed ones. The only
-    thing in the tool that deletes, and only ever on an explicit click."""
+    thing in the tool that deletes, and only ever on an explicit click.
+
+    A filling with even one boundary authored elsewhere is left untouched
+    whole: replacing the rest of its boundaries would assert the new room
+    beside the old one rather than in its place. Returns (updated, kept)."""
+    updated, kept = 0, 0
     for proposal in proposals:
-        for boundary in of(proposal.filling):
+        existing = of(proposal.filling)
+        if any(is_authored_elsewhere(boundary) for boundary in existing):
+            kept += 1
+            continue
+        for boundary in existing:
             ifcopenshell.api.boundary.remove_boundary(ifc_file, boundary=boundary)
         for room in proposal.rooms:
             add(ifc_file, room, proposal.filling, proposal.external)
-    return len(proposals)
+        updated += 1
+    return updated, kept

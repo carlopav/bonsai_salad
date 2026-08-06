@@ -160,6 +160,20 @@ def test_two_fillings_in_one_opening_split_it(ifc_file, add_box, add_tapered_ope
     assert areas == pytest.approx([0.9, 0.9], rel=1e-6)
 
 
+def test_a_void_wound_inwards_is_unmeasured_rather_than_negative(ifc_file, add_box, add_tapered_opening, fill):
+    """Its sections come out signed the wrong way: not a measurement, and never
+    a negative IfcAreaMeasure."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    opening = add_tapered_opening(
+        near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9), inwards=True
+    )
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    fill(wall, opening, window)
+    assert openings.clear_opening_area(opening, wall, openings.settings()) is None
+    (proposal,) = openings.proposals(ifc_file)
+    assert proposal.area is None
+
+
 def test_a_filling_whose_probe_cannot_be_answered_is_an_orphan_proposal(
     ifc_file, add_box, add_tapered_opening, add_space, fill, monkeypatch
 ):

@@ -122,9 +122,9 @@ def _rotation_to_up(axis):
 
 
 def clear_opening_area(opening, host, geom_settings):
-    """The smallest section of the opening taken across the host's thickness —
-    the hole you see looking at the wall head-on — or None when either body is
-    missing.
+    """The smallest section of the opening taken across the host's thickness, in
+    SI metres — the hole you see looking at the wall head-on — or None when
+    either body is missing.
 
     Only the span the opening shares with the host is sampled: a void that
     overshoots the faces, or that is cut for a sill outside them, cannot inflate
@@ -142,8 +142,10 @@ def clear_opening_area(opening, host, geom_settings):
     high = min(float(void[:, :, 2].max()), float(wall[:, :, 2].max()))
     if high <= low:
         return None
-    areas = [section_area(void, low + fraction * (high - low)) for fraction in SAMPLES]
-    return min(areas)
+    smallest = min(section_area(void, low + fraction * (high - low)) for fraction in SAMPLES)
+    # A negative section is a void wound inwards: not a measurement, and not an
+    # area to store either.
+    return None if smallest < 0 else smallest
 
 
 # How far past the host's face a probe reaches. Short enough not to leave a
@@ -251,19 +253,16 @@ def fillings(ifc_file):
     """Every window and door in the file, in file order."""
     found = []
     for ifc_class in FILLING_CLASSES:
-        try:
-            found.extend(ifc_file.by_type(ifc_class))
-        except RuntimeError:
-            continue
+        found.extend(ifc_file.by_type(ifc_class))
     return found
 
 
 def host_of(filling):
     """(the opening the filling fills, the element that opening voids), either
     of them None when the chain is broken."""
-    for rel in filling.FillsVoids or []:
+    for rel in filling.FillsVoids:
         opening = rel.RelatingOpeningElement
-        for void in opening.VoidsElements or []:
+        for void in opening.VoidsElements:
             return opening, void.RelatingBuildingElement
     return None, None
 
@@ -274,7 +273,7 @@ def _spaces(ifc_file, geom_settings):
 
 def proposals(ifc_file, geom_settings=None):
     """What the geometry says about every filling: the rooms it borders, whether
-    it faces outside, and the clear opening it offers.
+    it faces outside, and the clear opening it offers, in SI metres.
 
     An opening shared by several fillings splits its clear opening equally among
     them — counting the same hole once per filling would double the light. A
@@ -294,6 +293,6 @@ def proposals(ifc_file, geom_settings=None):
         except ValueError:
             rooms, external = [], False
         area = clear_opening_area(opening, host, geom_settings)
-        share = len([rel.RelatedBuildingElement for rel in opening.HasFillings or []]) or 1
+        share = len(opening.HasFillings) or 1
         found.append(Proposal(filling, opening, host, rooms, external, None if area is None else area / share))
     return found

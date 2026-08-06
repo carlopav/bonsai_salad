@@ -1,3 +1,6 @@
+import sys
+import types
+
 import numpy as np
 import pytest
 
@@ -10,21 +13,64 @@ import ifcopenshell.api.spatial
 import ifcopenshell.api.unit
 import ifcopenshell.util.representation
 import ifcopenshell.util.shape_builder
+import ifcopenshell.util.unit
 
-SI_UNITS = (
+
+def _stub_ifc5d():
+    """ifc5d ships with Bonsai, not with the test environment. ratios borrows
+    one thing from it, the SI to project unit converter, and an identity stub
+    would make the millimetre fixture prove nothing: this one converts, exactly
+    as ifc5d/qto.py:142-166 does, over the measures this tool asks for."""
+    try:
+        import ifc5d.qto  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    qto = types.ModuleType("ifc5d.qto")
+
+    class SI2ProjectUnitConverter:
+        UNITS = {
+            "IfcAreaMeasure": ("AREAUNIT", "SQUARE_METRE"),
+            "IfcLengthMeasure": ("LENGTHUNIT", "METRE"),
+            "IfcVolumeMeasure": ("VOLUMEUNIT", "CUBIC_METRE"),
+        }
+
+        def __init__(self, ifc_file):
+            self.project_units = {}
+            for measure, (kind, si_name) in self.UNITS.items():
+                unit = ifcopenshell.util.unit.get_project_unit(ifc_file, kind)
+                if unit:
+                    self.project_units[measure] = (si_name, getattr(unit, "Prefix", "None"), unit.Name)
+
+        def convert(self, value, measure):
+            if measure not in self.project_units:
+                return value
+            si_name, prefix, name = self.project_units[measure]
+            return ifcopenshell.util.unit.convert(value, None, si_name, prefix, name)
+
+    qto.SI2ProjectUnitConverter = SI2ProjectUnitConverter
+    package = types.ModuleType("ifc5d")
+    package.qto = qto
+    sys.modules["ifc5d"], sys.modules["ifc5d.qto"] = package, qto
+
+
+_stub_ifc5d()
+
+UNIT_KINDS = (
     ("LENGTHUNIT", "METRE"),
     ("AREAUNIT", "SQUARE_METRE"),
     ("VOLUMEUNIT", "CUBIC_METRE"),
-    ("PLANEANGLEUNIT", "RADIAN"),
 )
 
 
-def build_file(schema="IFC4"):
+def build_file(schema="IFC4", prefix=None):
     ifc_file = ifcopenshell.file(schema=schema)
     ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcProject", name="Test")
-    ifcopenshell.api.unit.assign_unit(
-        ifc_file, units=[ifc_file.createIfcSIUnit(None, kind, None, name) for kind, name in SI_UNITS]
-    )
+    units = [ifc_file.createIfcSIUnit(None, kind, prefix, name) for kind, name in UNIT_KINDS]
+    units.append(ifc_file.createIfcSIUnit(None, "PLANEANGLEUNIT", None, "RADIAN"))
+    ifcopenshell.api.unit.assign_unit(ifc_file, units=units)
     model = ifcopenshell.api.context.add_context(ifc_file, context_type="Model")
     ifcopenshell.api.context.add_context(
         ifc_file, context_type="Model", context_identifier="Body", target_view="MODEL_VIEW", parent=model
@@ -33,8 +79,14 @@ def build_file(schema="IFC4"):
 
 
 @pytest.fixture
-def ifc_file():
-    return build_file()
+def unit_prefix(request):
+    """Metres unless a test parametrises it indirectly with an SI prefix."""
+    return getattr(request, "param", None)
+
+
+@pytest.fixture
+def ifc_file(unit_prefix):
+    return build_file(prefix=unit_prefix)
 
 
 def placement(x=0.0, y=0.0, z=0.0, angle=0.0):
@@ -74,7 +126,7 @@ def add_tapered_opening(ifc_file):
     both `height` tall, spanning `depth` along Y from the local origin."""
     body = ifcopenshell.util.representation.get_context(ifc_file, "Model", "Body", "MODEL_VIEW")
 
-    def add(near, far, height, depth, matrix=None):
+    def add(near, far, height, depth, matrix=None, inwards=False):
         element = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcOpeningElement")
         points = [
             (-near / 2, 0.0, 0.0),
@@ -97,6 +149,8 @@ def add_tapered_opening(ifc_file):
             [7, 8, 4, 3],
             [8, 5, 1, 4],
         ]
+        if inwards:
+            faces = [list(reversed(face)) for face in faces]
         face_set = ifc_file.createIfcPolygonalFaceSet(
             ifc_file.createIfcCartesianPointList3D([tuple(map(float, p)) for p in points]),
             None,
@@ -124,9 +178,7 @@ def add_space(ifc_file):
         outline = [(0.0, 0.0), (width, 0.0), (width, depth), (0.0, depth)]
         profile = builder.profile(builder.polyline(outline, closed=True))
         representation = builder.get_representation(body, [builder.extrude(profile, magnitude=height)])
-        ifcopenshell.api.geometry.assign_representation(
-            ifc_file, product=space, representation=representation
-        )
+        ifcopenshell.api.geometry.assign_representation(ifc_file, product=space, representation=representation)
         ifcopenshell.api.geometry.edit_object_placement(
             ifc_file, product=space, matrix=placement() if matrix is None else matrix
         )

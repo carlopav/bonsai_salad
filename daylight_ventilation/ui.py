@@ -80,10 +80,11 @@ class DaylightVentilationPanel(bpy.types.Panel):
         if not summary.get("spaces"):
             layout.label(text="Non ancora calcolato.", icon="INFO")
             return
-        unverified, orphans, unmeasured, disagreeing = (
+        unverified, withheld, orphans, unmeasurable, disagreeing = (
             summary["unverified"],
+            summary["withheld"],
             summary["orphans"],
-            summary["unmeasured"],
+            summary["unmeasurable"],
             summary["disagreeing"],
         )
         box = layout.box()
@@ -94,10 +95,14 @@ class DaylightVentilationPanel(bpy.types.Panel):
         )
         if unverified:
             row.operator("bim.salad_select_unverified_spaces", text="", icon="RESTRICT_SELECT_OFF")
+        # A withheld verdict is the opposite of a failed one: nothing was
+        # checked, so it cannot be counted among the unverified.
+        if withheld:
+            box.label(text=f"{len(withheld)} locali senza verdetto", icon="QUESTION")
         if orphans:
             box.label(text=f"{len(orphans)} serramenti orfani", icon="GHOST_DISABLED")
-        if unmeasured:
-            box.label(text=f"{len(unmeasured)} serramenti non misurati", icon="QUESTION")
+        if unmeasurable:
+            box.label(text=f"{len(unmeasurable)} serramenti non misurati", icon="QUESTION")
         if disagreeing:
             row = box.row(align=True)
             row.label(text=f"{len(disagreeing)} associazioni in disaccordo", icon="LIBRARY_DATA_BROKEN")
@@ -117,9 +122,10 @@ class DaylightVentilationPanel(bpy.types.Panel):
             text=f"Illuminante {row.daylight:.2f} — rapporto {row.daylight_ratio:.3f} "
             f"/ {row.daylight_requirement:.3f}"
         )
-        # unmeasured > 0 withholds the verdict on purpose (write_space_results):
-        # row.verified alone cannot tell "failed" from "not checked".
-        if row.unmeasured:
+        # An unmeasured filling withholds the verdict on purpose
+        # (write_space_results): row.verified alone cannot tell "failed" from
+        # "not checked".
+        if row.unmeasured_fillings:
             box.label(text="Da verificare", icon="QUESTION")
         else:
             box.label(

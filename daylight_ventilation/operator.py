@@ -69,7 +69,7 @@ class QuantifyDaylight(bpy.types.Operator, tool.Ifc.Operator):
             {"INFO"},
             f"{len(summary.rows)} rooms checked, {summary.boundaries_written} boundaries written."
             + (f" {len(summary.orphans)} orphan fillings." if summary.orphans else "")
-            + (f" {len(summary.unmeasured)} unmeasured." if summary.unmeasured else "")
+            + (f" {len(summary.unmeasurable)} unmeasured." if summary.unmeasurable else "")
             + (f" {len(summary.disagreeing)} disagreeing." if summary.disagreeing else ""),
         )
 
@@ -80,14 +80,17 @@ SCHEDULES_DIR = "schedules"
 SCHEDULE_NAME = "Rapporti aeroilluminanti"
 
 
-def _select(context, elements):
-    """Puts the given elements in the viewport selection, active on the first."""
+def _select(elements):
+    """Puts the given elements in the viewport selection, active on the first.
+
+    select_products skips what the view layer does not hold — selecting an
+    object in an excluded collection raises — so only what it did select can be
+    counted or made active."""
     bpy.ops.object.select_all(action="DESELECT")
-    objects = [obj for obj in (tool.Ifc.get_object(element) for element in elements) if obj]
-    for obj in objects:
-        obj.select_set(True)
+    tool.Spatial.select_products(elements)
+    objects = [obj for obj in (tool.Ifc.get_object(element) for element in elements) if obj and obj.select_get()]
     if objects:
-        context.view_layer.objects.active = objects[0]
+        tool.Blender.set_active_object(objects[0])
     return len(objects)
 
 
@@ -105,7 +108,7 @@ class SelectDisagreeingOpenings(bpy.types.Operator):
         return bool(Summary.load().get("disagreeing"))
 
     def execute(self, context):
-        count = _select(context, Summary.load()["disagreeing"])
+        count = _select(Summary.load()["disagreeing"])
         self.report({"INFO"}, f"{count} fillings selected.")
         return {"FINISHED"}
 
@@ -122,7 +125,7 @@ class SelectUnverifiedSpaces(bpy.types.Operator):
         return bool(Summary.load().get("unverified"))
 
     def execute(self, context):
-        count = _select(context, Summary.load()["unverified"])
+        count = _select(Summary.load()["unverified"])
         self.report({"INFO"}, f"{count} rooms selected.")
         return {"FINISHED"}
 
@@ -133,7 +136,9 @@ class RefreshSpaceBoundaries(bpy.types.Operator, tool.Ifc.Operator):
     is a selection, on every disagreeing one otherwise.
 
     The only thing in this tool that deletes anything. A boundary you corrected
-    by hand is never reported as disagreeing, so it never reaches this button"""
+    by hand is never reported as disagreeing, so it never reaches this button,
+    and one written by another authoring tool — with a contact surface, or 2nd
+    level — is left alone even when it does"""
 
     bl_idname = "bim.salad_refresh_space_boundaries"
     bl_label = "Aggiorna"
@@ -153,9 +158,13 @@ class RefreshSpaceBoundaries(bpy.types.Operator, tool.Ifc.Operator):
         if not disagreeing:
             self.report({"INFO"}, "No disagreeing boundary to update.")
             return {"CANCELLED"}
-        boundaries.refresh(ifc_file, disagreeing)
+        updated, kept = boundaries.refresh(ifc_file, disagreeing)
         Summary.refresh()
-        self.report({"INFO"}, f"{len(disagreeing)} associations updated.")
+        self.report(
+            {"INFO"},
+            f"{updated} associations updated."
+            + (f" {kept} left alone: their boundaries were written elsewhere." if kept else ""),
+        )
 
 
 class ExportDaylightSchedule(bpy.types.Operator, tool.Ifc.Operator):
@@ -176,6 +185,11 @@ class ExportDaylightSchedule(bpy.types.Operator, tool.Ifc.Operator):
             return False
         if not tool.Ifc.get_path():
             cls.poll_message_set("Save the IFC file first: the schedule is written next to it.")
+            return False
+        # Measured before the first Calcola, no room has a clear opening yet and
+        # every one of them would be written down as failing.
+        if not Summary.load()["spaces"]:
+            cls.poll_message_set("Run Calcola first: the schedule reports what the last calculation found.")
             return False
         return True
 

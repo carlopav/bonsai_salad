@@ -46,8 +46,19 @@ def _pset_entity(ifc_file, element, name):
     return ifcopenshell.api.pset.add_pset(ifc_file, product=element, name=name)
 
 
+def area_converter(ifc_file):
+    """SI to project units. The geometry kernel answers in metres whatever the
+    file's LENGTHUNIT, while a stored area — ours or Qto_SpaceBaseQuantities' —
+    is in project units, so a millimetre project would otherwise mix the two a
+    million apart."""
+    from ifc5d.qto import SI2ProjectUnitConverter
+
+    return SI2ProjectUnitConverter(ifc_file)
+
+
 def write_clear_opening(ifc_file, filling, area):
-    """Stores the measured clear opening, leaving both overrides untouched.
+    """Stores the measured clear opening, given in SI metres, leaving both
+    overrides untouched.
 
     The measure is explicit: a pset of our own has no buildingSMART template,
     and without one an Italian name would be read as a length.
@@ -55,7 +66,9 @@ def write_clear_opening(ifc_file, filling, area):
     ifcopenshell.api.pset.edit_pset(
         ifc_file,
         pset=_pset_entity(ifc_file, filling, FILLING_PSET),
-        properties={CLEAR: ifc_file.createIfcAreaMeasure(float(area))},
+        properties={
+            CLEAR: ifc_file.createIfcAreaMeasure(area_converter(ifc_file).convert(float(area), "IfcAreaMeasure"))
+        },
     )
 
 
@@ -89,7 +102,7 @@ Row = namedtuple(
         "net",
         "daylight",
         "air",
-        "unmeasured",
+        "unmeasured_fillings",
         "daylight_ratio",
         "air_ratio",
         "daylight_requirement",
@@ -122,10 +135,10 @@ def write_requirements(ifc_file, space, daylight, air):
     )
 
 
-def net_floor_area(space, geom_settings=None):
-    """The room's floor: the take-off already in the file where there is one, its
-    footprint otherwise. Correcting the area means correcting the Qto — one
-    truth in the model."""
+def net_floor_area(ifc_file, space, geom_settings=None):
+    """The room's floor in project units: the take-off already in the file where
+    there is one, its footprint otherwise. Correcting the area means correcting
+    the Qto — one truth in the model."""
     quantities = ifcopenshell.util.element.get_pset(space, "Qto_SpaceBaseQuantities", should_inherit=False)
     if quantities and quantities.get("NetFloorArea") is not None:
         return float(quantities["NetFloorArea"])
@@ -133,7 +146,8 @@ def net_floor_area(space, geom_settings=None):
         shape = ifcopenshell.geom.create_shape(geom_settings or openings.settings(), space)
     except RuntimeError:
         return 0.0
-    return float(ifcopenshell.util.shape.get_footprint_area(shape.geometry))
+    area = float(ifcopenshell.util.shape.get_footprint_area(shape.geometry))
+    return area_converter(ifc_file).convert(area, "IfcAreaMeasure")
 
 
 def _ratio(area, net):
@@ -145,15 +159,15 @@ def _passes(ratio, requirement):
 
 
 def measure_spaces(ifc_file, spaces, geom_settings=None):
-    """One Row per room, in the order given."""
+    """One Row per room, in the order given, every area in project units."""
     geom_settings = geom_settings or openings.settings()
     rows = []
     for space in spaces:
         served = boundaries.serves(space)
         daylight = sum(contribution(filling)[0] for filling in served)
         air = sum(contribution(filling)[1] for filling in served)
-        unmeasured = sum(not is_measured(filling) for filling in served)
-        net = net_floor_area(space, geom_settings)
+        unmeasured_fillings = sum(not is_measured(filling) for filling in served)
+        net = net_floor_area(ifc_file, space, geom_settings)
         daylight_ratio, air_ratio = _ratio(daylight, net), _ratio(air, net)
         daylight_requirement, air_requirement = requirements(space)
         rows.append(
@@ -164,7 +178,7 @@ def measure_spaces(ifc_file, spaces, geom_settings=None):
                 net,
                 daylight,
                 air,
-                unmeasured,
+                unmeasured_fillings,
                 daylight_ratio,
                 air_ratio,
                 daylight_requirement,
@@ -185,7 +199,7 @@ def write_space_results(ifc_file, row):
         AIR: ifc_file.createIfcAreaMeasure(row.air),
         DAYLIGHT_RATIO: ifc_file.createIfcRatioMeasure(row.daylight_ratio),
         AIR_RATIO: ifc_file.createIfcRatioMeasure(row.air_ratio),
-        VERIFIED: None if row.unmeasured > 0 else ifc_file.createIfcBoolean(bool(row.verified)),
+        VERIFIED: None if row.unmeasured_fillings > 0 else ifc_file.createIfcBoolean(bool(row.verified)),
     }
     existing = _pset(row.space, SPACE_PSET)
     if DAYLIGHT_REQUIREMENT not in existing:
@@ -223,7 +237,11 @@ def headers(ifc_file):
 
 NO_STOREY = "(nessun piano)"
 
-Summary = namedtuple("Summary", ("rows", "boundaries_written", "orphans", "unmeasured", "disagreeing"))
+# unmeasurable is the fillings the geometry could not measure at all; a Row's
+# unmeasured_fillings are the ones it serves that carry no clear opening. Two
+# populations, and a room can lose its verdict to the second without the first
+# holding anything.
+Summary = namedtuple("Summary", ("rows", "boundaries_written", "orphans", "unmeasurable", "disagreeing"))
 
 
 def quantify(ifc_file, geom_settings=None):
@@ -267,7 +285,7 @@ def _storey(ifc_file, space):
     if storey is not None:
         return storey
     for rel in ifc_file.by_type("IfcRelContainedInSpatialStructure"):
-        if space in rel.RelatedElements:
+        if space in rel.RelatedElements and rel.RelatingStructure.is_a("IfcBuildingStorey"):
             return rel.RelatingStructure
     return None
 

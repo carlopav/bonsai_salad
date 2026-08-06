@@ -6,7 +6,7 @@ from odf.teletype import extractText
 from daylight_ventilation.core import ods, ratios
 
 
-def row(identification, name, net, daylight, air, unmeasured=0, verified=True):
+def row(identification, name, net, daylight, air, unmeasured_fillings=0, verified=True):
     return ratios.Row(
         space=None,
         identification=identification,
@@ -14,7 +14,7 @@ def row(identification, name, net, daylight, air, unmeasured=0, verified=True):
         net=net,
         daylight=daylight,
         air=air,
-        unmeasured=unmeasured,
+        unmeasured_fillings=unmeasured_fillings,
         daylight_ratio=daylight / net if net else 0.0,
         air_ratio=air / net if net else 0.0,
         daylight_requirement=0.125,
@@ -109,7 +109,7 @@ def test_an_exempt_room_shows_a_dash(written):
 
 def test_an_unmeasured_room_withholds_the_verdict(tmp_path):
     path = tmp_path / "table.ods"
-    unmeasured = row("A3", "Cucina", 12.0, 1.8, 1.8, unmeasured=1)
+    unmeasured = row("A3", "Cucina", 12.0, 1.8, 1.8, unmeasured_fillings=1)
     ods.write(str(path), HEADERS, [("Piano terra", [unmeasured])])
     (table,) = load(str(path)).spreadsheet.getElementsByType(Table)
     cells = table.getElementsByType(TableRow)[2].getElementsByType(TableCell)
@@ -153,7 +153,7 @@ def test_both_requirements_present_keep_the_and_formula(tmp_path):
 
 def test_a_measured_room_still_gets_the_formula(tmp_path):
     path = tmp_path / "table.ods"
-    measured = row("A1", "Soggiorno", 12.0, 1.8, 1.8, unmeasured=0)
+    measured = row("A1", "Soggiorno", 12.0, 1.8, 1.8, unmeasured_fillings=0)
     ods.write(str(path), HEADERS, [("Piano terra", [measured])])
     (table,) = load(str(path)).spreadsheet.getElementsByType(Table)
     cells = table.getElementsByType(TableRow)[2].getElementsByType(TableCell)

@@ -45,6 +45,17 @@ def test_a_filling_with_no_pset_contributes_nothing(ifc_file, add_box):
     assert ratios.contribution(window) == pytest.approx((0.0, 0.0))
 
 
+def test_a_clear_opening_of_zero_is_measured(ifc_file, add_box):
+    """is_measured asks whether the property is there, not whether it is
+    truthy: a window that really does open onto nothing has been measured, and
+    must not withhold its room's verdict."""
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    assert ratios.is_measured(window) is False
+    ratios.write_clear_opening(ifc_file, window, 0.0)
+    assert ratios.is_measured(window) is True
+    assert ratios.contribution(window) == pytest.approx((0.0, 0.0))
+
+
 @pytest.fixture
 def lit_room(ifc_file, add_box, add_tapered_opening, add_space, fill):
     """A 4 x 3 room behind a wall, with one 1.2 x 1.5 window: 12 m2 of floor and
@@ -78,7 +89,7 @@ def test_requirements_are_read_back(ifc_file, add_space):
 
 def test_the_net_floor_area_comes_from_the_geometry(ifc_file, add_space):
     space = add_space("A1", width=4.0, depth=3.0)
-    assert ratios.net_floor_area(space) == pytest.approx(12.0, rel=1e-6)
+    assert ratios.net_floor_area(ifc_file, space) == pytest.approx(12.0, rel=1e-6)
 
 
 def test_the_qto_wins_over_the_geometry(ifc_file, add_space):
@@ -87,7 +98,19 @@ def test_the_qto_wins_over_the_geometry(ifc_file, add_space):
     space = add_space("A1", width=4.0, depth=3.0)
     qto = ifcopenshell.api.pset.add_qto(ifc_file, product=space, name="Qto_SpaceBaseQuantities")
     ifcopenshell.api.pset.edit_qto(ifc_file, qto=qto, properties={"NetFloorArea": ifc_file.createIfcAreaMeasure(10.0)})
-    assert ratios.net_floor_area(space) == pytest.approx(10.0)
+    assert ratios.net_floor_area(ifc_file, space) == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize("unit_prefix", ["MILLI"], indirect=True)
+def test_the_qto_and_the_geometry_agree_in_millimetres(ifc_file, add_space):
+    """The geometry kernel answers in SI metres, the Qto is in project units:
+    unconverted, the two rooms would differ by a factor of a million."""
+    measured = add_space("A1", width=4000.0, depth=3000.0, height=3000.0)
+    declared = add_space("A2", width=4000.0, depth=3000.0, height=3000.0, matrix=placement(x=10.0))
+    qto = ifcopenshell.api.pset.add_qto(ifc_file, product=declared, name="Qto_SpaceBaseQuantities")
+    ifcopenshell.api.pset.edit_qto(ifc_file, qto=qto, properties={"NetFloorArea": ifc_file.createIfcAreaMeasure(12e6)})
+    assert ratios.net_floor_area(ifc_file, measured) == pytest.approx(12e6, rel=1e-6)
+    assert ratios.net_floor_area(ifc_file, declared) == pytest.approx(12e6)
 
 
 def test_a_lit_room_passes(ifc_file, lit_room):
@@ -139,7 +162,7 @@ def test_an_unmeasured_filling_is_counted(ifc_file, add_box, add_tapered_opening
     # write_clear_opening deliberately never called: this is what the pipeline
     # leaves behind for a filling whose area came back None.
     (row,) = ratios.measure_spaces(ifc_file, [room])
-    assert row.unmeasured == 1
+    assert row.unmeasured_fillings == 1
 
 
 def test_an_unmeasured_room_gets_no_verdict(ifc_file, add_box, add_tapered_opening, add_space, fill):
@@ -163,7 +186,7 @@ def test_a_fully_measured_room_still_gets_a_verdict(ifc_file, lit_room):
 
     room, _ = lit_room()
     (row,) = ratios.measure_spaces(ifc_file, [room])
-    assert row.unmeasured == 0
+    assert row.unmeasured_fillings == 0
     ratios.write_space_results(ifc_file, row)
     pset = ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
     assert pset[ratios.VERIFIED] is True

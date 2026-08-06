@@ -27,7 +27,8 @@ broken or unusual model. Such a window contributes nothing, and the panel
 counts it apart from the orphans, under `serramenti non misurati`. Rather than
 give the room it serves a false pass or fail, the tool withholds its verdict
 entirely — no `Verificato` in the property set, `da verificare` in the ODS
-table — until you look at the flagged window and either fix its geometry, or,
+table, counted in the panel as `locali senza verdetto` and never among the ones
+that failed — until you look at the flagged window and either fix its geometry, or,
 if you can't, type its area by hand as a `Superficie illuminante` /
 `Superficie aerante` override, which is exactly what the override is for.
 
@@ -44,6 +45,11 @@ facing the room to `EXTERNAL`, delete the other, and nothing will overwrite it.
 Windows moved after a calculation keep their old boundary. The panel reports
 those whose boundary names a room the geometry does not put them near, and
 **Aggiorna** replaces them. A boundary you corrected by hand is never reported.
+A boundary written by another authoring tool — one carrying a contact surface,
+or a 2nd level one paired with the boundary on the other side — is left
+untouched even when it is reported: **Aggiorna** says how many it left alone,
+because neither the surface nor the pairing is something this tool could write
+back.
 
 ## Not yet implemented
 

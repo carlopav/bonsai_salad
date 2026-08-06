@@ -72,10 +72,8 @@ def _verdict(row, number, styles):
     Only the comparisons an exempt requirement actually imposes enter the
     formula: a term built over a dashed ratio cell would make the verdict
     depend on how the reading application ranks text against numbers."""
-    if row.unmeasured > 0:
-        cell = TableCell(valuetype="string", stylename=styles["text"])
-        cell.addElement(P(text=UNVERIFIED))
-        return cell
+    if row.unmeasured_fillings > 0:
+        return _text(UNVERIFIED, styles["text"])
 
     terms = []
     if row.air_requirement > 0:
@@ -84,9 +82,7 @@ def _verdict(row, number, styles):
         terms.append(f"[.{DAYLIGHT_RATIO}{number}]>=[.{DAYLIGHT_REQUIREMENT}{number}]")
 
     if not terms:
-        cell = TableCell(valuetype="string", stylename=styles["text"])
-        cell.addElement(P(text=YES))
-        return cell
+        return _text(YES, styles["text"])
 
     condition = terms[0] if len(terms) == 1 else f"AND({terms[0]};{terms[1]})"
     cell = TableCell(

@@ -6,7 +6,7 @@ import ifcopenshell.api.root
 import ifcopenshell.guid
 import ifcopenshell.util.element
 
-from daylight_ventilation.core import ratios
+from daylight_ventilation.core import boundaries, ratios
 
 from .conftest import placement
 
@@ -33,12 +33,43 @@ def test_quantify_reports_what_it_did(ifc_file, project):
     summary = ratios.quantify(ifc_file)
     assert summary.boundaries_written == 1
     assert summary.orphans == [orphan]
-    assert summary.unmeasured == []
+    assert summary.unmeasurable == []
     assert summary.disagreeing == []
     (row,) = summary.rows
     assert row.space == room
     assert row.daylight_ratio == pytest.approx(0.15, rel=1e-6)
     assert row.verified is True
+
+
+@pytest.mark.parametrize("unit_prefix", [None, "MILLI"], indirect=True)
+def test_a_room_reads_the_same_whatever_the_project_unit(
+    ifc_file, unit_prefix, add_box, add_tapered_opening, add_space, fill
+):
+    """The metric room's millimetre twin: every area a million times larger,
+    every ratio identical. Nothing measured may reach a pset in SI metres."""
+    # Profiles and point lists are authored in project units; the placements
+    # edit_object_placement takes are SI whatever the file says (is_si=True).
+    scale = 1000.0 if unit_prefix == "MILLI" else 1.0
+    wall = add_box("IfcWall", length=4.0 * scale, thickness=0.3 * scale, height=3.0 * scale)
+    add_space("A1", width=4.0 * scale, depth=3.0 * scale, height=3.0 * scale, matrix=placement(y=0.3))
+    opening = add_tapered_opening(
+        near=1.2 * scale, far=1.2 * scale, height=1.5 * scale, depth=0.3 * scale, matrix=placement(x=2.0, z=0.9)
+    )
+    window = add_box(
+        "IfcWindow",
+        length=1.2 * scale,
+        thickness=0.1 * scale,
+        height=1.5 * scale,
+        matrix=placement(x=1.4, z=0.9),
+    )
+    fill(wall, opening, window)
+    (row,) = ratios.quantify(ifc_file).rows
+    assert row.net == pytest.approx(12.0 * scale**2, rel=1e-6)
+    assert row.daylight == pytest.approx(1.8 * scale**2, rel=1e-6)
+    assert row.daylight_ratio == pytest.approx(0.15, rel=1e-6)
+    assert row.verified is True
+    pset = ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)
+    assert pset[ratios.CLEAR] == pytest.approx(1.8 * scale**2, rel=1e-6)
 
 
 def test_a_second_run_changes_nothing(ifc_file, project):
@@ -88,7 +119,7 @@ def test_quantify_reports_an_unmeasured_void_without_raising(ifc_file, add_box, 
     window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, y=5.0, z=0.9))
     fill(wall, opening, window)
     summary = ratios.quantify(ifc_file)
-    assert summary.unmeasured == [window]
+    assert summary.unmeasurable == [window]
     pset = ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False) or {}
     assert ratios.CLEAR not in pset
 
@@ -111,6 +142,20 @@ def test_the_room_behind_an_unmeasured_void_gets_no_verdict(ifc_file, add_box, a
     lit_pset = ifcopenshell.util.element.get_pset(lit_room, ratios.SPACE_PSET, should_inherit=False)
     assert ratios.VERIFIED not in dark_pset
     assert lit_pset[ratios.VERIFIED] is True
+
+
+def test_a_wall_boundary_leaves_every_room_its_verdict(ifc_file, project):
+    """What a Revit or ArchiCAD export writes: the room is bounded by its wall
+    as well as by its window. The wall carries no clear opening, and counting it
+    as an unmeasured filling would strip the verdict from every room."""
+    room, _, _ = project
+    wall = ifc_file.by_type("IfcWall")[0]
+    boundaries.add(ifc_file, room, wall, external=True)
+    (row,) = ratios.quantify(ifc_file).rows
+    assert row.unmeasured_fillings == 0
+    assert row.verified is True
+    pset = ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
+    assert pset[ratios.VERIFIED] is True
 
 
 def test_storeys_are_ordered_by_elevation_not_creation(ifc_file, add_space):
@@ -140,3 +185,17 @@ def test_a_space_attached_by_containment_still_finds_its_storey(ifc_file, add_sp
     )
     rows = ratios.measure_spaces(ifc_file, [room])
     assert [label for label, _ in ratios.sections(ifc_file, rows)] == ["Piano terra"]
+
+
+def test_a_space_contained_in_a_building_is_not_given_it_as_a_storey(ifc_file, add_space):
+    """The same fallback, one level up: a building is not a storey heading."""
+    building = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcBuilding", name="Edificio")
+    room = add_space("A1", width=2.0, depth=1.0, long_name="Camera")
+    ifc_file.create_entity(
+        "IfcRelContainedInSpatialStructure",
+        GlobalId=ifcopenshell.guid.new(),
+        RelatedElements=[room],
+        RelatingStructure=building,
+    )
+    rows = ratios.measure_spaces(ifc_file, [room])
+    assert [label for label, _ in ratios.sections(ifc_file, rows)] == [ratios.NO_STOREY]
