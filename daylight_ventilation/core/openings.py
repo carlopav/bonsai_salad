@@ -7,6 +7,8 @@ Everything here works on triangulated bodies in world coordinates and knows
 nothing of Blender.
 """
 
+from collections import namedtuple
+
 import numpy as np
 
 import ifcopenshell.geom
@@ -237,3 +239,60 @@ def probe(opening, host, spaces, geom_settings):
     # dict.fromkeys keeps the order and drops a room found on both sides, which
     # happens when a wall doubles back into the same space.
     return list(dict.fromkeys(rooms)), len(rooms) == 1
+
+
+FILLING_CLASSES = ("IfcWindow", "IfcDoor")
+
+Proposal = namedtuple("Proposal", ("filling", "opening", "host", "rooms", "external", "area"))
+
+
+def fillings(ifc_file):
+    """Every window and door in the file, in file order."""
+    found = []
+    for ifc_class in FILLING_CLASSES:
+        try:
+            found.extend(ifc_file.by_type(ifc_class))
+        except RuntimeError:
+            continue
+    return found
+
+
+def host_of(filling):
+    """(the opening the filling fills, the element that opening voids), either
+    of them None when the chain is broken."""
+    for rel in filling.FillsVoids or []:
+        opening = rel.RelatingOpeningElement
+        for void in opening.VoidsElements or []:
+            return opening, void.RelatingBuildingElement
+    return None, None
+
+
+def _spaces(ifc_file, geom_settings):
+    return {space: triangles(space, geom_settings) for space in ifc_file.by_type("IfcSpace")}
+
+
+def proposals(ifc_file, geom_settings=None):
+    """What the geometry says about every filling: the rooms it borders, whether
+    it faces outside, and the clear opening it offers.
+
+    An opening shared by several fillings splits its clear opening equally among
+    them — counting the same hole once per filling would double the light. A
+    filling whose probe cannot be answered — every ray grazing a room's boundary
+    — comes back as an orphan rather than aborting every other filling in the
+    file.
+    """
+    geom_settings = geom_settings or settings()
+    spaces = _spaces(ifc_file, geom_settings)
+    found = []
+    for filling in fillings(ifc_file):
+        opening, host = host_of(filling)
+        if opening is None or host is None:
+            continue
+        try:
+            rooms, external = probe(opening, host, spaces, geom_settings)
+        except ValueError:
+            rooms, external = [], False
+        area = clear_opening_area(opening, host, geom_settings)
+        share = len([rel.RelatedBuildingElement for rel in opening.HasFillings or []]) or 1
+        found.append(Proposal(filling, opening, host, rooms, external, (area or 0.0) / share))
+    return found

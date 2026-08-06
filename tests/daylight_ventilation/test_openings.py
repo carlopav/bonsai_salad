@@ -109,9 +109,7 @@ def test_a_window_between_two_rooms_finds_both(add_box, add_tapered_opening, add
     behind = add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
     front = add_space("B", width=4.0, depth=3.0, matrix=placement(y=-3.0))
     opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
-    found, external = openings.probe(
-        opening, wall, _space_bodies([behind, front]), openings.settings()
-    )
+    found, external = openings.probe(opening, wall, _space_bodies([behind, front]), openings.settings())
     assert set(found) == {behind, front}
     assert external is False
 
@@ -123,3 +121,62 @@ def test_an_orphan_window_finds_nothing(add_box, add_tapered_opening, add_space)
     found, external = openings.probe(opening, wall, _space_bodies([far_away]), openings.settings())
     assert found == []
     assert external is False
+
+
+def test_the_host_of_a_filling_is_the_wall_its_opening_voids(add_box, add_tapered_opening, fill):
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=2.0))
+    fill(wall, opening, window)
+    assert openings.host_of(window) == (opening, wall)
+
+
+def test_an_unhosted_filling_has_neither(add_box):
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    assert openings.host_of(window) == (None, None)
+
+
+def test_a_proposal_carries_the_room_and_the_clear_opening(ifc_file, add_box, add_tapered_opening, add_space, fill):
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    fill(wall, opening, window)
+    (proposal,) = openings.proposals(ifc_file)
+    assert proposal.filling == window
+    assert proposal.external is True
+    assert proposal.area == pytest.approx(1.8, rel=1e-6)
+
+
+def test_two_fillings_in_one_opening_split_it(ifc_file, add_box, add_tapered_opening, add_space, fill):
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    left = add_box("IfcWindow", length=0.6, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    right = add_box("IfcWindow", length=0.6, thickness=0.1, height=1.5, matrix=placement(x=2.0, z=0.9))
+    fill(wall, opening, left)
+    fill(wall, opening, right)
+    areas = [proposal.area for proposal in openings.proposals(ifc_file)]
+    assert areas == pytest.approx([0.9, 0.9], rel=1e-6)
+
+
+def test_a_filling_whose_probe_cannot_be_answered_is_an_orphan_proposal(
+    ifc_file, add_box, add_tapered_opening, add_space, fill, monkeypatch
+):
+    """Every ray grazing is a real outcome of contains(), not a special case
+    invented for this test: it is what happens when the probed point lands
+    exactly on a seam between two triangles, whichever ray is tried."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    fill(wall, opening, window)
+
+    def always_grazes(body, point, ray):
+        return np.zeros(len(body), dtype=bool), True
+
+    monkeypatch.setattr(openings, "_cast", always_grazes)
+    (proposal,) = openings.proposals(ifc_file)
+    assert proposal.filling == window
+    assert proposal.rooms == []
+    assert proposal.external is False
