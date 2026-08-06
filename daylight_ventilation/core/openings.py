@@ -9,6 +9,10 @@ nothing of Blender.
 
 import numpy as np
 
+import ifcopenshell.geom
+import ifcopenshell.util.placement
+import ifcopenshell.util.shape
+
 UP = np.array([0.0, 0.0, 1.0])
 
 
@@ -58,3 +62,83 @@ def section_area(triangles, z):
     tail = np.where(flip[:, None], end, start)
     head = np.where(flip[:, None], start, end)
     return float(0.5 * np.sum(tail[:, 0] * head[:, 1] - head[:, 0] * tail[:, 1]))
+
+
+# Where the opening is sliced across the host's thickness. The ends are sampled
+# close to the faces but never on them: a plane through a face meets it edge on
+# and reports nothing.
+SAMPLES = np.linspace(0.02, 0.98, 13)
+
+
+def settings():
+    geom_settings = ifcopenshell.geom.settings()
+    geom_settings.set("use-world-coords", True)
+    return geom_settings
+
+
+def triangles(element, geom_settings):
+    """(N, 3, 3) of the element's body in world coordinates, or None when it has
+    no usable one."""
+    try:
+        # The shape has to outlive its geometry: read off a temporary and the
+        # vertex buffers come back empty.
+        shape = ifcopenshell.geom.create_shape(geom_settings, element)
+    except RuntimeError:
+        return None
+    geometry = shape.geometry
+    vertices = ifcopenshell.util.shape.get_vertices(geometry)
+    faces = ifcopenshell.util.shape.get_faces(geometry)
+    if not len(faces):
+        return None
+    return vertices[faces]
+
+
+def thickness_axis(host):
+    """The unit world direction of the host's smallest local extent: a wall's Y,
+    a slab's or a roof's Z, without a case per class."""
+    local = ifcopenshell.geom.settings()
+    local.set("use-world-coords", False)
+    body = triangles(host, local)
+    if body is None:
+        return None
+    points = body.reshape(-1, 3)
+    extent = points.max(axis=0) - points.min(axis=0)
+    matrix = ifcopenshell.util.placement.get_local_placement(host.ObjectPlacement)
+    direction = matrix[:3, int(np.argmin(extent))]
+    return direction / np.linalg.norm(direction)
+
+
+def _rotation_to_up(axis):
+    """A rotation taking `axis` to +Z, so the sections become planes of constant
+    z and the shoelace runs in XY."""
+    axis = axis / np.linalg.norm(axis)
+    if abs(float(axis @ UP)) > 1.0 - 1e-9:
+        return np.eye(3) if axis[2] > 0 else np.diag([1.0, -1.0, -1.0])
+    right = np.cross(axis, UP)
+    right /= np.linalg.norm(right)
+    return np.stack([right, np.cross(axis, right), axis])
+
+
+def clear_opening_area(opening, host, geom_settings):
+    """The smallest section of the opening taken across the host's thickness —
+    the hole you see looking at the wall head-on — or None when either body is
+    missing.
+
+    Only the span the opening shares with the host is sampled: a void that
+    overshoots the faces, or that is cut for a sill outside them, cannot inflate
+    the number.
+    """
+    axis = thickness_axis(host)
+    void = triangles(opening, geom_settings)
+    wall = triangles(host, geom_settings)
+    if axis is None or void is None or wall is None:
+        return None
+    rotation = _rotation_to_up(axis)
+    void = void @ rotation.T
+    wall = wall @ rotation.T
+    low = max(float(void[:, :, 2].min()), float(wall[:, :, 2].min()))
+    high = min(float(void[:, :, 2].max()), float(wall[:, :, 2].max()))
+    if high <= low:
+        return None
+    areas = [section_area(void, low + fraction * (high - low)) for fraction in SAMPLES]
+    return min(areas)
