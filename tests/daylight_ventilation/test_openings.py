@@ -65,6 +65,34 @@ def test_a_point_that_ties_an_equal_component_ray_is_still_excluded(add_space):
     assert not openings.contains(body, np.array([2.0, -1.5, 0.5]))
 
 
+# Reproduces the equal-component tie from the round-1 regression: same seam as
+# test_a_point_that_ties_an_equal_component_ray_is_still_excluded.
+_EQUAL_RAY = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)
+_TIE_POINT = np.array([2.0, -1.5, 0.5])
+
+
+def test_cast_flags_a_ray_that_grazes_a_triangle_edge(add_space):
+    space = add_space("A", width=4.0, depth=3.0)
+    body = openings.triangles(space, openings.settings())
+    _, grazed = openings._cast(body, _TIE_POINT, _EQUAL_RAY)
+    assert grazed is True
+
+
+def test_contains_falls_through_a_grazing_ray_to_the_next(add_space, monkeypatch):
+    space = add_space("A", width=4.0, depth=3.0)
+    body = openings.triangles(space, openings.settings())
+    monkeypatch.setattr(openings, "RAYS", (_EQUAL_RAY, openings.RAYS[0]))
+    assert not openings.contains(body, _TIE_POINT)
+
+
+def test_contains_raises_when_every_ray_grazes(add_space, monkeypatch):
+    space = add_space("A", width=4.0, depth=3.0)
+    body = openings.triangles(space, openings.settings())
+    monkeypatch.setattr(openings, "RAYS", (_EQUAL_RAY, _EQUAL_RAY))
+    with pytest.raises(ValueError):
+        openings.contains(body, _TIE_POINT)
+
+
 def test_an_external_window_finds_one_room(add_box, add_tapered_opening, add_space):
     # The wall runs along X at y = 0 with its thickness in +Y; the room sits
     # behind it, from y = 0.3 to y = 3.3.

@@ -151,10 +151,10 @@ PROBES = (0.05, 0.15, 0.30, 0.60)
 
 
 def _incommensurate_ray(*squares):
-    """A unit direction whose components' pairwise ratios are irrational: no
-    rational architectural coordinate can ever solve the tie that a rational
-    ratio (e.g. three equal components) hits by construction on repeated room
-    proportions."""
+    """A unit direction built from `sqrt(squares)`: for distinct squarefree p,
+    q, `1, sqrt(p), sqrt(q)` are Q-linearly independent, so no rational
+    architectural delta can tie two of the ray's axis-crossings together — down
+    to the rounding of those roots to the nearest float."""
     ray = np.sqrt(np.array(squares, dtype=float))
     return ray / np.linalg.norm(ray)
 
