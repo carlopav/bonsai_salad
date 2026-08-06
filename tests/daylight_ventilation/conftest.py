@@ -113,6 +113,29 @@ def add_tapered_opening(ifc_file):
 
 
 @pytest.fixture
+def add_space(ifc_file):
+    """A room as an extruded rectangle, placed by its lower left corner."""
+    builder = ifcopenshell.util.shape_builder.ShapeBuilder(ifc_file)
+    body = ifcopenshell.util.representation.get_context(ifc_file, "Model", "Body", "MODEL_VIEW")
+
+    def add(name, width, depth, height=3.0, matrix=None, long_name=None):
+        space = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcSpace", name=name)
+        space.LongName = long_name
+        outline = [(0.0, 0.0), (width, 0.0), (width, depth), (0.0, depth)]
+        profile = builder.profile(builder.polyline(outline, closed=True))
+        representation = builder.get_representation(body, [builder.extrude(profile, magnitude=height)])
+        ifcopenshell.api.geometry.assign_representation(
+            ifc_file, product=space, representation=representation
+        )
+        ifcopenshell.api.geometry.edit_object_placement(
+            ifc_file, product=space, matrix=placement() if matrix is None else matrix
+        )
+        return space
+
+    return add
+
+
+@pytest.fixture
 def fill(ifc_file):
     """Voids a host with an opening and fills the opening with a filling."""
 

@@ -41,3 +41,49 @@ def test_the_part_outside_the_wall_does_not_count(add_box, add_tapered_opening):
     opening = add_tapered_opening(near=1.0, far=5.0, height=1.5, depth=1.0, matrix=placement(x=1.0))
     area = openings.clear_opening_area(opening, wall, openings.settings())
     assert area < 1.0 * 1.5 * 1.3
+
+
+def _space_bodies(spaces):
+    geom_settings = openings.settings()
+    return {space: openings.triangles(space, geom_settings) for space in spaces}
+
+
+def test_a_point_inside_a_room_is_contained(add_space):
+    space = add_space("A", width=4.0, depth=3.0)
+    body = openings.triangles(space, openings.settings())
+    assert openings.contains(body, np.array([2.0, 1.5, 1.0]))
+    # x = 2.0 sits on the box's own axis of symmetry, so the equal-component RAY
+    # would graze a face diagonal exactly; 2.5 keeps the point outside without it.
+    assert not openings.contains(body, np.array([2.5, -1.5, 1.0]))
+
+
+def test_an_external_window_finds_one_room(add_box, add_tapered_opening, add_space):
+    # The wall runs along X at y = 0 with its thickness in +Y; the room sits
+    # behind it, from y = 0.3 to y = 3.3.
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    space = add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    found, external = openings.probe(opening, wall, _space_bodies([space]), openings.settings())
+    assert found == [space]
+    assert external is True
+
+
+def test_a_window_between_two_rooms_finds_both(add_box, add_tapered_opening, add_space):
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    behind = add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    front = add_space("B", width=4.0, depth=3.0, matrix=placement(y=-3.0))
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    found, external = openings.probe(
+        opening, wall, _space_bodies([behind, front]), openings.settings()
+    )
+    assert set(found) == {behind, front}
+    assert external is False
+
+
+def test_an_orphan_window_finds_nothing(add_box, add_tapered_opening, add_space):
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    far_away = add_space("A", width=4.0, depth=3.0, matrix=placement(x=100.0))
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    found, external = openings.probe(opening, wall, _space_bodies([far_away]), openings.settings())
+    assert found == []
+    assert external is False

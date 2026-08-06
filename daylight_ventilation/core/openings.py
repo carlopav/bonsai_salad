@@ -142,3 +142,69 @@ def clear_opening_area(opening, host, geom_settings):
         return None
     areas = [section_area(void, low + fraction * (high - low)) for fraction in SAMPLES]
     return min(areas)
+
+
+# How far past the host's face a probe reaches. Short enough not to leave a
+# small room, long enough to clear a plaster layer — every distance is tried in
+# turn and the first that lands in a room decides that side.
+PROBES = (0.05, 0.15, 0.30, 0.60)
+
+# A ray along no axis of anything: axis aligned rays graze the coplanar faces of
+# a box shaped room and make the parity count unreliable.
+RAY = np.array([0.5773502691896258, 0.5773502691896258, 0.5773502691896258])
+
+
+def contains(body, point):
+    """Whether a closed body encloses a point, by the parity of the crossings of
+    a ray leaving it."""
+    origin = body[:, 0]
+    edge1 = body[:, 1] - origin
+    edge2 = body[:, 2] - origin
+    across = np.cross(RAY, edge2)
+    determinant = (edge1 * across).sum(axis=1)
+    parallel = np.abs(determinant) < 1e-12
+    scale = np.where(parallel, 0.0, 1.0 / np.where(parallel, 1.0, determinant))
+    offset = point - origin
+    u = (offset * across).sum(axis=1) * scale
+    along = np.cross(offset, edge1)
+    v = (RAY * along).sum(axis=1) * scale
+    distance = (edge2 * along).sum(axis=1) * scale
+    hit = ~parallel & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0) & (distance > 1e-9)
+    return bool(hit.sum() % 2)
+
+
+def _room_at(point, spaces):
+    for space, body in spaces.items():
+        if body is not None and contains(body, point):
+            return space
+    return None
+
+
+def probe(opening, host, spaces, geom_settings):
+    """(the rooms on either side of the opening, whether it is external).
+
+    External means one side landed in a room and the other in none: what the
+    wall separates the room from is not modelled, so it is outside.
+    """
+    axis = thickness_axis(host)
+    void = triangles(opening, geom_settings)
+    wall = triangles(host, geom_settings)
+    if axis is None or void is None or wall is None:
+        return [], False
+    centre = void.reshape(-1, 3).mean(axis=0)
+    points = wall.reshape(-1, 3) @ axis
+    half = (points.max() - points.min()) / 2
+    middle = centre - axis * float(centre @ axis - (points.max() + points.min()) / 2)
+
+    sides = []
+    for sign in (1.0, -1.0):
+        found = None
+        for distance in PROBES:
+            found = _room_at(middle + axis * sign * (half + distance), spaces)
+            if found is not None:
+                break
+        sides.append(found)
+    rooms = [room for room in sides if room is not None]
+    # dict.fromkeys keeps the order and drops a room found on both sides, which
+    # happens when a wall doubles back into the same space.
+    return list(dict.fromkeys(rooms)), len(rooms) == 1
