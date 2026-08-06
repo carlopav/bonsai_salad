@@ -67,18 +67,32 @@ def _number(value, style, decimals, formula=None):
 
 def _verdict(row, number, styles):
     """An unmeasured filling withholds the verdict: a formula would recompute to
-    sì/no the moment the sheet is opened, overwriting the honest unknown."""
+    sì/no the moment the sheet is opened, overwriting the honest unknown.
+
+    Only the comparisons an exempt requirement actually imposes enter the
+    formula: a term built over a dashed ratio cell would make the verdict
+    depend on how the reading application ranks text against numbers."""
     if row.unmeasured > 0:
         cell = TableCell(valuetype="string", stylename=styles["text"])
         cell.addElement(P(text=UNVERIFIED))
         return cell
+
+    terms = []
+    if row.air_requirement > 0:
+        terms.append(f"[.{AIR_RATIO}{number}]>=[.{AIR_REQUIREMENT}{number}]")
+    if row.daylight_requirement > 0:
+        terms.append(f"[.{DAYLIGHT_RATIO}{number}]>=[.{DAYLIGHT_REQUIREMENT}{number}]")
+
+    if not terms:
+        cell = TableCell(valuetype="string", stylename=styles["text"])
+        cell.addElement(P(text=YES))
+        return cell
+
+    condition = terms[0] if len(terms) == 1 else f"AND({terms[0]};{terms[1]})"
     cell = TableCell(
         valuetype="string",
         stylename=styles["text"],
-        formula=(
-            f"of:=IF(AND([.{AIR_RATIO}{number}]>=[.{AIR_REQUIREMENT}{number}];"
-            f'[.{DAYLIGHT_RATIO}{number}]>=[.{DAYLIGHT_REQUIREMENT}{number}]);"{YES}";"{NO}")'
-        ),
+        formula=f'of:=IF({condition};"{YES}";"{NO}")',
     )
     cell.addElement(P(text=YES if row.verified else NO))
     return cell

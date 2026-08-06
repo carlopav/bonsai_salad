@@ -118,6 +118,39 @@ def test_an_unmeasured_room_withholds_the_verdict(tmp_path):
     assert formula not in cells[9].attributes
 
 
+def test_one_exempt_requirement_drops_its_term(tmp_path):
+    path = tmp_path / "table.ods"
+    exempt_air = row("A2", "Ripostiglio", 4.0, 0.6, 0.0)._replace(air_requirement=0.0)
+    ods.write(str(path), HEADERS, [("Piano terra", [exempt_air])])
+    (table,) = load(str(path)).spreadsheet.getElementsByType(Table)
+    cells = table.getElementsByType(TableRow)[2].getElementsByType(TableCell)
+    formula = "urn:oasis:names:tc:opendocument:xmlns:table:1.0", "formula"
+    assert cells[9].attributes[formula] == 'of:=IF([.H3]>=[.I3];"sì";"no")'
+    assert "[.F" not in cells[9].attributes[formula]
+    assert "[.G" not in cells[9].attributes[formula]
+
+
+def test_both_exempt_requirements_drop_the_formula(tmp_path):
+    path = tmp_path / "table.ods"
+    exempt = row("A2", "Ripostiglio", 4.0, 0.0, 0.0)._replace(daylight_requirement=0.0, air_requirement=0.0)
+    ods.write(str(path), HEADERS, [("Piano terra", [exempt])])
+    (table,) = load(str(path)).spreadsheet.getElementsByType(Table)
+    cells = table.getElementsByType(TableRow)[2].getElementsByType(TableCell)
+    formula = "urn:oasis:names:tc:opendocument:xmlns:table:1.0", "formula"
+    assert formula not in cells[9].attributes
+    assert extractText(cells[9]) == "sì"
+
+
+def test_both_requirements_present_keep_the_and_formula(tmp_path):
+    path = tmp_path / "table.ods"
+    both = row("A1", "Soggiorno", 12.0, 1.8, 1.8)
+    ods.write(str(path), HEADERS, [("Piano terra", [both])])
+    (table,) = load(str(path)).spreadsheet.getElementsByType(Table)
+    cells = table.getElementsByType(TableRow)[2].getElementsByType(TableCell)
+    formula = "urn:oasis:names:tc:opendocument:xmlns:table:1.0", "formula"
+    assert cells[9].attributes[formula] == 'of:=IF(AND([.F3]>=[.G3];[.H3]>=[.I3]);"sì";"no")'
+
+
 def test_a_measured_room_still_gets_the_formula(tmp_path):
     path = tmp_path / "table.ods"
     measured = row("A1", "Soggiorno", 12.0, 1.8, 1.8, unmeasured=0)
