@@ -66,6 +66,12 @@ class DaylightVentilationPanel(bpy.types.Panel):
         operator.daylight, operator.air = props.daylight, props.air
 
         layout.operator("bim.salad_quantify_daylight", icon="DRIVER")
+        # The override is written to the selected windows and doors: correcting
+        # one is looking at one, never at the whole file.
+        prepare = layout.row(align=True)
+        prepare.enabled = bool(selected_fillings(context))
+        prepare.operator("bim.salad_prepare_daylight_overrides", icon="GREASEPENCIL")
+
         self.draw_summary(layout)
         self.draw_active_space(context, layout)
 
@@ -135,11 +141,6 @@ class DaylightVentilationPanel(bpy.types.Panel):
             daylight, air = ratios.contribution(filling)
             suffix = " (corretto)" if ratios.is_overridden(filling) else ""
             box.label(text=f"{filling.Name or filling.is_a()}: {daylight:.2f} / {air:.2f}{suffix}")
-        # The override is written to the selected fillings, not to the ones the
-        # room happens to list: correcting one is looking at one.
-        prepare = box.row(align=True)
-        prepare.enabled = bool(selected_fillings(context))
-        prepare.operator("bim.salad_prepare_daylight_overrides", icon="GREASEPENCIL")
 
 
 classes = (DaylightVentilationProperties, DaylightVentilationPanel)
