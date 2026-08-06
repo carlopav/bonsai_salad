@@ -24,8 +24,8 @@ RATIO_DECIMALS = 3
 DASH = "—"
 YES, NO, UNVERIFIED = "sì", "no", "da verificare"
 
-NET, AIR, DAYLIGHT = "C", "D", "E"
-AIR_RATIO, AIR_REQUIREMENT, DAYLIGHT_RATIO, DAYLIGHT_REQUIREMENT = "F", "G", "H", "I"
+NET, CLEAR, AIR, DAYLIGHT = "C", "D", "E", "F"
+AIR_RATIO, AIR_REQUIREMENT, DAYLIGHT_RATIO, DAYLIGHT_REQUIREMENT = "G", "H", "I", "J"
 
 
 def _styles(doc):
@@ -137,6 +137,7 @@ def write(path, headers, sections):
                         _text(row.identification, styles["text"]),
                         _text(row.name, styles["text"]),
                         _number(row.net, styles["area"], AREA_DECIMALS),
+                        _number(row.clear, styles["area"], AREA_DECIMALS),
                         _number(row.air, styles["area"], AREA_DECIMALS),
                         _number(row.daylight, styles["area"], AREA_DECIMALS),
                         _ratio_cell(row, row.air_ratio, row.air_requirement, AIR, number, styles),

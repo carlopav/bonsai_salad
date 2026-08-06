@@ -40,6 +40,51 @@ def test_recomputing_leaves_the_override_alone(ifc_file, add_box):
     assert ratios.contribution(window) == pytest.approx((2.4, 0.9))
 
 
+def test_preparing_fills_both_overrides_from_the_clear_opening(ifc_file, add_box):
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    assert ratios.prepare_overrides(ifc_file, window) == ratios.PREPARED
+    pset = ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)
+    assert pset[ratios.DAYLIGHT] == pytest.approx(1.8)
+    assert pset[ratios.AIR] == pytest.approx(1.8)
+    assert ratios.is_overridden(window) is True
+
+
+def test_preparing_never_overwrites_an_override(ifc_file, add_box):
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    pset = ifc_file.by_id(ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)["id"])
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(0.9)})
+    ratios.prepare_overrides(ifc_file, window)
+    assert ratios.contribution(window) == pytest.approx((1.8, 0.9))
+
+
+def test_preparing_a_filling_with_both_overrides_does_nothing(ifc_file, add_box):
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    ratios.prepare_overrides(ifc_file, window)
+    assert ratios.prepare_overrides(ifc_file, window) == ratios.ALREADY_SET
+
+
+def test_preparing_an_unmeasured_filling_does_nothing(ifc_file, add_box):
+    """No clear opening to copy, and preparing must not invent one: the filling
+    stays unmeasured, so the room it serves still withholds its verdict."""
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    assert ratios.prepare_overrides(ifc_file, window) == ratios.UNMEASURED
+    assert ratios.is_measured(window) is False
+    assert ratios.is_overridden(window) is False
+
+
+@pytest.mark.parametrize("unit_prefix", ["MILLI"], indirect=True)
+def test_a_prepared_override_stays_in_project_units(ifc_file, add_box):
+    """The clear opening is copied from a pset into a pset: converting it a
+    second time would divide a millimetre project's override by a million."""
+    window = add_box("IfcWindow", length=1200.0, thickness=100.0, height=1500.0)
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    ratios.prepare_overrides(ifc_file, window)
+    assert ratios.contribution(window) == pytest.approx((1.8e6, 1.8e6))
+
+
 def test_a_filling_with_no_pset_contributes_nothing(ifc_file, add_box):
     window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
     assert ratios.contribution(window) == pytest.approx((0.0, 0.0))
@@ -122,6 +167,45 @@ def test_a_lit_room_passes(ifc_file, lit_room):
     assert row.daylight == pytest.approx(1.8, rel=1e-6)
     assert row.daylight_ratio == pytest.approx(0.15, rel=1e-6)
     assert row.verified is True
+
+
+def test_the_row_carries_the_clear_opening_beside_the_counted_areas(ifc_file, lit_room):
+    room, window = lit_room()
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+    assert row.clear == pytest.approx(1.8, rel=1e-6)
+    pset = ifc_file.by_id(ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)["id"])
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(0.9)})
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+    assert row.clear == pytest.approx(1.8, rel=1e-6)
+    assert row.air == pytest.approx(0.9)
+
+
+def test_a_prepared_override_survives_a_recalculation(ifc_file, lit_room):
+    """What the button trades away: once prepared, the two areas are the user's,
+    and a remeasured clear opening no longer reaches the room's count."""
+    room, window = lit_room()
+    ratios.prepare_overrides(ifc_file, window)
+    ratios.write_clear_opening(ifc_file, window, 3.0)
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+    assert row.clear == pytest.approx(3.0, rel=1e-6)
+    assert row.daylight == pytest.approx(1.8, rel=1e-6)
+    assert row.air == pytest.approx(1.8, rel=1e-6)
+
+
+def test_the_headers_name_eleven_columns_in_order(ifc_file):
+    assert ratios.headers(ifc_file) == [
+        "Identificativo",
+        "Nome",
+        "Superficie netta (m²)",
+        "Luce architettonica (m²)",
+        "Superficie aerante (m²)",
+        "Superficie illuminante (m²)",
+        "Rapporto aerazione",
+        "Requisito aerazione",
+        "Rapporto illuminazione",
+        "Requisito illuminazione",
+        "Verificato",
+    ]
 
 
 def test_a_dark_room_fails(ifc_file, lit_room, add_space):

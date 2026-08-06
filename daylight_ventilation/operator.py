@@ -18,6 +18,12 @@ def selected_spaces(context):
     return [element for element in elements if element and element.is_a("IfcSpace")]
 
 
+def selected_fillings(context):
+    """Only the selected windows and doors, the same way."""
+    elements = [tool.Ifc.get_entity(obj) for obj in context.selected_objects]
+    return [element for element in elements if element and (element.is_a("IfcWindow") or element.is_a("IfcDoor"))]
+
+
 class SetDaylightRequirement(bpy.types.Operator, tool.Ifc.Operator):
     """Sets the two ratios the selected IfcSpaces have to reach, as the
     "Requisiti aeroilluminanti" property set: 0.125 is the usual eighth, 0 marks
@@ -43,6 +49,39 @@ class SetDaylightRequirement(bpy.types.Operator, tool.Ifc.Operator):
             ratios.write_requirements(tool.Ifc.get(), space, self.daylight, self.air)
         Summary.refresh()
         self.report({"INFO"}, f"{len(spaces)} rooms set.")
+
+
+class PrepareDaylightOverrides(bpy.types.Operator, tool.Ifc.Operator):
+    """Copies the measured clear opening of the selected windows and doors into
+    their "Superficie illuminante" and "Superficie aerante", so both are there to
+    be edited instead of typed from nothing.
+
+    From then on those two areas are yours: what the calculation measures no
+    longer counts for those fillings. An override already written is left alone,
+    and a filling with no clear opening yet has nothing to copy"""
+
+    bl_idname = "bim.salad_prepare_daylight_overrides"
+    bl_label = "Prepara override"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return tool.Ifc.get() is not None
+
+    def _execute(self, context):
+        fillings = selected_fillings(context)
+        if not fillings:
+            self.report({"ERROR"}, "Select the windows or doors to prepare first.")
+            return {"CANCELLED"}
+        outcomes = [ratios.prepare_overrides(tool.Ifc.get(), filling) for filling in fillings]
+        Summary.refresh()
+        already_set, unmeasured = outcomes.count(ratios.ALREADY_SET), outcomes.count(ratios.UNMEASURED)
+        self.report(
+            {"INFO"},
+            f"{outcomes.count(ratios.PREPARED)} fillings prepared."
+            + (f" {already_set} already corrected." if already_set else "")
+            + (f" {unmeasured} with no clear opening to copy." if unmeasured else ""),
+        )
 
 
 class QuantifyDaylight(bpy.types.Operator, tool.Ifc.Operator):
@@ -239,6 +278,7 @@ def _schedule_paths():
 
 classes = (
     SetDaylightRequirement,
+    PrepareDaylightOverrides,
     QuantifyDaylight,
     SelectDisagreeingOpenings,
     SelectUnverifiedSpaces,

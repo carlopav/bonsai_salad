@@ -72,6 +72,11 @@ def write_clear_opening(ifc_file, filling, area):
     )
 
 
+def clear_opening(filling):
+    """What the geometry measured, in project units, zero where nothing was."""
+    return float(_pset(filling, FILLING_PSET).get(CLEAR) or 0.0)
+
+
 def contribution(filling):
     """(daylight, air) as the filling enters the count: the override where the
     user set one, the clear opening everywhere else."""
@@ -93,6 +98,30 @@ def is_measured(filling):
     return CLEAR in _pset(filling, FILLING_PSET)
 
 
+PREPARED, ALREADY_SET, UNMEASURED = "prepared", "already_set", "unmeasured"
+
+
+def prepare_overrides(ifc_file, filling):
+    """Writes the clear opening into whichever of the two overrides is absent, so
+    there is something to edit instead of a property to type from nothing.
+
+    An override already there is never touched — preparing one must not revert a
+    correction — and a filling nobody measured has nothing to copy. Says which of
+    the three happened. The value comes from a pset and goes back to one, both in
+    project units, so nothing is converted.
+    """
+    if not is_measured(filling):
+        return UNMEASURED
+    pset = _pset(filling, FILLING_PSET)
+    properties = {
+        name: ifc_file.createIfcAreaMeasure(float(pset[CLEAR])) for name in (DAYLIGHT, AIR) if pset.get(name) is None
+    }
+    if not properties:
+        return ALREADY_SET
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=_pset_entity(ifc_file, filling, FILLING_PSET), properties=properties)
+    return PREPARED
+
+
 Row = namedtuple(
     "Row",
     (
@@ -100,6 +129,7 @@ Row = namedtuple(
         "identification",
         "name",
         "net",
+        "clear",
         "daylight",
         "air",
         "unmeasured_fillings",
@@ -164,6 +194,7 @@ def measure_spaces(ifc_file, spaces, geom_settings=None):
     rows = []
     for space in spaces:
         served = boundaries.serves(space)
+        clear = sum(clear_opening(filling) for filling in served)
         daylight = sum(contribution(filling)[0] for filling in served)
         air = sum(contribution(filling)[1] for filling in served)
         unmeasured_fillings = sum(not is_measured(filling) for filling in served)
@@ -176,6 +207,7 @@ def measure_spaces(ifc_file, spaces, geom_settings=None):
                 space.Name or "",
                 space.LongName or "",
                 net,
+                clear,
                 daylight,
                 air,
                 unmeasured_fillings,
@@ -225,6 +257,7 @@ def headers(ifc_file):
         "Identificativo",
         "Nome",
         area("Superficie netta"),
+        area("Luce architettonica"),
         area("Superficie aerante"),
         area("Superficie illuminante"),
         "Rapporto aerazione",

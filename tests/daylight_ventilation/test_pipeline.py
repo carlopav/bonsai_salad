@@ -92,6 +92,37 @@ def test_a_second_run_leaves_an_override_alone(ifc_file, project):
     assert row.daylight == pytest.approx(1.8, rel=1e-6)
 
 
+def test_a_second_run_leaves_a_prepared_override_alone(ifc_file, project):
+    """The whole point of preparing one: the user edits the value the button put
+    there, and the next Calcola reads it instead of what it measured."""
+    _, window, _ = project
+    ratios.quantify(ifc_file)
+    assert ratios.prepare_overrides(ifc_file, window) == ratios.PREPARED
+    pset = ifc_file.by_id(ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)["id"])
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(0.6)})
+    (row,) = ratios.quantify(ifc_file).rows
+    assert row.clear == pytest.approx(1.8, rel=1e-6)
+    assert row.daylight == pytest.approx(1.8, rel=1e-6)
+    assert row.air == pytest.approx(0.6)
+
+
+def test_preparing_an_unmeasured_filling_leaves_its_room_without_a_verdict(
+    ifc_file, add_box, add_tapered_opening, add_space, fill
+):
+    """Preparing is not measuring: the void still cannot be read, so the room
+    must not start claiming a verdict."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    room = add_space("A1", width=4.0, depth=3.0, matrix=placement(y=0.3), long_name="Camera")
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, y=5.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, y=5.0, z=0.9))
+    fill(wall, opening, window)
+    ratios.quantify(ifc_file)
+    assert ratios.prepare_overrides(ifc_file, window) == ratios.UNMEASURED
+    (row,) = ratios.quantify(ifc_file).rows
+    assert row.unmeasured_fillings == 1
+    assert ratios.VERIFIED not in ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
+
+
 def test_a_second_run_leaves_an_edited_requirement_alone(ifc_file, project):
     room, _, _ = project
     ratios.quantify(ifc_file)

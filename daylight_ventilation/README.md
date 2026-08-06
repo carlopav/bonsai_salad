@@ -16,7 +16,13 @@ applies, so recalculating can never destroy a correction.
   overshoots the wall faces, or that is cut for a sill, cannot inflate it. An
   opening filled by several windows splits it equally among them.
 - **Superficie illuminante / aerante** on the window — your override. Left empty,
-  the whole clear opening counts for both.
+  the whole clear opening counts for both. **Prepara override** writes the
+  measured clear opening into both properties of the selected windows and doors,
+  so there is a value to edit in Bonsai's property panel instead of a property
+  name to type from nothing. It never touches an override already written, and a
+  window with no clear opening yet has nothing to copy. Once prepared, those two
+  areas are yours: the calculation keeps measuring the clear opening, but it no
+  longer reaches the count for that window.
 - **Requisito illuminazione / aerazione** on the room — the ratio it has to
   reach, 0.125 unless you set otherwise. `0` marks a room the regulation asks
   nothing of.
@@ -31,6 +37,16 @@ table, counted in the panel as `locali senza verdetto` and never among the ones
 that failed — until you look at the flagged window and either fix its geometry, or,
 if you can't, type its area by hand as a `Superficie illuminante` /
 `Superficie aerante` override, which is exactly what the override is for.
+
+## The exported table
+
+One row per room, grouped by storey, with the ratios and the verdict as formulas
+over the areas beside them: correct an area in the sheet and the verdict follows.
+
+The **Luce architettonica** column sits between the net floor area and the two
+counted ones. Where the three read alike nothing was overridden; where they
+differ, the difference is a correction made by hand, which is the only way a
+reader of the table can tell a measured area from a typed one.
 
 ## The room a window serves
 

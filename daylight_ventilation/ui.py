@@ -7,7 +7,7 @@ from bonsai import tool
 
 from .core import boundaries, ratios
 from .data import Summary
-from .operator import schedule_path, selected_spaces
+from .operator import schedule_path, selected_fillings, selected_spaces
 
 
 class DaylightVentilationProperties(bpy.types.PropertyGroup):
@@ -135,6 +135,11 @@ class DaylightVentilationPanel(bpy.types.Panel):
             daylight, air = ratios.contribution(filling)
             suffix = " (corretto)" if ratios.is_overridden(filling) else ""
             box.label(text=f"{filling.Name or filling.is_a()}: {daylight:.2f} / {air:.2f}{suffix}")
+        # The override is written to the selected fillings, not to the ones the
+        # room happens to list: correcting one is looking at one.
+        prepare = box.row(align=True)
+        prepare.enabled = bool(selected_fillings(context))
+        prepare.operator("bim.salad_prepare_daylight_overrides", icon="GREASEPENCIL")
 
 
 classes = (DaylightVentilationProperties, DaylightVentilationPanel)
