@@ -149,28 +149,57 @@ def clear_opening_area(opening, host, geom_settings):
 # turn and the first that lands in a room decides that side.
 PROBES = (0.05, 0.15, 0.30, 0.60)
 
-# A ray along no axis of anything: axis aligned rays graze the coplanar faces of
-# a box shaped room and make the parity count unreliable.
-RAY = np.array([0.5773502691896258, 0.5773502691896258, 0.5773502691896258])
+
+def _incommensurate_ray(*squares):
+    """A unit direction whose components' pairwise ratios are irrational: no
+    rational architectural coordinate can ever solve the tie that a rational
+    ratio (e.g. three equal components) hits by construction on repeated room
+    proportions."""
+    ray = np.sqrt(np.array(squares, dtype=float))
+    return ray / np.linalg.norm(ray)
 
 
-def contains(body, point):
-    """Whether a closed body encloses a point, by the parity of the crossings of
-    a ray leaving it."""
+# Tried in turn until one crosses the body without grazing an edge.
+RAYS = (
+    _incommensurate_ray(1, 2, 3),
+    _incommensurate_ray(5, 1, 7),
+    _incommensurate_ray(11, 13, 1),
+)
+
+# How close a crossing may sit to a triangle's edge before it is a tie rather
+# than a clean hit.
+GRAZE = 1e-9
+
+
+def _cast(body, point, ray):
     origin = body[:, 0]
     edge1 = body[:, 1] - origin
     edge2 = body[:, 2] - origin
-    across = np.cross(RAY, edge2)
+    across = np.cross(ray, edge2)
     determinant = (edge1 * across).sum(axis=1)
     parallel = np.abs(determinant) < 1e-12
     scale = np.where(parallel, 0.0, 1.0 / np.where(parallel, 1.0, determinant))
     offset = point - origin
     u = (offset * across).sum(axis=1) * scale
     along = np.cross(offset, edge1)
-    v = (RAY * along).sum(axis=1) * scale
+    v = (ray * along).sum(axis=1) * scale
     distance = (edge2 * along).sum(axis=1) * scale
-    hit = ~parallel & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0) & (distance > 1e-9)
-    return bool(hit.sum() % 2)
+    forward = ~parallel & (distance > 1e-9)
+    grazing = forward & ((np.abs(u) < GRAZE) | (np.abs(v) < GRAZE) | (np.abs(u + v - 1.0) < GRAZE))
+    hit = forward & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0)
+    return hit, bool(grazing.any())
+
+
+def contains(body, point):
+    """Whether a closed body encloses a point, by the parity of the crossings of
+    a ray leaving it. A ray that grazes a triangle's edge is untrustworthy — it
+    can land on the seam shared by two triangles and count that one crossing
+    twice — so it is retried along another direction rather than trusted."""
+    for ray in RAYS:
+        hit, grazed = _cast(body, point, ray)
+        if not grazed:
+            return bool(hit.sum() % 2)
+    raise ValueError("every probe direction grazed the body's boundary")
 
 
 def _room_at(point, spaces):

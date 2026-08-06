@@ -52,9 +52,17 @@ def test_a_point_inside_a_room_is_contained(add_space):
     space = add_space("A", width=4.0, depth=3.0)
     body = openings.triangles(space, openings.settings())
     assert openings.contains(body, np.array([2.0, 1.5, 1.0]))
-    # x = 2.0 sits on the box's own axis of symmetry, so the equal-component RAY
-    # would graze a face diagonal exactly; 2.5 keeps the point outside without it.
-    assert not openings.contains(body, np.array([2.5, -1.5, 1.0]))
+    assert not openings.contains(body, np.array([2.0, -1.5, 1.0]))
+
+
+def test_a_point_that_ties_an_equal_component_ray_is_still_excluded(add_space):
+    """A ray with equal components keeps y - z constant along its length; the x
+    = 4 face's triangulated diagonal is the line y + z = 3. y0 + z0 = -1 solves
+    both at the same parameter where the ray also reaches x = 4, so a ray of
+    (1, 1, 1) lands exactly on the seam between that face's two triangles."""
+    space = add_space("A", width=4.0, depth=3.0)
+    body = openings.triangles(space, openings.settings())
+    assert not openings.contains(body, np.array([2.0, -1.5, 0.5]))
 
 
 def test_an_external_window_finds_one_room(add_box, add_tapered_opening, add_space):
