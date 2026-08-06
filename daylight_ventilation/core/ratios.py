@@ -87,9 +87,13 @@ def contribution(filling):
     return (clear if daylight is None else float(daylight), clear if air is None else float(air))
 
 
-def is_overridden(filling):
-    pset = _pset(filling, FILLING_PSET)
-    return pset.get(DAYLIGHT) is not None or pset.get(AIR) is not None
+def is_corrected(filling):
+    """Whether an override actually departs from what was measured. Preparing one
+    writes the measured value itself, so the presence of an override says only
+    that the user meant to edit it; both numbers come from the same stored one,
+    so comparing them exactly needs no tolerance."""
+    clear = clear_opening(filling)
+    return any(area != clear for area in contribution(filling))
 
 
 def is_measured(filling):

@@ -44,9 +44,9 @@ One row per room, grouped by storey, with the ratios and the verdict as formulas
 over the areas beside them: correct an area in the sheet and the verdict follows.
 
 The **Luce architettonica** column sits between the net floor area and the two
-counted ones. Where the three read alike nothing was overridden; where they
-differ, the difference is a correction made by hand, which is the only way a
-reader of the table can tell a measured area from a typed one.
+counted ones. Where they read alike, nothing counted differs from what was
+measured; where they differ, the difference is a correction made by hand, which
+is the only way a reader of the table can tell a measured area from a typed one.
 
 ## The room a window serves
 

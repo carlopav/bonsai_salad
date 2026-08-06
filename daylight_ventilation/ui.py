@@ -139,7 +139,7 @@ class DaylightVentilationPanel(bpy.types.Panel):
             )
         for filling in boundaries.serves(element):
             daylight, air = ratios.contribution(filling)
-            suffix = " (corretto)" if ratios.is_overridden(filling) else ""
+            suffix = " (corretto)" if ratios.is_corrected(filling) else ""
             box.label(text=f"{filling.Name or filling.is_a()}: {daylight:.2f} / {air:.2f}{suffix}")
 
 
