@@ -244,6 +244,7 @@ def probe(opening, host, spaces, geom_settings):
 FILLING_CLASSES = ("IfcWindow", "IfcDoor")
 
 Proposal = namedtuple("Proposal", ("filling", "opening", "host", "rooms", "external", "area"))
+# area is None when clear_opening_area could not measure the void — not the same as a real zero.
 
 
 def fillings(ifc_file):
@@ -294,5 +295,5 @@ def proposals(ifc_file, geom_settings=None):
             rooms, external = [], False
         area = clear_opening_area(opening, host, geom_settings)
         share = len([rel.RelatedBuildingElement for rel in opening.HasFillings or []]) or 1
-        found.append(Proposal(filling, opening, host, rooms, external, (area or 0.0) / share))
+        found.append(Proposal(filling, opening, host, rooms, external, None if area is None else area / share))
     return found

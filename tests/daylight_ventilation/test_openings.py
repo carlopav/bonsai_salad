@@ -180,3 +180,16 @@ def test_a_filling_whose_probe_cannot_be_answered_is_an_orphan_proposal(
     assert proposal.filling == window
     assert proposal.rooms == []
     assert proposal.external is False
+
+
+def test_a_void_that_does_not_overlap_its_host_leaves_the_area_unmeasured(ifc_file, add_box, add_tapered_opening, fill):
+    """The opening sits clear of the wall's 0 to 0.3 span along the thickness
+    axis, so clear_opening_area finds no shared span and returns None — the
+    filling's area must stay None too, not collapse into a false zero."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, y=5.0))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=2.0, y=5.0))
+    fill(wall, opening, window)
+    (proposal,) = openings.proposals(ifc_file)
+    assert proposal.filling == window
+    assert proposal.area is None
