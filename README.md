@@ -31,6 +31,12 @@ A table covers one ObjectType at a time, picked from a dropdown listing the type
 One button writes the measures onto each zone as a "Parametri urbanistici" quantity set, another writes the table to schedules/&lt;ObjectType&gt;.ods next to the IFC — overwriting the one already there — and registers it among Bonsai's schedules, ready to be built and placed on a sheet. Bonsai names no directory for schedules of its own, so that one is this tool's convention, shaped like its sheets/ and drawings/.
 The same quantity set carries a Coefficiente, seeded at 1 and never overwritten afterwards: -1 detracts the zone from the others, a fraction counts it in part. It is the table's second column, next to the values it weighs. The table splits the detracted zones into their own block and closes on a net total; subtotals and totals are spreadsheet formulas, not frozen numbers.
 
+# Daylight_ventilation
+Checks the *rapporto aeroilluminante* of every IfcSpace: the ratio between window area and net floor area, one for daylight and one for ventilation, against a requirement set per room.
+Lives under Schedules > Rapporti aeroilluminanti.
+The clear opening of each window is measured as the smallest section of its void across the wall's thickness; the room a window serves is recorded as an IfcRelSpaceBoundary and never overwritten once written, so a correction made by hand survives every recalculation.
+Exports an ODS schedule grouped by storey, with the ratios and the verdict as live formulas.
+
 # Dxf_ifc
 The inverse of ifc_dxf: import a DXF file as an IFC representation directly on a selected Bonsai element.
 DXF entities (lines, polylines, arcs, circles, ellipses, splines, hatches, inserts, text) are converted to native IFC geometry (IfcPolyline, IfcTrimmedCurve, IfcCircle, IfcMappedItem, etc.) and assigned to the chosen representation subcontext (default: Plan / Annotation / PLAN_VIEW).

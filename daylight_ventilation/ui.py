@@ -1,11 +1,13 @@
 # Bonsai Salad — daylight_ventilation tool
 
+import os
+
 import bpy
 from bonsai import tool
 
 from .core import boundaries, ratios
 from .data import Summary
-from .operator import selected_spaces
+from .operator import schedule_path, selected_spaces
 
 
 class DaylightVentilationProperties(bpy.types.PropertyGroup):
@@ -67,21 +69,40 @@ class DaylightVentilationPanel(bpy.types.Panel):
         self.draw_summary(layout)
         self.draw_active_space(context, layout)
 
+        layout.operator("bim.salad_export_daylight_schedule", icon="EXPORT")
+        # There is no file browser to read the destination off any more.
+        if tool.Ifc.get_path():
+            project = os.path.dirname(tool.Ifc.get_path())
+            layout.label(text=os.path.relpath(schedule_path(), project), icon="FILE_BLANK")
+
     def draw_summary(self, layout):
         summary = Summary.load()
         if not summary.get("spaces"):
             layout.label(text="Non ancora calcolato.", icon="INFO")
             return
-        unverified = summary["unverified"]
+        unverified, orphans, unmeasured, disagreeing = (
+            summary["unverified"],
+            summary["orphans"],
+            summary["unmeasured"],
+            summary["disagreeing"],
+        )
         box = layout.box()
-        box.label(
+        row = box.row(align=True)
+        row.label(
             text=f"{summary['spaces']} locali, {len(unverified)} non verificati",
             icon="CHECKMARK" if not unverified else "ERROR",
         )
-        if summary["orphans"]:
-            box.label(text=f"{len(summary['orphans'])} serramenti orfani", icon="GHOST_DISABLED")
-        if summary["unmeasured"]:
-            box.label(text=f"{len(summary['unmeasured'])} serramenti non misurati", icon="QUESTION")
+        if unverified:
+            row.operator("bim.salad_select_unverified_spaces", text="", icon="RESTRICT_SELECT_OFF")
+        if orphans:
+            box.label(text=f"{len(orphans)} serramenti orfani", icon="GHOST_DISABLED")
+        if unmeasured:
+            box.label(text=f"{len(unmeasured)} serramenti non misurati", icon="QUESTION")
+        if disagreeing:
+            row = box.row(align=True)
+            row.label(text=f"{len(disagreeing)} associazioni in disaccordo", icon="LIBRARY_DATA_BROKEN")
+            row.operator("bim.salad_select_disagreeing_openings", text="", icon="RESTRICT_SELECT_OFF")
+            row.operator("bim.salad_refresh_space_boundaries", text="", icon="FILE_REFRESH")
 
     def draw_active_space(self, context, layout):
         element = tool.Ifc.get_entity(context.active_object) if context.active_object else None

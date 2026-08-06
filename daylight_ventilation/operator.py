@@ -1,9 +1,13 @@
 # Bonsai Salad — daylight_ventilation tool
 
+import os
+from pathlib import Path
+
 import bpy
 from bonsai import tool
+from bonsai.core import drawing as core_drawing
 
-from .core import ratios
+from .core import boundaries, ods, openings, ratios
 from .data import Summary
 
 
@@ -70,4 +74,160 @@ class QuantifyDaylight(bpy.types.Operator, tool.Ifc.Operator):
         )
 
 
-classes = (SetDaylightRequirement, QuantifyDaylight)
+# Bonsai names a directory for sheets, layouts, titleblocks and drawings
+# (bim/ui.py:295), but none for schedules: this one is ours, shaped like those.
+SCHEDULES_DIR = "schedules"
+SCHEDULE_NAME = "Rapporti aeroilluminanti"
+
+
+def _select(context, elements):
+    """Puts the given elements in the viewport selection, active on the first."""
+    bpy.ops.object.select_all(action="DESELECT")
+    objects = [obj for obj in (tool.Ifc.get_object(element) for element in elements) if obj]
+    for obj in objects:
+        obj.select_set(True)
+    if objects:
+        context.view_layer.objects.active = objects[0]
+    return len(objects)
+
+
+class SelectDisagreeingOpenings(bpy.types.Operator):
+    """Selects the windows and doors whose space boundary names a room the
+    geometry does not put them anywhere near — so you can look at them before
+    letting anything be rewritten"""
+
+    bl_idname = "bim.salad_select_disagreeing_openings"
+    bl_label = "Seleziona"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(Summary.load().get("disagreeing"))
+
+    def execute(self, context):
+        count = _select(context, Summary.load()["disagreeing"])
+        self.report({"INFO"}, f"{count} fillings selected.")
+        return {"FINISHED"}
+
+
+class SelectUnverifiedSpaces(bpy.types.Operator):
+    """Selects the rooms that do not reach their required ratio"""
+
+    bl_idname = "bim.salad_select_unverified_spaces"
+    bl_label = "Seleziona"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(Summary.load().get("unverified"))
+
+    def execute(self, context):
+        count = _select(context, Summary.load()["unverified"])
+        self.report({"INFO"}, f"{count} rooms selected.")
+        return {"FINISHED"}
+
+
+class RefreshSpaceBoundaries(bpy.types.Operator, tool.Ifc.Operator):
+    """Removes the space boundaries that name the wrong room and writes the ones
+    the geometry gives instead. Acts on the selected windows and doors when there
+    is a selection, on every disagreeing one otherwise.
+
+    The only thing in this tool that deletes anything. A boundary you corrected
+    by hand is never reported as disagreeing, so it never reaches this button"""
+
+    bl_idname = "bim.salad_refresh_space_boundaries"
+    bl_label = "Aggiorna"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return tool.Ifc.get() is not None
+
+    def _execute(self, context):
+        ifc_file = tool.Ifc.get()
+        disagreeing = boundaries.disagreeing(openings.proposals(ifc_file))
+        selected = {tool.Ifc.get_entity(obj) for obj in context.selected_objects}
+        selected.discard(None)
+        if selected:
+            disagreeing = [proposal for proposal in disagreeing if proposal.filling in selected]
+        if not disagreeing:
+            self.report({"INFO"}, "No disagreeing boundary to update.")
+            return {"CANCELLED"}
+        boundaries.refresh(ifc_file, disagreeing)
+        Summary.refresh()
+        self.report({"INFO"}, f"{len(disagreeing)} associations updated.")
+
+
+class ExportDaylightSchedule(bpy.types.Operator, tool.Ifc.Operator):
+    """Writes the check as an ODS table, one row per room grouped by storey, with
+    the ratios and the verdict as formulas over the areas beside them.
+
+    The table goes to schedules/Rapporti aeroilluminanti.ods next to the IFC,
+    overwriting the one already there, and is registered among Bonsai's schedules
+    the first time so it can be built and placed on a sheet"""
+
+    bl_idname = "bim.salad_export_daylight_schedule"
+    bl_label = "Esporta"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if tool.Ifc.get() is None:
+            return False
+        if not tool.Ifc.get_path():
+            cls.poll_message_set("Save the IFC file first: the schedule is written next to it.")
+            return False
+        return True
+
+    def _execute(self, context):
+        ifc_file = tool.Ifc.get()
+        rows = ratios.measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"))
+        if not rows:
+            self.report({"ERROR"}, "No IfcSpace to write.")
+            return {"CANCELLED"}
+        path = schedule_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            ods.write(path, ratios.headers(ifc_file), ratios.sections(ifc_file, rows))
+        except OSError as error:
+            self.report({"ERROR"}, f"Could not write {path}: {error}")
+            return {"CANCELLED"}
+        added = self._add_schedule(path)
+        self.report(
+            {"INFO"},
+            f"{len(rows)} rooms written to {path}."
+            f"{' Added to the schedules.' if added else ' Its schedule was already there.'}",
+        )
+
+    def _add_schedule(self, path):
+        """Registers the table among Bonsai's schedules, unless one already
+        points at it — the file has just been overwritten in place, so a second
+        document would only be a duplicate. True when one was added."""
+        if any(os.path.samefile(existing, path) for existing in _schedule_paths() if os.path.exists(existing)):
+            return False
+        uri = tool.Ifc.get_uri(Path(path), use_relative_path=True)
+        core_drawing.add_document(tool.Ifc, tool.Drawing, "SCHEDULE", uri=str(uri))
+        return True
+
+
+def schedule_path():
+    """Where the table lives: one file for the project, rewritten in place, so
+    the schedule registered in the IFC keeps pointing at the current numbers."""
+    name = tool.Drawing.sanitise_filename(SCHEDULE_NAME).strip() or "schedule"
+    return os.path.join(os.path.dirname(tool.Ifc.get_path()), SCHEDULES_DIR, f"{name}.ods")
+
+
+def _schedule_paths():
+    """Where each of Bonsai's schedules points, absolute."""
+    documents = [d for d in tool.Ifc.get().by_type("IfcDocumentInformation") if d.Scope == "SCHEDULE"]
+    return [uri for uri in (tool.Drawing.get_document_uri(d) for d in documents) if uri]
+
+
+classes = (
+    SetDaylightRequirement,
+    QuantifyDaylight,
+    SelectDisagreeingOpenings,
+    SelectUnverifiedSpaces,
+    RefreshSpaceBoundaries,
+    ExportDaylightSchedule,
+)
