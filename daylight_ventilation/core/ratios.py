@@ -219,3 +219,56 @@ def headers(ifc_file):
         "Requisito illuminazione",
         "Verificato",
     ]
+
+
+NO_STOREY = "(nessun piano)"
+
+Summary = namedtuple("Summary", ("rows", "boundaries_written", "orphans", "unmeasured", "disagreeing"))
+
+
+def quantify(ifc_file, geom_settings=None):
+    """One pass over the file: clear openings measured, missing boundaries
+    written, results stored on the rooms.
+
+    Nothing already in the file is overwritten — not a boundary, not an
+    override, not a requirement — so running it twice leaves the second run with
+    nothing to do.
+    """
+    geom_settings = geom_settings or openings.settings()
+    proposals = openings.proposals(ifc_file, geom_settings)
+    written = boundaries.write_missing(ifc_file, proposals)
+    for proposal in proposals:
+        if proposal.area is not None:
+            write_clear_opening(ifc_file, proposal.filling, proposal.area)
+    rows = measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"), geom_settings)
+    for row in rows:
+        write_space_results(ifc_file, row)
+    return Summary(
+        rows,
+        written,
+        [proposal.filling for proposal in proposals if not proposal.rooms],
+        [proposal.filling for proposal in proposals if proposal.area is None],
+        [proposal.filling for proposal in boundaries.disagreeing(proposals)],
+    )
+
+
+def sections(ifc_file, rows):
+    """The rows grouped by the storey that contains each room, storeys in file
+    order and the rooms outside one last.
+
+    get_container walks up through ContainedInStructure, an inverse only
+    IfcElement carries — a room reaches its storey through Decomposes instead,
+    so get_parent with an ifc_class filter is what actually finds it.
+    """
+    order = {storey: index for index, storey in enumerate(ifc_file.by_type("IfcBuildingStorey"))}
+    grouped = {}
+    for row in rows:
+        storey = ifcopenshell.util.element.get_parent(row.space, ifc_class="IfcBuildingStorey")
+        grouped.setdefault(storey, []).append(row)
+    labelled = [
+        (storey.Name or storey.LongName or "", grouped[storey])
+        for storey in sorted((key for key in grouped if key), key=lambda s: order.get(s, 0))
+    ]
+    if None in grouped:
+        labelled.append((NO_STOREY, grouped[None]))
+    return labelled
