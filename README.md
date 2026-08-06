@@ -34,7 +34,7 @@ The same quantity set carries a Coefficiente, seeded at 1 and never overwritten 
 # Daylight_ventilation
 Checks the *rapporto aeroilluminante* of every IfcSpace: the ratio between window area and net floor area, one for daylight and one for ventilation, against a requirement set per room.
 Lives under Schedules > Rapporti aeroilluminanti.
-The clear opening of each window is measured as the smallest section of its void across the wall's thickness; the room a window serves is recorded as an IfcRelSpaceBoundary and never overwritten once written, so a correction made by hand survives every recalculation.
+The clear opening of each window is measured as the smallest section of its void across the wall's thickness; the room a window serves is recorded as an IfcRelSpaceBoundary and never overwritten once written, so a correction made by hand survives every recalculation. A window whose opening cannot be measured leaves its room without a verdict rather than a guessed one, until the area is typed in by hand.
 Exports an ODS schedule grouped by storey, with the ratios and the verdict as live formulas.
 
 # Dxf_ifc

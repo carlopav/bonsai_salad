@@ -21,6 +21,16 @@ applies, so recalculating can never destroy a correction.
   reach, 0.125 unless you set otherwise. `0` marks a room the regulation asks
   nothing of.
 
+A window's clear opening can fail to measure: the void has no body, or it does
+not overlap its host along the wall's thickness, which in practice means a
+broken or unusual model. Such a window contributes nothing, and the panel
+counts it apart from the orphans, under `serramenti non misurati`. Rather than
+give the room it serves a false pass or fail, the tool withholds its verdict
+entirely — no `Verificato` in the property set, `da verificare` in the ODS
+table — until you look at the flagged window and either fix its geometry, or,
+if you can't, type its area by hand as a `Superficie illuminante` /
+`Superficie aerante` override, which is exactly what the override is for.
+
 ## The room a window serves
 
 Recorded as `IfcRelSpaceBoundary`, and only ever created where none exists. A
