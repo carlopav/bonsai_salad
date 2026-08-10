@@ -175,6 +175,37 @@ def test_the_room_behind_an_unmeasured_void_gets_no_verdict(ifc_file, add_box, a
     assert lit_pset[ratios.VERIFIED] is True
 
 
+def test_typing_both_overrides_gives_an_unmeasurable_room_its_verdict(
+    ifc_file, add_box, add_tapered_opening, add_space, fill
+):
+    """The whole path the README promises, end to end: the void cannot be
+    measured, the user types both areas by hand, and the next run gives the room
+    a real verdict instead of leaving it stuck without one."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    room = add_space("A1", width=4.0, depth=3.0, matrix=placement(y=0.3), long_name="Camera")
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, y=5.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, y=5.0, z=0.9))
+    fill(wall, opening, window)
+    (row,) = ratios.quantify(ifc_file).rows
+    assert row.unmeasured_fillings == 1
+    assert ratios.VERIFIED not in ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
+
+    pset = ifcopenshell.api.pset.add_pset(ifc_file, product=window, name=ratios.FILLING_PSET)
+    ifcopenshell.api.pset.edit_pset(
+        ifc_file,
+        pset=pset,
+        properties={
+            ratios.DAYLIGHT: ifc_file.createIfcAreaMeasure(1.8),
+            ratios.AIR: ifc_file.createIfcAreaMeasure(1.8),
+        },
+    )
+    (row,) = ratios.quantify(ifc_file).rows
+    assert row.daylight == pytest.approx(1.8)
+    assert row.unmeasured_fillings == 0
+    assert row.verified is True
+    assert ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)[ratios.VERIFIED] is True
+
+
 def test_a_wall_boundary_leaves_every_room_its_verdict(ifc_file, project):
     """What a Revit or ArchiCAD export writes: the room is bounded by its wall
     as well as by its window. The wall carries no clear opening, and counting it

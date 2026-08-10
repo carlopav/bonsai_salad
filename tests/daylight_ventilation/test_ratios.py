@@ -119,6 +119,40 @@ def test_a_clear_opening_of_zero_is_measured(ifc_file, add_box):
     assert ratios.contribution(window) == pytest.approx((0.0, 0.0))
 
 
+def test_a_measured_filling_has_a_known_area(ifc_file, add_box):
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    assert ratios.has_known_area(window) is False
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    assert ratios.has_known_area(window) is True
+
+
+def test_one_override_alone_leaves_the_other_side_unknown(ifc_file, add_box):
+    """Typing the ventilation area says nothing about the lighting one: half the
+    count is still missing, and the room must stay without a verdict."""
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    pset = ifcopenshell.api.pset.add_pset(ifc_file, product=window, name=ratios.FILLING_PSET)
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(1.8)})
+    assert ratios.has_known_area(window) is False
+
+
+def test_both_overrides_make_an_unmeasurable_filling_known(ifc_file, add_box):
+    """The way out the README promises: nothing can measure the void, so the
+    user types both areas and the filling stops withholding the room's verdict.
+    An override is a known area."""
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    pset = ifcopenshell.api.pset.add_pset(ifc_file, product=window, name=ratios.FILLING_PSET)
+    ifcopenshell.api.pset.edit_pset(
+        ifc_file,
+        pset=pset,
+        properties={
+            ratios.DAYLIGHT: ifc_file.createIfcAreaMeasure(1.8),
+            ratios.AIR: ifc_file.createIfcAreaMeasure(1.8),
+        },
+    )
+    assert ratios.is_measured(window) is False
+    assert ratios.has_known_area(window) is True
+
+
 @pytest.fixture
 def lit_room(ifc_file, add_box, add_tapered_opening, add_space, fill):
     """A 4 x 3 room behind a wall, with one 1.2 x 1.5 window: 12 m2 of floor and

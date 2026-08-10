@@ -36,7 +36,10 @@ entirely — no `Verificato` in the property set, `da verificare` in the ODS
 table, counted in the panel as `locali senza verdetto` and never among the ones
 that failed — until you look at the flagged window and either fix its geometry, or,
 if you can't, type its area by hand as a `Superficie illuminante` /
-`Superficie aerante` override, which is exactly what the override is for.
+`Superficie aerante` override, which is exactly what the override is for. An
+area you typed is a known area: fill in **both**, recalculate, and the room gets
+its verdict back. One of the two leaves the other side unknown, and the verdict
+stays withheld.
 
 ## The exported table
 

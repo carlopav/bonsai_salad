@@ -102,6 +102,17 @@ def is_measured(filling):
     return CLEAR in _pset(filling, FILLING_PSET)
 
 
+def has_known_area(filling):
+    """Whether both areas the room counts are known: measured, or typed by hand
+    where nothing could measure them. An override is a known area — it is the
+    way out of a void the geometry cannot read — but one alone leaves the other
+    side unknown."""
+    pset = _pset(filling, FILLING_PSET)
+    if CLEAR in pset:
+        return True
+    return pset.get(DAYLIGHT) is not None and pset.get(AIR) is not None
+
+
 PREPARED, ALREADY_SET, UNMEASURED = "prepared", "already_set", "unmeasured"
 
 
@@ -201,7 +212,7 @@ def measure_spaces(ifc_file, spaces, geom_settings=None):
         clear = sum(clear_opening(filling) for filling in served)
         daylight = sum(contribution(filling)[0] for filling in served)
         air = sum(contribution(filling)[1] for filling in served)
-        unmeasured_fillings = sum(not is_measured(filling) for filling in served)
+        unmeasured_fillings = sum(not has_known_area(filling) for filling in served)
         net = net_floor_area(ifc_file, space, geom_settings)
         daylight_ratio, air_ratio = _ratio(daylight, net), _ratio(air, net)
         daylight_requirement, air_requirement = requirements(space)
@@ -228,8 +239,8 @@ def measure_spaces(ifc_file, spaces, geom_settings=None):
 def write_space_results(ifc_file, row):
     """The computed half of the room's pset. The two requirements are seeded on
     the way, so a room the user never touched still says what it was checked
-    against. An unmeasured filling withholds the verdict rather than let the
-    room claim one it has not earned."""
+    against. A filling whose area nobody knows withholds the verdict rather than
+    let the room claim one it has not earned."""
     properties = {
         DAYLIGHT: ifc_file.createIfcAreaMeasure(row.daylight),
         AIR: ifc_file.createIfcAreaMeasure(row.air),
@@ -274,10 +285,10 @@ def headers(ifc_file):
 
 NO_STOREY = "(nessun piano)"
 
-# unmeasurable is the fillings the geometry could not measure at all; a Row's
-# unmeasured_fillings are the ones it serves that carry no clear opening. Two
-# populations, and a room can lose its verdict to the second without the first
-# holding anything.
+# unmeasurable is the fillings the geometry could not measure on this run; a
+# Row's unmeasured_fillings are the ones it serves whose two counted areas are
+# not both known, by measurement or by override. Two populations, and a room can
+# lose its verdict to the second without the first holding anything.
 Summary = namedtuple("Summary", ("rows", "boundaries_written", "orphans", "unmeasurable", "disagreeing"))
 
 
