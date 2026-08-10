@@ -318,7 +318,8 @@ def headers(ifc_file):
 
 NO_STOREY = "(nessun piano)"
 
-# unmeasurable is the fillings the geometry could not measure on this run; a
+# unmeasurable is the fillings bound to a room that this run did not measure —
+# including one that fills no void at all, which never reaches the proposals; a
 # Row's unmeasured_fillings are the ones it serves whose two counted areas are
 # not both known, by measurement or by override. Two populations, and a room can
 # lose its verdict to the second without the first holding anything.
@@ -332,9 +333,10 @@ def quantify(ifc_file, geom_settings=None):
     Nothing already in the file is overwritten — not a boundary, not an
     override, not a requirement — so running it twice leaves the second run with
     nothing to do. A filling this run did not measure carries no measurement
-    afterwards — whether the void could not be read or the filling no longer
-    fills one at all, which drops it out of the proposals entirely. A stale area
-    would count, print and pass.
+    afterwards — whether the void could not be read or the filling fills none at
+    all, which drops it out of the proposals entirely. A stale area would count,
+    print and pass, and a filling nothing reported would withhold its room's
+    verdict with nowhere for the user to look. One rule answers both.
     """
     geom_settings = geom_settings or openings.settings()
     proposals = openings.proposals(ifc_file, geom_settings)
@@ -343,9 +345,15 @@ def quantify(ifc_file, geom_settings=None):
     for proposal in proposals:
         if proposal.area is not None:
             write_clear_opening(ifc_file, proposal.filling, proposal.area)
+    unmeasurable = []
     for filling in openings.fillings(ifc_file):
-        if filling not in measured:
-            remove_clear_opening(ifc_file, filling)
+        if filling in measured:
+            continue
+        remove_clear_opening(ifc_file, filling)
+        # Reported only where it can withhold a room's verdict: a filling
+        # bounding no room is an orphan, which is its own bucket.
+        if boundaries.of(filling):
+            unmeasurable.append(filling)
     rows = measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"), geom_settings)
     for row in rows:
         write_space_results(ifc_file, row)
@@ -353,7 +361,7 @@ def quantify(ifc_file, geom_settings=None):
         rows,
         written,
         [proposal.filling for proposal in proposals if not proposal.rooms],
-        [proposal.filling for proposal in proposals if proposal.area is None],
+        unmeasurable,
         [proposal.filling for proposal in boundaries.disagreeing(proposals)],
     )
 

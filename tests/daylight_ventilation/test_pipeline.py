@@ -263,6 +263,29 @@ def test_a_filling_that_stops_filling_a_void_loses_its_clear_opening(ifc_file, p
     assert ratios.VERIFIED not in ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
 
 
+def test_a_filling_with_a_boundary_and_no_void_is_reported_unmeasured(ifc_file, add_box, add_space):
+    """What an import is full of: a curtain wall panel, or a window placed
+    straight into the model, with an authored EXTERNAL boundary and no void at
+    all. It never enters the proposals, so nothing used to name it while its
+    room lost its verdict for good."""
+    room = add_space("A1", width=4.0, depth=3.0, long_name="Soggiorno")
+    panel = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, y=-0.2, z=0.9))
+    boundaries.add(ifc_file, room, panel, external=True)
+    summary = ratios.quantify(ifc_file)
+    assert summary.unmeasurable == [panel]
+    assert summary.orphans == []
+    (row,) = summary.rows
+    assert row.unmeasured_fillings == 1
+    assert ratios.VERIFIED not in ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
+
+
+def test_a_filling_that_bounds_no_room_is_not_reported_unmeasured(ifc_file, add_box):
+    """Unmeasured is reported where it costs a room its verdict. This one bounds
+    nothing, so no room is waiting on it and flagging it would only be noise."""
+    add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    assert ratios.quantify(ifc_file).unmeasurable == []
+
+
 def test_typing_both_overrides_gives_an_unmeasurable_room_its_verdict(
     ifc_file, add_box, add_tapered_opening, add_space, fill
 ):

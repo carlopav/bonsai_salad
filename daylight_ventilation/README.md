@@ -27,10 +27,13 @@ applies, so recalculating can never destroy a correction.
   reach, 0.125 unless you set otherwise. `0` marks a room the regulation asks
   nothing of.
 
-A window's clear opening can fail to measure: the void has no body, or it does
-not overlap its host along the wall's thickness, which in practice means a
-broken or unusual model. Such a window contributes nothing, and the panel
-counts it apart from the orphans, under `serramenti non misurati`. Rather than
+A window's clear opening can fail to measure. The void has no body, or it does
+not overlap its host along the wall's thickness — a broken or unusual model — or
+the window fills no void at all: placed straight into the model, or exported as a
+curtain wall panel, which is common in an imported file. Whatever the reason,
+such a window contributes nothing, and every one of them that bounds a room is
+counted apart from the orphans, under `serramenti non misurati` — a window that
+bounds no room is an orphan instead, and no room is waiting on it. Rather than
 give the room it serves a false pass or fail, the tool withholds its verdict
 entirely — no `Verificato` in the property set, `da verificare` in the ODS
 table, counted in the panel as `locali senza verdetto` and never among the ones
