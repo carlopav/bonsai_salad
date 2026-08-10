@@ -325,17 +325,21 @@ def quantify(ifc_file, geom_settings=None):
 
     Nothing already in the file is overwritten — not a boundary, not an
     override, not a requirement — so running it twice leaves the second run with
-    nothing to do. A clear opening the geometry can no longer measure is dropped
-    instead of left standing: a stale one would count, print and pass.
+    nothing to do. A filling this run did not measure carries no measurement
+    afterwards — whether the void could not be read or the filling no longer
+    fills one at all, which drops it out of the proposals entirely. A stale area
+    would count, print and pass.
     """
     geom_settings = geom_settings or openings.settings()
     proposals = openings.proposals(ifc_file, geom_settings)
     written = boundaries.write_missing(ifc_file, proposals)
+    measured = {proposal.filling for proposal in proposals if proposal.area is not None}
     for proposal in proposals:
-        if proposal.area is None:
-            remove_clear_opening(ifc_file, proposal.filling)
-        else:
+        if proposal.area is not None:
             write_clear_opening(ifc_file, proposal.filling, proposal.area)
+    for filling in openings.fillings(ifc_file):
+        if filling not in measured:
+            remove_clear_opening(ifc_file, filling)
     rows = measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"), geom_settings)
     for row in rows:
         write_space_results(ifc_file, row)
