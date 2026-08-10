@@ -86,6 +86,26 @@ def test_the_file_itself_says_whether_it_was_ever_quantified(ifc_file, project):
     assert ratios.is_quantified(ifc_file) is True
 
 
+def test_a_requirement_set_by_hand_is_not_a_calculation(ifc_file, project):
+    """The room's pset exists before any Calcola if the user set a requirement,
+    and exporting then would write every room down as failing."""
+    room, _, _ = project
+    ratios.write_requirements(ifc_file, room, 0.125, 0.125)
+    assert ratios.is_quantified(ifc_file) is False
+
+
+def test_the_file_stays_quantified_when_nothing_is_measurable_any_more(ifc_file, project):
+    """Every clear opening dropped, and the export must not gate itself back
+    saying "run Calcola first" at a user who just did."""
+    ratios.quantify(ifc_file)
+    for filling in openings.fillings(ifc_file):
+        for rel in filling.FillsVoids:
+            ifc_file.remove(rel)
+    ratios.quantify(ifc_file)
+    assert [filling for filling in openings.fillings(ifc_file) if ratios.is_measured(filling)] == []
+    assert ratios.is_quantified(ifc_file) is True
+
+
 def test_a_second_run_changes_nothing(ifc_file, project):
     ratios.quantify(ifc_file)
     before_counts = len(ifc_file.by_type("IfcRelSpaceBoundary")), len(ifc_file.by_type("IfcPropertySet"))

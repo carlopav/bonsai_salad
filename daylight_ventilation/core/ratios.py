@@ -134,10 +134,16 @@ def has_known_area(filling):
 
 
 def is_quantified(ifc_file):
-    """Whether the file has been measured at least once — one filling carrying a
-    clear opening is enough. Read from the file, not from a cache any button
-    that touches the model may invalidate."""
-    return any(is_measured(filling) for filling in openings.fillings(ifc_file))
+    """Whether the calculation has ever run on this file: one room carrying a
+    computed ratio says so.
+
+    Read from the file, not from a cache any button invalidates. A room's ratio
+    is written on every run whatever the geometry could measure, so — unlike a
+    filling's clear opening — it cannot be taken away by every void becoming
+    unreadable. The requirement beside it would not do: the user can set that
+    without ever calculating.
+    """
+    return any(DAYLIGHT_RATIO in _pset(space, SPACE_PSET) for space in ifc_file.by_type("IfcSpace"))
 
 
 PREPARED, ALREADY_SET, UNMEASURED = "prepared", "already_set", "unmeasured"
