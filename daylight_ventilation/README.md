@@ -70,7 +70,10 @@ A boundary written by another authoring tool — one carrying a contact surface,
 or a 2nd level one paired with the boundary on the other side — is left
 untouched even when it is reported: **Aggiorna** says how many it left alone,
 because neither the surface nor the pairing is something this tool could write
-back.
+back. Such a filling is reported again on every run, and left alone again every
+time. That count never falling is not the button failing: the disagreement is
+real, and settling it means editing the boundary yourself in Bonsai's Boundary
+module, or moving the window until the geometry agrees with it.
 
 ## Not yet implemented
 
