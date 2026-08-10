@@ -18,9 +18,13 @@ class Summary:
     @classmethod
     def load(cls):
         if not cls.is_loaded or cls.is_stale():
+            # A summary dropped by an edit is not one that was never taken: the
+            # panel must not tell the user the file has never been calculated.
+            dropped = bool(cls.data.get("spaces")) and not cls.is_stale()
             cls.data = {
                 "path": tool.Ifc.get_path(),
                 "spaces": 0,
+                "dropped": dropped,
                 "unverified": [],
                 "withheld": [],
                 "orphans": [],
@@ -46,6 +50,7 @@ class Summary:
         cls.data = {
             "path": tool.Ifc.get_path(),
             "spaces": len(summary.rows),
+            "dropped": False,
             "unverified": [row.space for row in summary.rows if not row.unmeasured_fillings and not row.verified],
             "withheld": [row.space for row in summary.rows if row.unmeasured_fillings],
             "orphans": list(summary.orphans),

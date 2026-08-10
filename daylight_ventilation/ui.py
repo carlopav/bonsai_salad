@@ -84,7 +84,10 @@ class DaylightVentilationPanel(bpy.types.Panel):
     def draw_summary(self, layout):
         summary = Summary.load()
         if not summary.get("spaces"):
-            layout.label(text="Non ancora calcolato.", icon="INFO")
+            if summary.get("dropped"):
+                layout.label(text="Riepilogo scaduto: ricalcola.", icon="FILE_REFRESH")
+            else:
+                layout.label(text="Non ancora calcolato.", icon="INFO")
             return
         unverified, withheld, orphans, unmeasurable, disagreeing = (
             summary["unverified"],
