@@ -203,13 +203,19 @@ def requirements(space):
 
 
 def write_requirements(ifc_file, space, daylight, air):
+    """Sets what the room has to reach, and drops the stored verdict: it was
+    reached against the requirement being replaced, and nothing recomputes it
+    until the next run. Left there, the file would carry a Verificato against a
+    requirement it plainly fails, and every reader of it would believe that."""
     ifcopenshell.api.pset.edit_pset(
         ifc_file,
         pset=_pset_entity(ifc_file, space, SPACE_PSET),
         properties={
             DAYLIGHT_REQUIREMENT: ifc_file.createIfcRatioMeasure(float(daylight)),
             AIR_REQUIREMENT: ifc_file.createIfcRatioMeasure(float(air)),
+            VERIFIED: None,
         },
+        should_purge=True,
     )
 
 

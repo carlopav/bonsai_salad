@@ -212,6 +212,21 @@ def test_requirements_are_read_back(ifc_file, add_space):
     assert ratios.requirements(space) == pytest.approx((0.125, 0.0))
 
 
+def test_setting_a_requirement_drops_the_stored_verdict(ifc_file, lit_room):
+    """The verdict was reached against the requirement being replaced, and
+    nothing recomputes it until the next run: leaving it would publish a
+    Verificato against a requirement the room plainly fails."""
+    room, _ = lit_room()
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+    ratios.write_space_results(ifc_file, row)
+    assert ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)[ratios.VERIFIED] is True
+    ratios.write_requirements(ifc_file, room, 0.9, 0.125)
+    pset = ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
+    assert ratios.VERIFIED not in pset
+    assert pset[ratios.DAYLIGHT_REQUIREMENT] == pytest.approx(0.9)
+    assert pset[ratios.DAYLIGHT_RATIO] == pytest.approx(0.15, rel=1e-6)
+
+
 def test_the_net_floor_area_comes_from_the_geometry(ifc_file, add_space):
     space = add_space("A1", width=4.0, depth=3.0)
     assert ratios.net_floor_area(ifc_file, space) == pytest.approx(12.0, rel=1e-6)

@@ -27,7 +27,10 @@ def selected_fillings(context):
 class SetDaylightRequirement(bpy.types.Operator, tool.Ifc.Operator):
     """Sets the two ratios the selected IfcSpaces have to reach, as the
     "Requisiti aeroilluminanti" property set: 0.125 is the usual eighth, 0 marks
-    a room the regulation does not ask anything of"""
+    a room the regulation does not ask anything of.
+
+    Each room's stored verdict goes with it — it was reached against the
+    requirement you are replacing — until the next Calcola"""
 
     bl_idname = "bim.salad_set_daylight_requirement"
     bl_label = "Set Requirement"

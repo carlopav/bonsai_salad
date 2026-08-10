@@ -25,7 +25,9 @@ applies, so recalculating can never destroy a correction.
   longer reaches the count for that window.
 - **Requisito illuminazione / aerazione** on the room — the ratio it has to
   reach, 0.125 unless you set otherwise. `0` marks a room the regulation asks
-  nothing of.
+  nothing of. Setting it drops the room's stored `Verificato`: that verdict was
+  reached against the requirement you just replaced, and only a recalculation
+  can earn a new one.
 
 A window's clear opening can fail to measure. The void has no body, or it does
 not overlap its host along the wall's thickness — a broken or unusual model — or
