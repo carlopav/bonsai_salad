@@ -105,11 +105,13 @@ def contribution(filling):
     return (clear if daylight is None else float(daylight), clear if air is None else float(air))
 
 
-def is_corrected(filling):
-    """Whether an override actually departs from what was measured. Preparing one
-    writes the measured value itself, so the presence of an override says only
-    that the user meant to edit it; both numbers come from the same stored one,
-    so comparing them exactly needs no tolerance."""
+def differs_from_measured(filling):
+    """Whether what counts for the room departs from what was measured, without
+    saying who caused it: an area typed by hand, or an override the model outran
+    when the void moved. Preparing one writes the measured value itself, so the
+    presence of an override says only that the user meant to edit it; both
+    numbers come from the same stored one, so comparing them exactly needs no
+    tolerance."""
     clear = clear_opening(filling)
     return any(area != clear for area in contribution(filling))
 

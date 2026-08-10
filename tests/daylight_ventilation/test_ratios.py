@@ -19,7 +19,7 @@ def test_without_an_override_the_clear_opening_counts_twice(ifc_file, add_box):
     window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
     ratios.write_clear_opening(ifc_file, window, 1.8)
     assert ratios.contribution(window) == pytest.approx((1.8, 1.8))
-    assert ratios.is_corrected(window) is False
+    assert ratios.differs_from_measured(window) is False
 
 
 def test_an_override_wins_over_the_clear_opening(ifc_file, add_box):
@@ -28,7 +28,7 @@ def test_an_override_wins_over_the_clear_opening(ifc_file, add_box):
     pset = ifc_file.by_id(ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)["id"])
     ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(0.9)})
     assert ratios.contribution(window) == pytest.approx((1.8, 0.9))
-    assert ratios.is_corrected(window) is True
+    assert ratios.differs_from_measured(window) is True
 
 
 def test_recomputing_leaves_the_override_alone(ifc_file, add_box):
@@ -49,23 +49,22 @@ def test_preparing_fills_both_overrides_from_the_clear_opening(ifc_file, add_box
     assert pset[ratios.AIR] == pytest.approx(1.8)
 
 
-def test_a_prepared_override_is_not_a_correction(ifc_file, add_box):
-    """The panel's "(corretto)" marks a human intervention, not the intention to
-    make one: pressing the button changes no number, so nothing is corrected
-    yet."""
+def test_a_prepared_override_does_not_differ_from_the_measurement(ifc_file, add_box):
+    """The panel marks a filling whose counted area is not the measured one:
+    pressing the button changes no number, so there is nothing to mark yet."""
     window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
     ratios.write_clear_opening(ifc_file, window, 1.8)
     ratios.prepare_overrides(ifc_file, window)
-    assert ratios.is_corrected(window) is False
+    assert ratios.differs_from_measured(window) is False
 
 
-def test_editing_a_prepared_override_is_a_correction(ifc_file, add_box):
+def test_editing_a_prepared_override_makes_it_differ(ifc_file, add_box):
     window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
     ratios.write_clear_opening(ifc_file, window, 1.8)
     ratios.prepare_overrides(ifc_file, window)
     pset = ifc_file.by_id(ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)["id"])
     ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(0.9)})
-    assert ratios.is_corrected(window) is True
+    assert ratios.differs_from_measured(window) is True
 
 
 def test_preparing_never_overwrites_an_override(ifc_file, add_box):

@@ -140,11 +140,11 @@ class DaylightVentilationPanel(bpy.types.Panel):
         for filling in boundaries.serves(element):
             daylight, air = ratios.contribution(filling)
             name = filling.Name or filling.is_a()
-            # The measured clear opening leads the line only where a correction
-            # made it differ: otherwise it would repeat the two numbers after it.
-            if ratios.is_corrected(filling):
+            # The measured clear opening leads the line only where what counts
+            # differs: otherwise it would repeat the two numbers after it.
+            if ratios.differs_from_measured(filling):
                 measured = ratios.clear_opening(filling)
-                box.label(text=f"{name}: {measured:.2f} — {daylight:.2f} / {air:.2f} (corretto)")
+                box.label(text=f"{name}: {measured:.2f} — {daylight:.2f} / {air:.2f} (≠ misurato)")
             else:
                 box.label(text=f"{name}: {daylight:.2f} / {air:.2f}")
 
