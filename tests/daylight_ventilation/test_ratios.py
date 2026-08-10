@@ -119,6 +119,35 @@ def test_a_clear_opening_of_zero_is_measured(ifc_file, add_box):
     assert ratios.contribution(window) == pytest.approx((0.0, 0.0))
 
 
+def test_removing_the_measurement_keeps_both_overrides(ifc_file, add_box):
+    """What the geometry can no longer measure goes; what the user typed stays.
+    A blanket purge would take the areas the tool exists to protect."""
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    ratios.prepare_overrides(ifc_file, window)
+    ratios.remove_clear_opening(ifc_file, window)
+    pset = ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)
+    assert ratios.CLEAR not in pset
+    assert pset[ratios.DAYLIGHT] == pytest.approx(1.8)
+    assert pset[ratios.AIR] == pytest.approx(1.8)
+    assert ratios.is_measured(window) is False
+
+
+def test_removing_the_only_measurement_takes_the_property_set_with_it(ifc_file, add_box):
+    """IfcPropertySet.HasProperties is a SET [1:?]: an emptied one would be
+    invalid, so the set goes with the last property in it."""
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    ratios.write_clear_opening(ifc_file, window, 1.8)
+    ratios.remove_clear_opening(ifc_file, window)
+    assert ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False) is None
+
+
+def test_removing_a_measurement_that_is_not_there_writes_nothing(ifc_file, add_box):
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
+    ratios.remove_clear_opening(ifc_file, window)
+    assert ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False) is None
+
+
 def test_a_measured_filling_has_a_known_area(ifc_file, add_box):
     window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5)
     assert ratios.has_known_area(window) is False

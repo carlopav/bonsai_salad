@@ -1,10 +1,12 @@
 import pytest
 
 import ifcopenshell.api.aggregate
+import ifcopenshell.api.geometry
 import ifcopenshell.api.pset
 import ifcopenshell.api.root
 import ifcopenshell.guid
 import ifcopenshell.util.element
+import ifcopenshell.util.placement
 
 from daylight_ventilation.core import boundaries, ratios
 
@@ -173,6 +175,38 @@ def test_the_room_behind_an_unmeasured_void_gets_no_verdict(ifc_file, add_box, a
     lit_pset = ifcopenshell.util.element.get_pset(lit_room, ratios.SPACE_PSET, should_inherit=False)
     assert ratios.VERIFIED not in dark_pset
     assert lit_pset[ratios.VERIFIED] is True
+
+
+def test_a_void_that_stops_being_measurable_loses_its_clear_opening(
+    ifc_file, add_box, add_tapered_opening, add_space, fill
+):
+    """A measurement left standing after the model outran it reads as a correct
+    answer: the room passes, the panel counts no room without a verdict, and the
+    schedule prints the stale number as what the geometry measured."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    room = add_space("A1", width=4.0, depth=3.0, matrix=placement(y=0.3), long_name="Camera")
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    fill(wall, opening, window)
+    ratios.quantify(ifc_file)
+    pset = ifc_file.by_id(ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)["id"])
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=pset, properties={ratios.AIR: ifc_file.createIfcAreaMeasure(0.6)})
+
+    # The void moves clear of its host along the wall's thickness: nothing to
+    # measure any more.
+    for element in (opening, window):
+        matrix = placement(y=5.0) @ ifcopenshell.util.placement.get_local_placement(element.ObjectPlacement)
+        ifcopenshell.api.geometry.edit_object_placement(ifc_file, product=element, matrix=matrix)
+
+    summary = ratios.quantify(ifc_file)
+    assert summary.unmeasurable == [window]
+    pset = ifcopenshell.util.element.get_pset(window, ratios.FILLING_PSET, should_inherit=False)
+    assert ratios.CLEAR not in pset
+    assert pset[ratios.AIR] == pytest.approx(0.6)
+    (row,) = summary.rows
+    assert row.clear == pytest.approx(0.0)
+    assert row.unmeasured_fillings == 1
+    assert ratios.VERIFIED not in ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
 
 
 def test_typing_both_overrides_gives_an_unmeasurable_room_its_verdict(

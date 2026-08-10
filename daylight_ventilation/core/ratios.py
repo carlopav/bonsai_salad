@@ -72,6 +72,24 @@ def write_clear_opening(ifc_file, filling, area):
     )
 
 
+def remove_clear_opening(ifc_file, filling):
+    """Drops a measurement the geometry can no longer make, so nothing counts,
+    prints or passes on it.
+
+    Only that one property: purging the set would take the overrides with it,
+    and a typed area is the user's. An IfcPropertySet holds at least one
+    property, so one left with nothing but the measurement goes with it.
+    """
+    pset = _pset(filling, FILLING_PSET)
+    if CLEAR not in pset:
+        return
+    entity = ifc_file.by_id(pset["id"])
+    if len(entity.HasProperties) == 1:
+        ifcopenshell.api.pset.remove_pset(ifc_file, product=filling, pset=entity)
+        return
+    ifcopenshell.api.pset.edit_pset(ifc_file, pset=entity, properties={CLEAR: None}, should_purge=True)
+
+
 def clear_opening(filling):
     """What the geometry measured, in project units, zero where nothing was."""
     return float(_pset(filling, FILLING_PSET).get(CLEAR) or 0.0)
@@ -298,13 +316,16 @@ def quantify(ifc_file, geom_settings=None):
 
     Nothing already in the file is overwritten — not a boundary, not an
     override, not a requirement — so running it twice leaves the second run with
-    nothing to do.
+    nothing to do. A clear opening the geometry can no longer measure is dropped
+    instead of left standing: a stale one would count, print and pass.
     """
     geom_settings = geom_settings or openings.settings()
     proposals = openings.proposals(ifc_file, geom_settings)
     written = boundaries.write_missing(ifc_file, proposals)
     for proposal in proposals:
-        if proposal.area is not None:
+        if proposal.area is None:
+            remove_clear_opening(ifc_file, proposal.filling)
+        else:
             write_clear_opening(ifc_file, proposal.filling, proposal.area)
     rows = measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"), geom_settings)
     for row in rows:

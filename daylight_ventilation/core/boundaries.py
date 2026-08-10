@@ -105,7 +105,8 @@ def is_authored_elsewhere(boundary):
 
 def refresh(ifc_file, proposals):
     """Removes each filling's boundaries and writes the computed ones. The only
-    thing in the tool that deletes, and only ever on an explicit click.
+    thing in the tool that deletes a boundary, and only ever on an explicit
+    click.
 
     A filling with even one boundary authored elsewhere is left untouched
     whole: replacing the rest of its boundaries would assert the new room

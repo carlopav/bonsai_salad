@@ -174,7 +174,7 @@ class RefreshSpaceBoundaries(bpy.types.Operator, tool.Ifc.Operator):
     the geometry gives instead. Acts on the selected windows and doors when there
     is a selection, on every disagreeing one otherwise.
 
-    The only thing in this tool that deletes anything. A boundary you corrected
+    The only thing in this tool that deletes a boundary. A boundary you corrected
     by hand is never reported as disagreeing, so it never reaches this button,
     and one written by another authoring tool — with a contact surface, or 2nd
     level — is left alone even when it does"""
