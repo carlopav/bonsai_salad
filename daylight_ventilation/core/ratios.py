@@ -131,6 +131,13 @@ def has_known_area(filling):
     return pset.get(DAYLIGHT) is not None and pset.get(AIR) is not None
 
 
+def is_quantified(ifc_file):
+    """Whether the file has been measured at least once — one filling carrying a
+    clear opening is enough. Read from the file, not from a cache any button
+    that touches the model may invalidate."""
+    return any(is_measured(filling) for filling in openings.fillings(ifc_file))
+
+
 PREPARED, ALREADY_SET, UNMEASURED = "prepared", "already_set", "unmeasured"
 
 

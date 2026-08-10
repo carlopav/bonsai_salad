@@ -73,8 +73,9 @@ class PrepareDaylightOverrides(bpy.types.Operator, tool.Ifc.Operator):
         if not fillings:
             self.report({"ERROR"}, "Select the windows or doors to prepare first.")
             return {"CANCELLED"}
+        # The summary is not invalidated: a prepared override equals the
+        # measurement it was copied from, so nothing it reports has changed.
         outcomes = [ratios.prepare_overrides(tool.Ifc.get(), filling) for filling in fillings]
-        Summary.refresh()
         already_set, unmeasured = outcomes.count(ratios.ALREADY_SET), outcomes.count(ratios.UNMEASURED)
         self.report(
             {"INFO"},
@@ -225,9 +226,10 @@ class ExportDaylightSchedule(bpy.types.Operator, tool.Ifc.Operator):
         if not tool.Ifc.get_path():
             cls.poll_message_set("Save the IFC file first: the schedule is written next to it.")
             return False
-        # Measured before the first Calcola, no room has a clear opening yet and
-        # every one of them would be written down as failing.
-        if not Summary.load()["spaces"]:
+        # Before the first Calcola no room has a clear opening yet and every one
+        # of them would be written down as failing. Asked of the file rather
+        # than of the panel's cache, which any edit invalidates.
+        if not ratios.is_quantified(tool.Ifc.get()):
             cls.poll_message_set("Run Calcola first: the schedule reports what the last calculation found.")
             return False
         return True

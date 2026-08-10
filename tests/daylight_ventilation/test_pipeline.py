@@ -74,6 +74,18 @@ def test_a_room_reads_the_same_whatever_the_project_unit(
     assert pset[ratios.CLEAR] == pytest.approx(1.8 * scale**2, rel=1e-6)
 
 
+def test_the_file_itself_says_whether_it_was_ever_quantified(ifc_file, project):
+    """What gates the export: a fact of the file, so a button that invalidates
+    the panel's cache cannot take the export with it. Preparing an override is
+    such a button, and leaves the answer alone."""
+    _, window, _ = project
+    assert ratios.is_quantified(ifc_file) is False
+    ratios.quantify(ifc_file)
+    assert ratios.is_quantified(ifc_file) is True
+    ratios.prepare_overrides(ifc_file, window)
+    assert ratios.is_quantified(ifc_file) is True
+
+
 def test_a_second_run_changes_nothing(ifc_file, project):
     ratios.quantify(ifc_file)
     before_counts = len(ifc_file.by_type("IfcRelSpaceBoundary")), len(ifc_file.by_type("IfcPropertySet"))
