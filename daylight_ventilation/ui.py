@@ -31,6 +31,16 @@ class DaylightVentilationProperties(bpy.types.PropertyGroup):
         soft_min=0.0,
         soft_max=1.0,
     )
+    diagnostics: bpy.props.BoolProperty(
+        name="Diagnostica associazioni",
+        description="Whether the rooms and their counted openings are currently coloured",
+        default=False,
+    )
+    previous_color_type: bpy.props.StringProperty(
+        name="Previous Colour Type",
+        description="The viewport's colour mode before the diagnostic took it over",
+        default="",
+    )
 
 
 class DaylightVentilationPanel(bpy.types.Panel):
@@ -71,6 +81,8 @@ class DaylightVentilationPanel(bpy.types.Panel):
         prepare = layout.row(align=True)
         prepare.enabled = bool(selected_fillings(context))
         prepare.operator("bim.salad_prepare_daylight_overrides", icon="GREASEPENCIL")
+
+        layout.operator("bim.salad_toggle_daylight_diagnostics", icon="COLOR", depress=props.diagnostics)
 
         self.draw_summary(layout)
         self.draw_active_space(context, layout)

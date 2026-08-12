@@ -7,7 +7,7 @@ import bpy
 from bonsai import tool
 from bonsai.core import drawing as core_drawing
 
-from .core import boundaries, ods, openings, ratios
+from .core import boundaries, diagnostics, ods, openings, ratios
 from .data import Summary
 
 
@@ -22,6 +22,40 @@ def selected_fillings(context):
     """Only the selected windows and doors, the same way."""
     elements = [tool.Ifc.get_entity(obj) for obj in context.selected_objects]
     return [element for element in elements if element and (element.is_a("IfcWindow") or element.is_a("IfcDoor"))]
+
+
+def colour_diagnostics(context):
+    """Paints each room and the openings that count for it in one colour, the
+    rest in red, and puts the viewport where those colours show. Returns
+    (groups, excluded). Elements with no Blender object are not loaded and are
+    skipped."""
+    paired, excluded = diagnostics.groups(tool.Ifc.get())
+    for index, (space, fillings) in enumerate(paired):
+        colour = (*diagnostics.colour_for(index), 1.0)
+        # An opening EXTERNAL to two rooms is in both tuples; whichever room
+        # paints it last owns its colour on screen.
+        for element in (space, *fillings):
+            if obj := tool.Ifc.get_object(element):
+                obj.color = colour
+    for element in excluded:
+        if obj := tool.Ifc.get_object(element):
+            obj.color = (*diagnostics.EXCLUDED, 1.0)
+    props = context.scene.daylight_ventilation
+    if space_data := tool.Blender.get_view3d_space():
+        props.previous_color_type = space_data.shading.color_type
+        space_data.shading.color_type = "OBJECT"
+    return len(paired), len(excluded)
+
+
+def clear_diagnostics(context):
+    """Bonsai's own reset, by the user's decision: it whitens every visible
+    object, not only ours, and clears the Search module's colourscheme. It does
+    not touch the viewport's colour mode, so putting that back is ours."""
+    bpy.ops.bim.reset_object_colours()
+    props = context.scene.daylight_ventilation
+    if space_data := tool.Blender.get_view3d_space():
+        space_data.shading.color_type = props.previous_color_type or "MATERIAL"
+    props.previous_color_type = ""
 
 
 class SetDaylightRequirement(bpy.types.Operator, tool.Ifc.Operator):
@@ -115,6 +149,10 @@ class QuantifyDaylight(bpy.types.Operator, tool.Ifc.Operator):
             + (f" {len(summary.unmeasurable)} unmeasured." if summary.unmeasurable else "")
             + (f" {len(summary.disagreeing)} disagreeing." if summary.disagreeing else ""),
         )
+        # Colours that describe a previous run are the worst way for a
+        # diagnostic to be wrong.
+        if context.scene.daylight_ventilation.diagnostics:
+            colour_diagnostics(context)
 
 
 # Bonsai names a directory for sheets, layouts, titleblocks and drawings
@@ -281,6 +319,42 @@ def _schedule_paths():
     return [uri for uri in (tool.Drawing.get_document_uri(d) for d in documents) if uri]
 
 
+class ToggleDaylightDiagnostics(bpy.types.Operator):
+    """Colours every room and the windows and doors that count for it alike, and
+    everything the check knows but does not count in red: an opening that is
+    internal, orphan, or whose area could not be established, and a room left
+    without a valid one.
+
+    Writes nothing to the IFC. Switching off resets the colours through Bonsai's
+    own Reset Colours, which whitens every visible object"""
+
+    bl_idname = "bim.salad_toggle_daylight_diagnostics"
+    bl_label = "Diagnostica associazioni"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        ifc_file = tool.Ifc.get()
+        if ifc_file is None:
+            return False
+        if not ratios.is_quantified(ifc_file):
+            cls.poll_message_set("Run Calcola first: no opening has a measured area yet.")
+            return False
+        return True
+
+    def execute(self, context):
+        props = context.scene.daylight_ventilation
+        if props.diagnostics:
+            clear_diagnostics(context)
+            props.diagnostics = False
+            self.report({"INFO"}, "Diagnostica spenta.")
+        else:
+            paired, excluded = colour_diagnostics(context)
+            props.diagnostics = True
+            self.report({"INFO"}, f"{paired} gruppi, {excluded} elementi in rosso.")
+        return {"FINISHED"}
+
+
 classes = (
     SetDaylightRequirement,
     PrepareDaylightOverrides,
@@ -289,4 +363,5 @@ classes = (
     SelectUnverifiedSpaces,
     RefreshSpaceBoundaries,
     ExportDaylightSchedule,
+    ToggleDaylightDiagnostics,
 )

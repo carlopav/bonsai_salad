@@ -80,6 +80,18 @@ time. That count never falling is not the button failing: the disagreement is
 real, and settling it means editing the boundary yourself in Bonsai's Boundary
 module, or moving the window until the geometry agrees with it.
 
+## Diagnostica associazioni
+
+The pairing between a room and its windows drives every ratio, and nothing else on screen shows
+it. **Diagnostica associazioni** colours each room and the openings counted for it alike, so a
+mismatch is visible in one look over the floor plan. Red marks everything the check knows about
+and does not count: an internal or orphan opening, one whose area could not be established, and a
+room left without a single valid one. An opening that legitimately counts for two rooms — an
+external, measured boundary to both — is coloured in each; on screen it ends up in whichever
+room's colour was painted last, which is accepted rather than fixed. It writes nothing to the IFC.
+Switching off uses Bonsai's own Reset Colours, which whitens every visible object, not only the
+ones this tool coloured.
+
 ## Not yet implemented
 
 The default is that the whole clear opening counts for both ratios. Discounting
