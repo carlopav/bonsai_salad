@@ -1,4 +1,5 @@
 import colorsys
+import itertools
 
 import ifcopenshell.api.root
 
@@ -20,6 +21,20 @@ def test_consecutive_rooms_land_far_apart_on_the_hue_circle():
     hues = [_hue(diagnostics.colour_for(index)) for index in range(5)]
     for first, second in zip(hues, hues[1:]):
         assert _circular_distance(first, second) > 0.3
+
+
+def test_every_room_among_the_first_several_stays_apart_from_every_other():
+    # A scheme that only spaces neighbours out (e.g. a step of exactly 0.5)
+    # can still collide two rooms apart; only checking all pairs catches that.
+    hues = [_hue(diagnostics.colour_for(index)) for index in range(8)]
+    for first, second in itertools.combinations(hues, 2):
+        assert _circular_distance(first, second) > 0.05
+
+
+def test_no_room_hue_among_the_first_fifty_falls_in_the_excluded_gap():
+    excluded_hue = _hue(diagnostics.EXCLUDED)
+    for index in range(50):
+        assert _circular_distance(_hue(diagnostics.colour_for(index)), excluded_hue) >= diagnostics.RED_GAP
 
 
 def test_every_channel_stays_inside_the_unit_range():

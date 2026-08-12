@@ -20,10 +20,16 @@ VALUE = 0.95
 
 EXCLUDED = (0.8, 0.1, 0.1)
 
+# Excluded sits at hue 0.0; no room's hue may land within this of it on either
+# side of the circle, or red would stop meaning one specific thing.
+RED_GAP = 0.06
+
 
 def colour_for(index):
-    """The colour of the index-th room, RGB in 0..1."""
-    return colorsys.hsv_to_rgb((index * GOLDEN) % 1.0, SATURATION, VALUE)
+    """The colour of the index-th room, RGB in 0..1. Hues are folded into the
+    band that excludes RED_GAP on both sides of the exclusion colour's hue."""
+    hue = RED_GAP + ((index * GOLDEN) % 1.0) * (1.0 - 2 * RED_GAP)
+    return colorsys.hsv_to_rgb(hue, SATURATION, VALUE)
 
 
 def groups(ifc_file):
