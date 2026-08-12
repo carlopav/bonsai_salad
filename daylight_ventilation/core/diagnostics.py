@@ -40,8 +40,8 @@ def groups(ifc_file):
     A filling that serves a room but has no known area belongs to the second
     list. It is the one to go and look at, and the room's colour would hide it.
 
-    Outdoor space is in neither: the check says nothing about a balcony, and red
-    would claim it found something wrong with it.
+    What is not a room is in neither: the check says nothing about a balcony or a
+    parking bay, and red would claim it found something wrong with it.
     """
     paired, counted, excluded = [], set(), []
     for space in spaces.rooms(ifc_file):

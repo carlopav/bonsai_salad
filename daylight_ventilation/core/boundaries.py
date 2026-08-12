@@ -80,15 +80,15 @@ def write_missing(ifc_file, proposals):
 
 def disagreeing(proposals):
     """The proposals whose filling is bound to rooms the probe did not find and
-    to none that it did, or to a space the check treats as outdoors.
+    to none that it did, or to a space the check does not treat as a room.
 
     A different RelatingSpace is a geometric fact and the boundary is simply
     wrong; a different InternalOrExternalBoundary is a regulatory judgement and
     belongs to the user, so a loggia corrected by hand — one boundary kept out of
     two — still shares a room with the probe and is never reported. A boundary to
-    outdoor space is neither: it was written when the tool took a balcony for a
-    room, it stands between the window and the only room it serves, and only
-    refresh can replace it.
+    a space that is not a room is neither: it was written when the tool took a
+    balcony or a parking bay for one, it stands between the window and the only
+    room it serves, and only refresh can replace it.
 
     Both arms need a room from the probe to put in the boundary's place: refresh
     removes what it reports, and must never leave a filling with nothing.

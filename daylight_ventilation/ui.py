@@ -135,7 +135,7 @@ class DaylightVentilationPanel(bpy.types.Panel):
         if element is None or not element.is_a("IfcSpace"):
             return
         if not spaces.is_room(element):
-            layout.label(text="Spazio esterno: escluso dalla verifica.", icon="INFO")
+            layout.label(text="Non è un locale: escluso dalla verifica.", icon="INFO")
             return
         (row,) = ratios.measure_spaces(tool.Ifc.get(), [element])
         box = layout.box()
