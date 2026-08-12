@@ -287,18 +287,14 @@ def test_a_prepared_override_survives_a_recalculation(ifc_file, lit_room):
     assert row.air == pytest.approx(1.8, rel=1e-6)
 
 
-def test_the_headers_name_eleven_columns_in_order(ifc_file):
+def test_the_headers_name_seven_columns_in_order(ifc_file):
     assert ratios.headers(ifc_file) == [
         "Identificativo",
         "Nome",
         "Superficie netta (m²)",
-        "Luce architettonica (m²)",
-        "Superficie aerante (m²)",
+        "Requisito illuminazione / aerazione (m²)",
         "Superficie illuminante (m²)",
-        "Rapporto aerazione",
-        "Requisito aerazione",
-        "Rapporto illuminazione",
-        "Requisito illuminazione",
+        "Superficie aerante (m²)",
         "Verificato",
     ]
 

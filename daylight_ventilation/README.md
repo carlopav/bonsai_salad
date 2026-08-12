@@ -48,15 +48,20 @@ stays withheld.
 
 ## The exported table
 
-One row per room, grouped by storey, with the ratios and the verdict as formulas
-over the areas beside them: correct an area in the sheet and the verdict follows.
+One row per room, grouped by storey: identifier, name, net floor area, the area
+required, the lighting area, the ventilation area, the verdict.
 
-The **Luce architettonica** column sits between the net floor area and the two
-counted ones. Where they read alike, what counts is what was measured; where
-they differ, what counts is an override — one you typed, or one written before
-the model moved past it — and the two columns side by side are the only way a
-reader of the table can tell the one from the other. The panel marks the same
-difference on the window's line, as `≠ misurato`.
+The requirement is printed as the square metres the room has to reach, not as
+the ratio it is taken over, so the row is read across: what it needs, then what
+it has. One value where the two requirements agree, two — illuminazione first —
+where they do not, and a dash for a room the regulation asks nothing of.
+
+Required area and verdict are formulas over the net floor area beside them:
+correct an area in the sheet and both follow.
+
+The table no longer carries the measured **Luce architettonica** next to the
+counted areas, so a corrected area and a measured one read alike there. The
+panel still marks the difference on the window's line, as `≠ misurato`.
 
 ## The room a window serves
 
@@ -65,10 +70,17 @@ boundary already in the file is the association, whoever wrote it. A window
 counts for a room when its boundary to that room is `EXTERNAL`.
 
 An `IfcSpace` whose `PredefinedType` is `EXTERNAL` — a balcony, a loggia, a
-portico, a terrace — is outdoor space, not a room. It is left out of the check
-entirely: nothing is measured over it, it gets no requirement and no row in the
-table. A window between a room and one of them gets a single `EXTERNAL` boundary,
-to the room, and counts for it exactly like one giving onto open air.
+portico, a terrace — is outdoor space, not a room; `PARKING` is a parking bay and
+`GFA` a floor-area overlay, which are not rooms either. They are left out of the
+check entirely: nothing is measured over them, they get no requirement and no row
+in the table. A window between a room and one of them gets a single `EXTERNAL`
+boundary, to the room, and counts for it exactly like one giving onto open air.
+
+Every other value is a room, including `USERDEFINED` and a type left unset: a
+project that carries its own classification, or an exporter that writes none,
+still has rooms, and dropping them from the check would say nothing on screen.
+A room the regulation asks nothing of — a garage, a cellar — is handled by
+setting its requirement to `0`, where the table still shows it.
 
 You can still correct any pairing by hand in Bonsai's Boundary module — set the
 boundary facing the room to `EXTERNAL`, delete the other — and nothing will
@@ -76,8 +88,8 @@ overwrite it.
 
 Windows moved after a calculation keep their old boundary. The panel reports
 those whose boundary names a room the geometry does not put them near, and
-**Aggiorna** replaces them. A boundary naming an outdoor space is reported too:
-it was written when the tool still took a balcony for a room, and it stands
+**Aggiorna** replaces them. A boundary naming a space that is not a room is
+reported too: it was written when the tool still took a balcony for one, and it stands
 between the window and the only room it serves — so a file calculated before this
 rule needs one **Aggiorna** to pick up the windows onto its loggias. The property
 sets those spaces already carry are left where they are: nothing but **Aggiorna**

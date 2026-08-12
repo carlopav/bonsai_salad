@@ -311,13 +311,9 @@ def headers(ifc_file):
         "Identificativo",
         "Nome",
         area("Superficie netta"),
-        area("Luce architettonica"),
-        area("Superficie aerante"),
+        area("Requisito illuminazione / aerazione"),
         area("Superficie illuminante"),
-        "Rapporto aerazione",
-        "Requisito aerazione",
-        "Rapporto illuminazione",
-        "Requisito illuminazione",
+        area("Superficie aerante"),
         "Verificato",
     ]
 

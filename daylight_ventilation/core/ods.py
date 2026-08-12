@@ -3,10 +3,13 @@
 """The check as an OpenDocument spreadsheet, written with the odfpy Bonsai
 already ships.
 
-Ratios and verdicts are formulas over the areas beside them, so the sheet stays
-a live document: correct an area by hand and the verdict follows. Each formula
-cell also carries the value computed here, which is what a reader that does not
-recalculate — Bonsai's own schedule renderer among them — displays.
+The table compares areas with areas: the requirement is printed as the square
+metres the room has to reach, not as the ratio it is taken over, so a reader
+checks a row by reading across it. Required area and verdict are formulas over
+the net floor area beside them, so the sheet stays a live document: correct an
+area by hand and both follow. Each formula cell also carries the value computed
+here, which is what a reader that does not recalculate — Bonsai's own schedule
+renderer among them — displays.
 
 There are no subtotals. Adding areas across rooms says nothing when the subject
 is a ratio.
@@ -20,25 +23,21 @@ from odf.text import P
 
 SHEET_NAME = "Rapporti aeroilluminanti"
 AREA_DECIMALS = 2
-RATIO_DECIMALS = 3
 DASH = "—"
 YES, NO, UNVERIFIED = "sì", "no", "da verificare"
 
-NET, CLEAR, AIR, DAYLIGHT = "C", "D", "E", "F"
-AIR_RATIO, AIR_REQUIREMENT, DAYLIGHT_RATIO, DAYLIGHT_REQUIREMENT = "G", "H", "I", "J"
+NET, REQUIREMENT, DAYLIGHT, AIR = "C", "D", "E", "F"
 
 
 def _styles(doc):
-    for name, decimals in (("SaladAreas", AREA_DECIMALS), ("SaladRatios", RATIO_DECIMALS)):
-        number_format = NumberStyle(name=name)
-        number_format.addElement(Number(decimalplaces=str(decimals), minintegerdigits="1"))
-        doc.styles.addElement(number_format)
+    number_format = NumberStyle(name="SaladAreas")
+    number_format.addElement(Number(decimalplaces=str(AREA_DECIMALS), minintegerdigits="1"))
+    doc.styles.addElement(number_format)
 
     styles = {
         "text": Style(name="SaladText", family="table-cell"),
         "header": Style(name="SaladHeader", family="table-cell"),
         "area": Style(name="SaladArea", family="table-cell", datastylename="SaladAreas"),
-        "ratio": Style(name="SaladRatio", family="table-cell", datastylename="SaladRatios"),
         "label_column": Style(name="SaladLabelColumn", family="table-column"),
         "value_column": Style(name="SaladValueColumn", family="table-column"),
     }
@@ -69,22 +68,27 @@ def _verdict(row, number, styles):
     """An unmeasured filling withholds the verdict: a formula would recompute to
     sì/no the moment the sheet is opened, overwriting the honest unknown.
 
-    Only the comparisons an exempt requirement actually imposes enter the
-    formula: a term built over a dashed ratio cell would make the verdict
-    depend on how the reading application ranks text against numbers."""
+    Each comparison is built against the net floor area rather than against the
+    requirement column, which holds two values when the two requirements differ
+    and could not be read by one term. Only the comparisons a requirement
+    actually imposes enter it.
+
+    A room whose floor could not be read requires zero square metres by
+    arithmetic and would pass on that alone, so the formula asks for the floor
+    first — the same verdict the calculation reaches here."""
     if row.unmeasured_fillings > 0:
         return _text(UNVERIFIED, styles["text"])
 
     terms = []
-    if row.air_requirement > 0:
-        terms.append(f"[.{AIR_RATIO}{number}]>=[.{AIR_REQUIREMENT}{number}]")
     if row.daylight_requirement > 0:
-        terms.append(f"[.{DAYLIGHT_RATIO}{number}]>=[.{DAYLIGHT_REQUIREMENT}{number}]")
+        terms.append(f"[.{DAYLIGHT}{number}]>=[.{NET}{number}]*{row.daylight_requirement}")
+    if row.air_requirement > 0:
+        terms.append(f"[.{AIR}{number}]>=[.{NET}{number}]*{row.air_requirement}")
 
     if not terms:
         return _text(YES, styles["text"])
 
-    condition = terms[0] if len(terms) == 1 else f"AND({terms[0]};{terms[1]})"
+    condition = f"AND({';'.join([f'[.{NET}{number}]>0', *terms])})"
     cell = TableCell(
         valuetype="string",
         stylename=styles["text"],
@@ -94,17 +98,25 @@ def _verdict(row, number, styles):
     return cell
 
 
-def _ratio_cell(row, ratio, requirement, area_column, number, styles):
-    """A room that requires nothing gets a dash: a ratio it is not measured
-    against would only invite the reader to compare it with something."""
-    if requirement <= 0:
+def _required(net, requirement):
+    return f"{net * requirement:.{AREA_DECIMALS}f}" if requirement > 0 else DASH
+
+
+def _requirement_cell(row, number, styles):
+    """What the room has to reach, in the same unit as the areas beside it: one
+    value where the two requirements agree, illuminazione and aerazione in that
+    order where they do not.
+
+    A room that requires nothing gets a dash — a bar it is not held to would only
+    invite the reader to compare it with something. Two values cannot be a
+    formula, and nothing reads this column: the verdict is built from the net
+    floor area directly, so it never goes stale against it."""
+    daylight, air = row.daylight_requirement, row.air_requirement
+    if daylight <= 0 and air <= 0:
         return _text(DASH, styles["text"])
-    return _number(
-        ratio,
-        styles["ratio"],
-        RATIO_DECIMALS,
-        f"of:=IF([.{NET}{number}]=0;0;[.{area_column}{number}]/[.{NET}{number}])",
-    )
+    if daylight == air:
+        return _number(row.net * daylight, styles["area"], AREA_DECIMALS, f"of:=[.{NET}{number}]*{daylight}")
+    return _text(" / ".join(_required(row.net, requirement) for requirement in (daylight, air)), styles["text"])
 
 
 def _row(cells):
@@ -137,13 +149,9 @@ def write(path, headers, sections):
                         _text(row.identification, styles["text"]),
                         _text(row.name, styles["text"]),
                         _number(row.net, styles["area"], AREA_DECIMALS),
-                        _number(row.clear, styles["area"], AREA_DECIMALS),
-                        _number(row.air, styles["area"], AREA_DECIMALS),
+                        _requirement_cell(row, number, styles),
                         _number(row.daylight, styles["area"], AREA_DECIMALS),
-                        _ratio_cell(row, row.air_ratio, row.air_requirement, AIR, number, styles),
-                        _number(row.air_requirement, styles["ratio"], RATIO_DECIMALS),
-                        _ratio_cell(row, row.daylight_ratio, row.daylight_requirement, DAYLIGHT, number, styles),
-                        _number(row.daylight_requirement, styles["ratio"], RATIO_DECIMALS),
+                        _number(row.air, styles["area"], AREA_DECIMALS),
                         _verdict(row, number, styles),
                     ]
                 )
