@@ -42,7 +42,10 @@ def colour_diagnostics(context):
             obj.color = (*diagnostics.EXCLUDED, 1.0)
     props = context.scene.daylight_ventilation
     if space_data := tool.Blender.get_view3d_space():
-        props.previous_color_type = space_data.shading.color_type
+        # Recolouring while the switch is already on must not overwrite the
+        # mode saved on first activation with the "OBJECT" this call sets.
+        if not props.diagnostics:
+            props.previous_color_type = space_data.shading.color_type
         space_data.shading.color_type = "OBJECT"
     return len(paired), len(excluded)
 
@@ -50,8 +53,17 @@ def colour_diagnostics(context):
 def clear_diagnostics(context):
     """Bonsai's own reset, by the user's decision: it whitens every visible
     object, not only ours, and clears the Search module's colourscheme. It does
-    not touch the viewport's colour mode, so putting that back is ours."""
+    not touch the viewport's colour mode, so putting that back is ours.
+
+    Bonsai hides every IfcSpace on import, and a filling with no spatial
+    container lands in a collection hidden by default: reset_object_colours
+    skips both, so every room and filling this feature could have coloured is
+    whitened again here, whatever its current visibility."""
     bpy.ops.bim.reset_object_colours()
+    ifc_file = tool.Ifc.get()
+    for element in (*ifc_file.by_type("IfcSpace"), *openings.fillings(ifc_file)):
+        if obj := tool.Ifc.get_object(element):
+            obj.color = (1.0, 1.0, 1.0, 1.0)
     props = context.scene.daylight_ventilation
     if space_data := tool.Blender.get_view3d_space():
         space_data.shading.color_type = props.previous_color_type or "MATERIAL"
