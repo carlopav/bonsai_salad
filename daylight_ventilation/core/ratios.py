@@ -17,7 +17,7 @@ import ifcopenshell.util.element
 import ifcopenshell.util.shape
 import ifcopenshell.util.unit
 
-from . import boundaries, openings
+from . import boundaries, openings, spaces
 
 FILLING_PSET = "Superfici aeroilluminanti"
 CLEAR = "Luce architettonica"
@@ -143,7 +143,7 @@ def is_quantified(ifc_file):
     unreadable. The requirement beside it would not do: the user can set that
     without ever calculating.
     """
-    return any(DAYLIGHT_RATIO in _pset(space, SPACE_PSET) for space in ifc_file.by_type("IfcSpace"))
+    return any(DAYLIGHT_RATIO in _pset(space, SPACE_PSET) for space in spaces.rooms(ifc_file))
 
 
 PREPARED, ALREADY_SET, UNMEASURED = "prepared", "already_set", "unmeasured"
@@ -358,9 +358,9 @@ def quantify(ifc_file, geom_settings=None):
         remove_clear_opening(ifc_file, filling)
         # Reported only where it can withhold a room's verdict: a filling
         # bounding no room is an orphan, which is its own bucket.
-        if boundaries.of(filling):
+        if any(spaces.is_room(space) for space in boundaries.rooms_of(filling)):
             unmeasurable.append(filling)
-    rows = measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"), geom_settings)
+    rows = measure_spaces(ifc_file, spaces.rooms(ifc_file), geom_settings)
     for row in rows:
         write_space_results(ifc_file, row)
     return Summary(

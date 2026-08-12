@@ -5,7 +5,7 @@ import os
 import bpy
 from bonsai import tool
 
-from .core import boundaries, ratios
+from .core import boundaries, ratios, spaces
 from .data import Summary
 from .operator import schedule_path, selected_fillings, selected_spaces
 
@@ -133,6 +133,9 @@ class DaylightVentilationPanel(bpy.types.Panel):
     def draw_active_space(self, context, layout):
         element = tool.Ifc.get_entity(context.active_object) if context.active_object else None
         if element is None or not element.is_a("IfcSpace"):
+            return
+        if not spaces.is_room(element):
+            layout.label(text="Spazio esterno: escluso dalla verifica.", icon="INFO")
             return
         (row,) = ratios.measure_spaces(tool.Ifc.get(), [element])
         box = layout.box()

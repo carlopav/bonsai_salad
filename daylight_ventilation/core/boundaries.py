@@ -10,7 +10,7 @@ created where none exists, and only `refresh` removes one, on an explicit click.
 import ifcopenshell.api.boundary
 import ifcopenshell.api.root
 
-from . import openings
+from . import openings, spaces
 
 EXTERNAL = "EXTERNAL"
 INTERNAL = "INTERNAL"
@@ -79,19 +79,26 @@ def write_missing(ifc_file, proposals):
 
 
 def disagreeing(proposals):
-    """The proposals whose filling is bound to rooms the probe did not find, and
-    to none that it did.
+    """The proposals whose filling is bound to rooms the probe did not find and
+    to none that it did, or to a space the check treats as outdoors.
 
-    Only a disjoint pair is a disagreement. A different RelatingSpace is a
-    geometric fact and the boundary is simply wrong; a different
-    InternalOrExternalBoundary is a regulatory judgement and belongs to the
-    user, so a loggia corrected by hand — one boundary kept out of two — still
-    shares a room with the probe and is never reported.
+    A different RelatingSpace is a geometric fact and the boundary is simply
+    wrong; a different InternalOrExternalBoundary is a regulatory judgement and
+    belongs to the user, so a loggia corrected by hand — one boundary kept out of
+    two — still shares a room with the probe and is never reported. A boundary to
+    outdoor space is neither: it was written when the tool took a balcony for a
+    room, it stands between the window and the only room it serves, and only
+    refresh can replace it.
+
+    Both arms need a room from the probe to put in the boundary's place: refresh
+    removes what it reports, and must never leave a filling with nothing.
     """
     found = []
     for proposal in proposals:
         bound = set(rooms_of(proposal.filling))
-        if bound and proposal.rooms and not bound & set(proposal.rooms):
+        if not bound or not proposal.rooms:
+            continue
+        if not bound & set(proposal.rooms) or not all(spaces.is_room(space) for space in bound):
             found.append(proposal)
     return found
 

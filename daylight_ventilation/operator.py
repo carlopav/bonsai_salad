@@ -7,7 +7,7 @@ import bpy
 from bonsai import tool
 from bonsai.core import drawing as core_drawing
 
-from .core import boundaries, diagnostics, ods, openings, ratios
+from .core import boundaries, diagnostics, ods, openings, ratios, spaces
 from .data import Summary
 
 
@@ -15,7 +15,7 @@ def selected_spaces(context):
     """Only the selected rooms: what a button that edits one room at a time works
     on, never the whole file by accident."""
     elements = [tool.Ifc.get_entity(obj) for obj in context.selected_objects]
-    return [element for element in elements if element and element.is_a("IfcSpace")]
+    return [element for element in elements if element and element.is_a("IfcSpace") and spaces.is_room(element)]
 
 
 def selected_fillings(context):
@@ -289,9 +289,9 @@ class ExportDaylightSchedule(bpy.types.Operator, tool.Ifc.Operator):
 
     def _execute(self, context):
         ifc_file = tool.Ifc.get()
-        rows = ratios.measure_spaces(ifc_file, ifc_file.by_type("IfcSpace"))
+        rows = ratios.measure_spaces(ifc_file, spaces.rooms(ifc_file))
         if not rows:
-            self.report({"ERROR"}, "No IfcSpace to write.")
+            self.report({"ERROR"}, "No room to write.")
             return {"CANCELLED"}
         path = schedule_path()
         try:

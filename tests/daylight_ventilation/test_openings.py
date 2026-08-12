@@ -114,6 +114,20 @@ def test_a_window_between_two_rooms_finds_both(add_box, add_tapered_opening, add
     assert external is False
 
 
+def test_a_window_onto_a_loggia_finds_only_the_room(ifc_file, add_box, add_tapered_opening, add_space, fill):
+    """The loggia is an IfcSpace marked EXTERNAL: outdoor space, so the far side
+    of the wall lands in nothing and the window faces outside."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    bedroom = add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    add_space("Loggia", width=4.0, depth=3.0, matrix=placement(y=-3.0), predefined_type="EXTERNAL")
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    fill(wall, opening, window)
+    (proposal,) = openings.proposals(ifc_file)
+    assert proposal.rooms == [bedroom]
+    assert proposal.external is True
+
+
 def test_an_orphan_window_finds_nothing(add_box, add_tapered_opening, add_space):
     wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
     far_away = add_space("A", width=4.0, depth=3.0, matrix=placement(x=100.0))

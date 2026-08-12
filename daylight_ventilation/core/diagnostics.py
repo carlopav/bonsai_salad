@@ -9,7 +9,7 @@ paired with the one next door. Colouring the pairs answers that in one look.
 
 import colorsys
 
-from . import boundaries, openings, ratios
+from . import boundaries, openings, ratios, spaces
 
 # Successive multiples of an irrational spread hues as far apart as a stateless
 # scheme can: consecutive rooms cannot land on the same colour, which a digest
@@ -39,9 +39,12 @@ def groups(ifc_file):
 
     A filling that serves a room but has no known area belongs to the second
     list. It is the one to go and look at, and the room's colour would hide it.
+
+    Outdoor space is in neither: the check says nothing about a balcony, and red
+    would claim it found something wrong with it.
     """
     paired, counted, excluded = [], set(), []
-    for space in ifc_file.by_type("IfcSpace"):
+    for space in spaces.rooms(ifc_file):
         served = [f for f in boundaries.serves(space) if ratios.has_known_area(f)]
         if served:
             paired.append((space, served))

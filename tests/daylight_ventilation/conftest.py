@@ -172,9 +172,10 @@ def add_space(ifc_file):
     builder = ifcopenshell.util.shape_builder.ShapeBuilder(ifc_file)
     body = ifcopenshell.util.representation.get_context(ifc_file, "Model", "Body", "MODEL_VIEW")
 
-    def add(name, width, depth, height=3.0, matrix=None, long_name=None):
+    def add(name, width, depth, height=3.0, matrix=None, long_name=None, predefined_type=None):
         space = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcSpace", name=name)
         space.LongName = long_name
+        space.PredefinedType = predefined_type
         outline = [(0.0, 0.0), (width, 0.0), (width, depth), (0.0, depth)]
         profile = builder.profile(builder.polyline(outline, closed=True))
         representation = builder.get_representation(body, [builder.extrude(profile, magnitude=height)])

@@ -15,6 +15,8 @@ import ifcopenshell.geom
 import ifcopenshell.util.placement
 import ifcopenshell.util.shape
 
+from . import spaces
+
 UP = np.array([0.0, 0.0, 1.0])
 
 
@@ -217,7 +219,8 @@ def probe(opening, host, spaces, geom_settings):
     """(the rooms on either side of the opening, whether it is external).
 
     External means one side landed in a room and the other in none: what the
-    wall separates the room from is not modelled, so it is outside.
+    wall separates the room from is either not modelled or is outdoor space, and
+    either way it is outside.
     """
     axis = thickness_axis(host)
     void = triangles(opening, geom_settings)
@@ -268,7 +271,9 @@ def host_of(filling):
 
 
 def _spaces(ifc_file, geom_settings):
-    return {space: triangles(space, geom_settings) for space in ifc_file.by_type("IfcSpace")}
+    """The bodies a probe may land in: rooms only, so a window onto a loggia has
+    nothing on its far side and reads as external."""
+    return {space: triangles(space, geom_settings) for space in spaces.rooms(ifc_file)}
 
 
 def proposals(ifc_file, geom_settings=None):

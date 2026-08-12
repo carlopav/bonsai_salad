@@ -1,6 +1,6 @@
 # Rapporti aeroilluminanti
 
-Checks, for every `IfcSpace`, the ratio between its window area and its net floor
+Checks, for every room, the ratio between its window area and its net floor
 area — one ratio for daylight, one for ventilation — and writes the result as an
 ODS schedule. Lives under **Schedules > Rapporti aeroilluminanti**.
 
@@ -64,13 +64,24 @@ Recorded as `IfcRelSpaceBoundary`, and only ever created where none exists. A
 boundary already in the file is the association, whoever wrote it. A window
 counts for a room when its boundary to that room is `EXTERNAL`.
 
-That is also how you correct the tool. A loggia modelled as an `IfcSpace` makes
-its window `INTERNAL` on both sides; open Bonsai's Boundary module, set the one
-facing the room to `EXTERNAL`, delete the other, and nothing will overwrite it.
+An `IfcSpace` whose `PredefinedType` is `EXTERNAL` — a balcony, a loggia, a
+portico, a terrace — is outdoor space, not a room. It is left out of the check
+entirely: nothing is measured over it, it gets no requirement and no row in the
+table. A window between a room and one of them gets a single `EXTERNAL` boundary,
+to the room, and counts for it exactly like one giving onto open air.
+
+You can still correct any pairing by hand in Bonsai's Boundary module — set the
+boundary facing the room to `EXTERNAL`, delete the other — and nothing will
+overwrite it.
 
 Windows moved after a calculation keep their old boundary. The panel reports
 those whose boundary names a room the geometry does not put them near, and
-**Aggiorna** replaces them. A boundary you corrected by hand is never reported.
+**Aggiorna** replaces them. A boundary naming an outdoor space is reported too:
+it was written when the tool still took a balcony for a room, and it stands
+between the window and the only room it serves — so a file calculated before this
+rule needs one **Aggiorna** to pick up the windows onto its loggias. The property
+sets those spaces already carry are left where they are: nothing but **Aggiorna**
+deletes anything. A boundary you corrected by hand is never reported.
 A boundary written by another authoring tool — one carrying a contact surface,
 or a 2nd level one paired with the boundary on the other side — is left
 untouched even when it is reported: **Aggiorna** says how many it left alone,
@@ -86,7 +97,8 @@ The pairing between a room and its windows drives every ratio, and nothing else 
 it. **Diagnostica associazioni** colours each room and the openings counted for it alike, so a
 mismatch is visible in one look over the floor plan. Red marks everything the check knows about
 and does not count: an internal or orphan opening, one whose area could not be established, and a
-room left without a single valid one. An opening that legitimately counts for two rooms — an
+room left without a single valid one. Outdoor space is neither coloured nor reddened: the check
+says nothing about a balcony. An opening that legitimately counts for two rooms — an
 external, measured boundary to both — is coloured in each; on screen it ends up in whichever
 room's colour was painted last, which is accepted rather than fixed. It writes nothing to the IFC.
 Switching off uses Bonsai's own Reset Colours, which whitens every visible object, not only the

@@ -50,6 +50,73 @@ def test_a_window_between_two_rooms_gets_two_internal_boundaries(
     assert {b.InternalOrExternalBoundary for b in written} == {"INTERNAL"}
 
 
+@pytest.fixture
+def window_onto_a_loggia(add_box, add_tapered_opening, add_space, fill):
+    """A bedroom whose window opens onto a loggia modelled as an IfcSpace marked
+    EXTERNAL."""
+
+    def build():
+        wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+        bedroom = add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+        loggia = add_space("Loggia", width=4.0, depth=3.0, matrix=placement(y=-3.0), predefined_type="EXTERNAL")
+        opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+        window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+        fill(wall, opening, window)
+        return window, bedroom, loggia
+
+    return build
+
+
+def test_a_window_onto_a_loggia_gets_one_external_boundary(ifc_file, window_onto_a_loggia):
+    window, bedroom, loggia = window_onto_a_loggia()
+    assert boundaries.write_missing(ifc_file, openings.proposals(ifc_file)) == 1
+    (boundary,) = boundaries.of(window)
+    assert boundary.RelatingSpace == bedroom
+    assert boundary.InternalOrExternalBoundary == "EXTERNAL"
+    assert boundaries.serves(bedroom) == [window]
+    assert boundaries.serves(loggia) == []
+
+
+def test_a_boundary_to_a_loggia_disagrees(ifc_file, window_onto_a_loggia):
+    """What an earlier run wrote when it took the loggia for a room: two INTERNAL
+    boundaries. The bedroom is in both sets, so only the loggia's makes it a
+    disagreement."""
+    window, bedroom, loggia = window_onto_a_loggia()
+    boundaries.add(ifc_file, bedroom, window, external=False)
+    boundaries.add(ifc_file, loggia, window, external=False)
+    disagreeing = boundaries.disagreeing(openings.proposals(ifc_file))
+    assert [proposal.filling for proposal in disagreeing] == [window]
+
+
+def test_refresh_replaces_a_boundary_to_a_loggia(ifc_file, window_onto_a_loggia):
+    window, bedroom, loggia = window_onto_a_loggia()
+    boundaries.add(ifc_file, bedroom, window, external=False)
+    boundaries.add(ifc_file, loggia, window, external=False)
+    proposals = openings.proposals(ifc_file)
+    assert boundaries.refresh(ifc_file, boundaries.disagreeing(proposals)) == (1, 0)
+    (boundary,) = boundaries.of(window)
+    assert boundary.RelatingSpace == bedroom
+    assert boundary.InternalOrExternalBoundary == "EXTERNAL"
+    assert boundaries.serves(bedroom) == [window]
+
+
+def test_a_door_between_two_rooms_stays_internal(ifc_file, add_box, add_tapered_opening, add_space, fill):
+    """The regression the loggia rule could cause: an ordinary internal door
+    counts for nobody, and nothing about it disagrees."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    hall = add_space("A", width=4.0, depth=3.0, matrix=placement(y=0.3))
+    kitchen = add_space("B", width=4.0, depth=3.0, matrix=placement(y=-3.0))
+    opening = add_tapered_opening(near=0.9, far=0.9, height=2.1, depth=0.3, matrix=placement(x=2.0))
+    door = add_box("IfcDoor", length=0.9, thickness=0.1, height=2.1, matrix=placement(x=1.55))
+    fill(wall, opening, door)
+    assert boundaries.write_missing(ifc_file, openings.proposals(ifc_file)) == 2
+    written = boundaries.of(door)
+    assert {b.RelatingSpace for b in written} == {hall, kitchen}
+    assert {b.InternalOrExternalBoundary for b in written} == {"INTERNAL"}
+    assert boundaries.serves(hall) == []
+    assert boundaries.disagreeing(openings.proposals(ifc_file)) == []
+
+
 def test_an_orphan_window_gets_none(ifc_file, add_box, add_tapered_opening, fill):
     wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
     opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))

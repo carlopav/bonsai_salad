@@ -166,6 +166,23 @@ def test_a_second_run_leaves_an_edited_requirement_alone(ifc_file, project):
     assert row.verified is False
 
 
+def test_an_outdoor_space_is_left_out_of_the_check(ifc_file, add_box, add_tapered_opening, add_space, fill):
+    """A daylight ratio on a loggia means nothing: no row, no pset, and the
+    bedroom's window counts for the bedroom."""
+    wall = add_box("IfcWall", length=4.0, thickness=0.3, height=3.0)
+    bedroom = add_space("A1", width=4.0, depth=3.0, matrix=placement(y=0.3), long_name="Camera")
+    loggia = add_space("A2", width=4.0, depth=3.0, matrix=placement(y=-3.0), predefined_type="EXTERNAL")
+    opening = add_tapered_opening(near=1.2, far=1.2, height=1.5, depth=0.3, matrix=placement(x=2.0, z=0.9))
+    window = add_box("IfcWindow", length=1.2, thickness=0.1, height=1.5, matrix=placement(x=1.4, z=0.9))
+    fill(wall, opening, window)
+    summary = ratios.quantify(ifc_file)
+    (row,) = summary.rows
+    assert row.space == bedroom
+    assert row.daylight_ratio == pytest.approx(0.15, rel=1e-6)
+    assert row.verified is True
+    assert ifcopenshell.util.element.get_pset(loggia, ratios.SPACE_PSET, should_inherit=False) is None
+
+
 def test_rooms_are_grouped_by_storey(ifc_file, project, add_space):
     room, _, _ = project
     storey = ifcopenshell.api.root.create_entity(ifc_file, ifc_class="IfcBuildingStorey", name="Piano terra")
