@@ -110,6 +110,26 @@ def add_clip(ifc_file, unit_scale, body_of):
 
 
 @pytest.fixture
+def add_implicit_clip(ifc_file, unit_scale, body_of):
+    """A clip whose plane leaves RefDirection out, the way most authoring tools
+    write it: IFC derives the X axis by projecting the global X onto the plane,
+    which is not (1, 0, 0) as soon as the plane is tilted."""
+
+    def add(element, location, axis):
+        item = body_of(element).Items[0]
+        placement = ifc_file.createIfcAxis2Placement3D(
+            ifc_file.createIfcCartesianPoint(tuple(c / unit_scale for c in location)),
+            ifc_file.createIfcDirection(tuple(axis)),
+            None,
+        )
+        half_space = ifc_file.createIfcHalfSpaceSolid(ifc_file.createIfcPlane(placement), False)
+        (result,) = ifcopenshell.api.geometry.add_boolean(ifc_file, item, [half_space], "DIFFERENCE")
+        return result
+
+    return add
+
+
+@pytest.fixture
 def add_polygonal_clip(ifc_file, unit_scale, body_of):
     """A bounded clip: an IfcPolygonalBoundedHalfSpace, whose Position frame
     carries the boundary polygon and must travel with the plane."""

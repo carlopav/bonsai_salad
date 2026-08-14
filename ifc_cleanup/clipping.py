@@ -12,6 +12,7 @@ between two of them); IFC coordinates are written in project units.
 import numpy as np
 import ifcopenshell.api.geometry
 import ifcopenshell.util.element
+import ifcopenshell.util.shape_builder
 
 
 def half_space_clips(booleans):
@@ -67,6 +68,43 @@ def transform_half_space(ifc_file, half_space, matrix, unit_scale):
         placement.Axis = ifc_file.createIfcDirection(rotated(matrix, placement.Axis, (0.0, 0.0, 1.0)))
         placement.RefDirection = ifc_file.createIfcDirection(rotated(matrix, placement.RefDirection, (1.0, 0.0, 0.0)))
     return copy
+
+
+# --------------------------------------------------------------------------
+# Building a clip from a plane
+
+
+def upward(normal):
+    """The same plane normal, never pointing down. A half space normal points at
+    the material being removed, so an upward one cuts away what sits above the
+    plane; a vertical face, having no side above, is left as it is."""
+    vector = np.array(normal, dtype=float)
+    vector /= np.linalg.norm(vector)
+    return as_coordinates(-vector if vector[2] < 0 else vector)
+
+
+def half_space_from_plane(ifc_file, location, normal, unit_scale):
+    """A half space on the plane through location, cutting away the side the
+    normal points at. Both in metres, in whatever frame the caller then hands to
+    clip_representation — pass the target's inverse placement there and these
+    are world coordinates.
+
+    The X axis is arbitrary (the plane is unbounded) but must not be parallel to
+    the normal: picked the way ifcopenshell.util.data.Clipping picks it."""
+    reference = (0.0, 1.0, 0.0) if abs(np.array(normal, dtype=float)[2]) > 0.99 else (0.0, 0.0, 1.0)
+    x_axis = np.cross(normal, reference)
+    builder = ifcopenshell.util.shape_builder.ShapeBuilder(ifc_file)
+    placement = builder.create_axis2_placement_3d(
+        as_coordinates(np.array(location, dtype=float) / unit_scale),
+        as_coordinates(normal),
+        as_coordinates(x_axis / np.linalg.norm(x_axis)),
+    )
+    return ifc_file.createIfcHalfSpaceSolid(ifc_file.createIfcPlane(placement), False)
+
+
+def discard_half_space(ifc_file, half_space):
+    """Drops a half space that only existed to be copied onto the targets."""
+    ifcopenshell.util.element.remove_deep2(ifc_file, half_space)
 
 
 # --------------------------------------------------------------------------

@@ -80,6 +80,22 @@ def test_the_copy_owns_its_geometry_and_leaves_the_source_alone(
     assert clip.BaseSurface.Position.Location.Coordinates == before
 
 
+def test_a_plane_that_leaves_its_x_axis_implicit_keeps_the_frame_ifcopenshell_reads(
+    ifc_file, add_element, add_implicit_clip, body_of, booleans_of, unit_scale
+):
+    source_matrix = placement(x=1.0)
+    target_matrix = placement(x=7.0, angle=np.pi / 2)
+    source = add_element(name="A", matrix=source_matrix)
+    add_implicit_clip(source, location=(0.0, 0.0, 2.5), axis=(0.4, 0.0, 0.9))
+    (clip,) = clipping.half_space_clips(booleans_of(body_of(source)))
+
+    copy = clipping.transform_half_space(ifc_file, clip, np.linalg.inv(target_matrix) @ source_matrix, unit_scale)
+
+    assert world_frame(copy.BaseSurface.Position, target_matrix, unit_scale) == pytest.approx(
+        world_frame(clip.BaseSurface.Position, source_matrix, unit_scale)
+    )
+
+
 def test_a_bounded_clip_carries_its_boundary_frame_along(
     ifc_file, add_element, add_polygonal_clip, body_of, booleans_of, unit_scale
 ):
@@ -169,6 +185,55 @@ def test_geometry_that_cannot_take_a_boolean_is_left_alone(
     assert clipping.clip_representation(ifc_file, annotation, [clip], np.eye(4), unit_scale) == []
     assert annotation.Items == (curve,)
     assert len(ifc_file.by_type("IfcHalfSpaceSolid")) == before  # no orphan copies left behind
+
+
+# --------------------------------------------------------------------------
+# Building a clip from a plane
+
+
+@pytest.mark.parametrize(
+    "normal,expected",
+    [
+        ((0.0, 0.0, -1.0), (0.0, 0.0, 1.0)),
+        ((0.6, 0.0, -0.8), (-0.6, 0.0, 0.8)),
+        ((0.6, 0.0, 0.8), (0.6, 0.0, 0.8)),
+        ((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+    ],
+    ids=["down", "tilted down", "already up", "vertical face"],
+)
+def test_the_normal_of_a_new_clip_never_points_down(normal, expected):
+    assert clipping.upward(normal) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("unit_prefix", [None, "MILLI"], indirect=True)
+def test_a_plane_built_from_a_point_and_a_normal_lands_where_it_was_put(
+    ifc_file, add_element, body_of, booleans_of, unit_scale
+):
+    target_matrix = placement(x=7.0, y=-3.0, z=3.0, angle=np.pi / 2)
+    target = add_element(name="B", matrix=target_matrix)
+    location, normal = (2.0, 1.0, 4.0), (0.4, 0.0, 0.9)  # world metres
+
+    half_space = clipping.half_space_from_plane(ifc_file, location, normal, unit_scale)
+    clipping.clip_representation(ifc_file, body_of(target), [half_space], np.linalg.inv(target_matrix), unit_scale)
+
+    (clip,) = clipping.half_space_clips(booleans_of(body_of(target)))
+    frame = world_frame(clip.BaseSurface.Position, target_matrix, unit_scale)
+    assert frame[:3, 3] == pytest.approx(location)
+    assert frame[:3, 2] == pytest.approx(np.array(normal) / np.linalg.norm(normal))
+
+
+def test_the_plane_the_clips_were_built_from_leaves_nothing_behind(
+    ifc_file, add_element, body_of, booleans_of, unit_scale
+):
+    target = add_element(name="B")
+
+    half_space = clipping.half_space_from_plane(ifc_file, (0.0, 0.0, 2.5), (0.0, 0.0, 1.0), unit_scale)
+    clipping.clip_representation(ifc_file, body_of(target), [half_space], np.eye(4), unit_scale)
+    clipping.discard_half_space(ifc_file, half_space)
+
+    (kept,) = ifc_file.by_type("IfcHalfSpaceSolid")  # only the target's own copy survives
+    assert kept == clipping.half_space_clips(booleans_of(body_of(target)))[0]
+    assert not ifc_file.by_type("IfcPlane", include_subtypes=False)[1:]
 
 
 def test_geometry_borrowed_from_the_type_is_recognised(ifc_file, add_element, body_of):

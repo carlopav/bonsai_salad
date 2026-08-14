@@ -40,7 +40,9 @@ class IfcCleanupGeometryPanel(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("bim.align_base_to_cursor", icon="TRIA_DOWN_BAR")
         row.prop(props, "keep_inserts_fixed", text="", icon="LINKED" if props.keep_inserts_fixed else "UNLINKED")
-        layout.operator("bim.copy_clipping_planes", icon="MOD_BOOLEAN")
+        row = layout.row(align=True)
+        row.operator("bim.copy_clipping_planes", icon="MOD_BOOLEAN")
+        row.operator("bim.add_clipping_plane_at_cursor", text="New at Cursor", icon="MESH_PLANE")
         layout.operator("bim.split_layers", icon="MOD_BUILD")
 
 

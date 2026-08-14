@@ -16,48 +16,11 @@ removed afterwards from Bonsai's Booleans panel.
 """
 
 import bpy
-import numpy as np
 import ifcopenshell.util.unit
-import bonsai.core.geometry
 import bonsai.tool as tool
 
 from . import clipping
-
-
-def sync_placement(obj):
-    """Writes a viewport move back to IFC before reading the object's frame:
-    a stale placement would put the copied plane in the wrong place."""
-    if tool.Ifc.is_moved(obj):
-        bonsai.core.geometry.edit_object_placement(tool.Ifc, tool.Geometry, tool.Surveyor, obj=obj)
-
-
-def world_matrix(obj):
-    return np.array(obj.matrix_world, dtype=np.float64)
-
-
-def body_of(element):
-    return tool.Geometry.get_body_representation(element)
-
-
-def clip_target(ifc_file, obj, half_spaces, source_matrix, unit_scale):
-    """Copies the half spaces onto one target. Returns how many booleans were
-    created, or None when the object cannot take them: no IFC entity, no Body,
-    geometry borrowed from its type, or nothing in the Body a boolean can be
-    applied to."""
-    element = tool.Ifc.get_entity(obj)
-    if element is None:
-        return None
-    representation = body_of(element)
-    if representation is None or clipping.has_mapped_geometry(representation):
-        return None
-    sync_placement(obj)
-    matrix = np.linalg.inv(world_matrix(obj)) @ source_matrix
-    booleans = clipping.clip_representation(ifc_file, representation, half_spaces, matrix, unit_scale)
-    if not booleans:
-        return None
-    tool.Model.mark_manual_booleans(element, booleans)
-    tool.Geometry.reload_representation(obj)
-    return len(booleans)
+from .clipping_scene import body_of, clip_target, sync_placement, world_matrix
 
 
 def main(context):
