@@ -96,15 +96,50 @@ def _annotation_polylines_2d(ann, cam_inv_np):
     return polylines
 
 
+_ALDIM_CTX = "ACDB_ALDIMOBJECTCONTEXTDATA_CLASS"
+
+
+def _register_aldim_class(doc):
+    """Declare ACDB_ALDIMOBJECTCONTEXTDATA_CLASS in the CLASSES section.
+
+    An object whose class is not declared there is unknown to the CAD, which
+    drops it -- so the dimension would keep an annotative flag with no scale
+    representation behind it. ezdxf's own CLASS_DEFINITIONS do not cover the
+    context-data classes, so register it by hand; the shipped template already
+    carries the record, this covers the template-less path.
+    """
+    from ezdxf.entities import DXFClass
+    from ezdxf.lldxf.const import DXFKeyError
+
+    try:
+        doc.classes.get(_ALDIM_CTX)
+        return
+    except DXFKeyError:
+        pass
+    cls = DXFClass.new(doc=doc)
+    cls.update_dxf_attribs({
+        "name": _ALDIM_CTX,
+        "cpp_class_name": "AcDbAlignedDimensionObjectContextData",
+        "app_name": "ObjectDBX Classes",
+        "flags": 1153, "was_a_proxy": 0, "is_an_entity": 0,
+    })
+    doc.classes.register(cls)
+
+
 def _make_dim_annotative(doc, dim_entity, scale_handle):
-    """Add a single annotative scale representation to a DIMENSION entity.
+    """Add a single annotative scale representation to an aligned DIMENSION.
 
     Dimension analogue of _make_text_annotative: builds the extension-dict chain
       entity -> AcDbContextDataManager -> ACDB_ANNOTATIONSCALES -> *A1
-    where *A1 is an ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS referencing the current
-    drawing-scale SCALE handle, plus the dimension's own geometry block and text
-    midpoint. This is what makes BricsCAD/AutoCAD treat the DIMENSION as truly
-    annotative (rescaling per CANNOSCALE) rather than a fixed-size picture.
+    where *A1 holds this scale's picture block, text position and dimension-line
+    point, and references the current drawing-scale SCALE object. This is what
+    fills BricsCAD's annotative scale field and makes the dimension rescale per
+    CANNOSCALE instead of being redrawn at 1:1.
+
+    Tag layout, object class and point roles follow a BricsCAD-written aligned
+    dimension: group 10 in AcDbDimensionObjectContextData is the *text* midpoint
+    and group 11 in AcDbAlignedDimensionObjectContextData the dimension-line
+    defpoint -- the entity's two points the other way round.
 
     Only the current scale representation is written; the CAD app adds more when
     the user changes the annotation scale interactively -- same contract as
@@ -113,16 +148,20 @@ def _make_dim_annotative(doc, dim_entity, scale_handle):
     from ezdxf.lldxf.types import DXFTag
     from ezdxf.lldxf.tags import Tags
 
+    if "AcadAnnotative" not in doc.appids:
+        doc.appids.new("AcadAnnotative")
+    annotative_xdata = [
+        DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
+        DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
+    ]
+
     if scale_handle is None:
         # No annotation scale to reference -- fall back to the bare flag so the
         # entity is at least tagged annotative.
-        if "AcadAnnotative" not in doc.appids:
-            doc.appids.new("AcadAnnotative")
-        dim_entity.set_xdata("AcadAnnotative", [
-            DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
-            DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
-        ])
+        dim_entity.set_xdata("AcadAnnotative", annotative_xdata)
         return
+
+    _register_aldim_class(doc)
 
     if dim_entity.has_extension_dict:
         ext_dict = dim_entity.get_extension_dict()
@@ -132,21 +171,22 @@ def _make_dim_annotative(doc, dim_entity, scale_handle):
     d = ext_dict.dictionary
     ctx_mgr     = d.add_new_dict("AcDbContextDataManager")
     anno_scales = ctx_mgr.add_new_dict("ACDB_ANNOTATIONSCALES")
+    ctx_mgr.set_reactors([d.dxf.handle])
+    anno_scales.set_reactors([ctx_mgr.dxf.handle])
 
-    # The dimension's baked geometry block (*Dnn) and text position, so the
-    # context data describes where this scale's picture lives.
+    # The dimension's baked geometry block (*Dnn) and the two points this scale
+    # representation places.
     geom_block = dim_entity.dxf.get("geometry", "")
     tm = dim_entity.dxf.get("text_midpoint", (0.0, 0.0, 0.0))
     dp = dim_entity.dxf.get("defpoint", (0.0, 0.0, 0.0))
     tmx, tmy = float(tm[0]), float(tm[1])
     dpx, dpy = float(dp[0]), float(dp[1])
 
-    ctx = doc.objects.new_entity("ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS", dxfattribs={})
-    ctx.__class__ = type("CTX", (ctx.__class__,),
-                         {"DXFTYPE": "ACDB_DIMENSIONOBJECTCONTEXTDATA_CLASS"})
+    ctx = doc.objects.new_entity(_ALDIM_CTX, dxfattribs={})
+    ctx.__class__ = type("CTX", (ctx.__class__,), {"DXFTYPE": _ALDIM_CTX})
     ctx.xtags.subclasses = [Tags(), Tags([
         DXFTag(100, "AcDbObjectContextData"),
-        DXFTag(70, 4),
+        DXFTag(70, 3),
         DXFTag(290, 1),   # 1 = active / current scale
     ]), Tags([
         DXFTag(100, "AcDbAnnotScaleObjectContextData"),
@@ -154,24 +194,25 @@ def _make_dim_annotative(doc, dim_entity, scale_handle):
     ]), Tags([
         DXFTag(100, "AcDbDimensionObjectContextData"),
         DXFTag(2, geom_block),           # this scale's picture block
-        DXFTag(10, dpx), DXFTag(20, dpy), DXFTag(30, 0.0),
-        DXFTag(11, tmx), DXFTag(21, tmy), DXFTag(31, 0.0),
-        DXFTag(70, 0),
-        DXFTag(71, 0),
-        DXFTag(280, 0),
+        DXFTag(293, 0),
+        DXFTag(10, tmx), DXFTag(20, tmy),   # text midpoint
+        DXFTag(294, 1),
+        DXFTag(140, 0.0),
+        DXFTag(298, 0), DXFTag(291, 0),
+        DXFTag(70, 0), DXFTag(292, 0), DXFTag(71, 0), DXFTag(280, 0),
+        DXFTag(295, 0), DXFTag(296, 0), DXFTag(297, 0),
+    ]), Tags([
+        DXFTag(100, "AcDbAlignedDimensionObjectContextData"),
+        DXFTag(11, dpx), DXFTag(21, dpy), DXFTag(31, 0.0),   # dimension line
     ])]
     anno_scales.add(key="*A1", entity=ctx)
     # Dictionary.add() does not set the owner on a DXFTagStorage entity, leaving
     # Owner Id = 0 (BricsCAD audit flags this and repairs it). Set it explicitly.
     ctx.dxf.owner = anno_scales.dxf.handle
+    ctx.set_reactors([anno_scales.dxf.handle])
 
     # BricsCAD/AutoCAD also require the AcadAnnotative XDATA flag on the entity.
-    if "AcadAnnotative" not in doc.appids:
-        doc.appids.new("AcadAnnotative")
-    dim_entity.set_xdata("AcadAnnotative", [
-        DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
-        DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
-    ])
+    dim_entity.set_xdata("AcadAnnotative", annotative_xdata)
 
 
 def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
@@ -190,11 +231,10 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
     """
     _DIM_LAYER = "IfcAnnotation_Dimension"
     dim_style_name = _ensure_dim_style(doc, scale_factor)
-    # The template style is annotative (dimscale=0), which we leave untouched so
-    # the template alone owns dimension appearance. But ezdxf bakes the dimension
-    # picture block at creation time, and dimscale=0 would render it ~1:1 (text
-    # and arrows ~100x too small in model space). Override dimscale per entity so
-    # the baked geometry is paper-correct, without mutating the shared style.
+    # The style is annotative (dimscale=0), which ezdxf would render ~1:1 (text
+    # and arrows 100x too small at 1:100) when it bakes the picture block, so
+    # override dimscale per entity. BricsCAD keeps that same override on its own
+    # annotative dimensions -- annotativity lives in the context data, not here.
     dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
 
     for ann in annotations:
@@ -235,6 +275,12 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
                     dxfattribs={"layer": _DIM_LAYER},
                 )
                 dim.render()
+                # ezdxf renders an aligned dimension as the rotated variant
+                # (dimtype 0 + angle). Rewrite it as a true aligned dimension:
+                # its context data class is the one BricsCAD writes, and the one
+                # declared in the CLASSES section.
+                dim.dimension.dxf.dimtype = 32 | 1   # 32 = block-referencing
+                dim.dimension.dxf.discard("angle")   # implied by the defpoints
                 _make_dim_annotative(doc, dim.dimension, current_scale_handle)
                 set_ifc_xdata(dim.dimension, ann.is_a(), ann.GlobalId)
 

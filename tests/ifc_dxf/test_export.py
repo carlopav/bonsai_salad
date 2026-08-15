@@ -522,6 +522,184 @@ class TestAnnotativeText:
                 f"{entity.dxf.text!r}: {entity.dxf.height} != {paper}/{scale}"
 
 
+# Tag sequence of the scale representation of an annotative aligned dimension,
+# transcribed from a DXF written by BricsCAD itself. None = value carried over
+# from the exported entity (handles, block name, points), asserted separately.
+# Order and group codes are the contract: BricsCAD reads this object positionally
+# and silently ignores one it does not recognise, which is how the dimensions
+# ended up flagged annotative with an empty annotation scale field.
+_BRICSCAD_DIM_CONTEXT_TAGS = [
+    (100, "AcDbObjectContextData"), (70, 3), (290, 1),
+    (100, "AcDbAnnotScaleObjectContextData"), (340, None),
+    (100, "AcDbDimensionObjectContextData"),
+    (2, None),                    # this scale's picture block
+    (293, 0),
+    (10, None),                   # text midpoint
+    (294, 1), (140, 0.0), (298, 0), (291, 0),
+    (70, 0), (292, 0), (71, 0), (280, 0), (295, 0), (296, 0), (297, 0),
+    (100, "AcDbAlignedDimensionObjectContextData"),
+    (11, None),                   # dimension line defpoint
+]
+
+_ANNOTATIVE_DIM_EXPORTS = {}
+
+
+def _annotative_dim_export(scale_name):
+    """Export the basic-plan fixture at scale_name, once per session."""
+    if scale_name not in _ANNOTATIVE_DIM_EXPORTS:
+        denom = int(scale_name.split(":")[1])
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        drawing, pset = find_drawings(ifc)[0]
+        pset = {**pset, "Scale": f"1/{denom}", "HumanScale": scale_name}
+        out = _output_path("test_ifc_01.ifc", f"annotative_dim_1_{denom}")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing(ifc, drawing, pset, out, wall_mode="shapely", template_path=tpl)
+        _ANNOTATIVE_DIM_EXPORTS[scale_name] = ezdxf.readfile(out)
+    return _ANNOTATIVE_DIM_EXPORTS[scale_name]
+
+
+class TestAnnotativeDimensions:
+    """test_ifc_01.ifc exported at several scales, none of them its own 1:100.
+
+    A DIMENSION is annotative only if the CAD can read the scale representation
+    hanging off it: BricsCAD then shows e.g. "1:200" in the entity's annotative
+    scale field and redraws it at that scale. When it cannot, the field stays
+    empty and an edit redraws the dimension at paper size -- 200x too small.
+
+    What the CAD needs is not obvious from the DXF reference, so these tests
+    lock the export against a dimension BricsCAD wrote itself.
+    """
+
+    @pytest.fixture(autouse=True, params=["1:50", "1:100", "1:200"])
+    def export(self, request):
+        self.scale = request.param
+        self.doc = _annotative_dim_export(self.scale)
+        self.dims = list(self.doc.modelspace().query("DIMENSION"))
+        assert self.dims, "no DIMENSION in the export"
+
+    @staticmethod
+    def _context_data(dim):
+        """The dimension's *A1 scale representation object."""
+        d = dim.get_extension_dict().dictionary
+        scales = d["AcDbContextDataManager"]["ACDB_ANNOTATIONSCALES"]
+        return scales.get("*A1")
+
+    def test_dimension_style_is_annotative(self):
+        """DIMSCALE 0 alone is not enough: BricsCAD writes the AnnotativeData
+        payload on the style twice, as an extension-dict XRECORD and as XDATA."""
+        for name in {d.dxf.dimstyle for d in self.dims}:
+            style = self.doc.dimstyles.get(name)
+            assert style.dxf.get("dimscale", 1.0) == 0.0, \
+                f"dimstyle {name} has a fixed DIMSCALE"
+            assert style.has_extension_dict, f"dimstyle {name} is not annotative"
+            xrec = style.get_extension_dict().dictionary.get("AcadAnnotative")
+            assert xrec is not None, f"dimstyle {name} lacks the AcadAnnotative XRECORD"
+            assert [t.value for t in xrec.tags if t.code == 1070] == [1, 1]
+            xdata = style.get_xdata("AcadAnnotative")
+            assert [t.value for t in xdata if t.code == 1070] == [1, 1], \
+                f"dimstyle {name} lacks the AcadAnnotative XDATA"
+
+    def test_context_data_class_is_declared(self):
+        """An object of an undeclared class is unknown to the CAD, which drops
+        it -- leaving the dimension flagged annotative with nothing behind it."""
+        for dim in self.dims:
+            ctx = self._context_data(dim)
+            assert ctx.dxftype() == "ACDB_ALDIMOBJECTCONTEXTDATA_CLASS", \
+                f"context data written as {ctx.dxftype()}"
+            self.doc.classes.get(ctx.dxftype())  # raises if not in CLASSES
+
+    def test_dimension_is_written_as_an_aligned_dimension(self):
+        """The context data class describes an aligned dimension (dimtype 1);
+        ezdxf's default is the rotated variant (dimtype 0), whose context data
+        is a different, undeclared class."""
+        for dim in self.dims:
+            assert dim.dxf.dimtype & 15 == 1, \
+                f"dimtype {dim.dxf.dimtype & 15} is not an aligned dimension"
+
+    def test_context_data_repeats_the_entity_points(self):
+        """Group 10 of the context data is the *text* midpoint and group 11 of
+        the aligned subclass the dimension-line defpoint -- the entity's two
+        points the other way round. Swapped, BricsCAD draws the dimension from
+        nonsense and the scale field stays empty."""
+        for dim in self.dims:
+            tags = [(t.code, t.value)
+                    for sub in self._context_data(dim).xtags.subclasses for t in sub]
+            values = dict(tags)
+            assert values[2] == dim.dxf.geometry, "context data names another block"
+            text_pt = ezdxf.math.Vec2(values[10])
+            dim_pt = ezdxf.math.Vec2(values[11])
+            assert text_pt.isclose(ezdxf.math.Vec2(dim.dxf.text_midpoint)), \
+                f"context data text point {text_pt} != {dim.dxf.text_midpoint}"
+            assert dim_pt.isclose(ezdxf.math.Vec2(dim.dxf.defpoint)), \
+                f"context data dimension point {dim_pt} != {dim.dxf.defpoint}"
+
+    def test_context_data_points_at_the_current_annotation_scale(self):
+        """The 340 handle must resolve to the SCALE named by CANNOSCALE, or the
+        annotative scale field comes out empty whatever the drawing scale."""
+        scale_list = self.doc.rootdict["ACAD_SCALELIST"]
+        wanted = {scale_list.get(k).dxf.handle: k for k in scale_list.keys()}
+        for dim in self.dims:
+            assert dim.has_extension_dict, "DIMENSION carries no context data"
+            d = dim.get_extension_dict().dictionary
+            scales = d["AcDbContextDataManager"]["ACDB_ANNOTATIONSCALES"]
+            for key in scales.keys():
+                ctx = scales.get(key)
+                handles = [t.value for sub in ctx.xtags.subclasses
+                           for t in sub if t.code == 340]
+                assert handles, "context data references no SCALE"
+                assert wanted.get(handles[0]) == self.scale, \
+                    f"context data points at {wanted.get(handles[0])!r}, not {self.scale}"
+
+    def test_context_data_matches_the_bricscad_tag_sequence(self):
+        """Group codes, order and constants exactly as BricsCAD writes them.
+
+        The regression guard proper: the CAD reads this object positionally, so
+        a tag added, dropped or moved silently costs the whole annotative scale
+        representation -- with no warning anywhere, in BricsCAD or in the audit.
+        """
+        for dim in self.dims:
+            ctx = self._context_data(dim)
+            # subclasses[0] holds the object header (type, handle, owner)
+            actual = [(t.code, t.value)
+                      for sub in ctx.xtags.subclasses[1:] for t in sub]
+            assert [c for c, _ in actual] == [c for c, _ in _BRICSCAD_DIM_CONTEXT_TAGS], \
+                "context data tag sequence drifted from the BricsCAD reference"
+            for (code, expected), (_, value) in zip(_BRICSCAD_DIM_CONTEXT_TAGS, actual):
+                if expected is not None:
+                    assert value == expected, f"group {code}: {value!r} != {expected!r}"
+
+
+def test_fallback_dimstyle_is_annotative(tmp_path):
+    """Without a template the export builds its own dimension style, and is then
+    the only source of both annotative flags and of the CLASS declaration -- the
+    shipped template carries its own, which would otherwise hide a regression.
+
+    template_path=None means "use the shipped template", so only a missing path
+    actually drops the export onto the fallback.
+    """
+    ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+    drawing, pset = find_drawings(ifc)[0]
+    out = str(tmp_path / "no_template.dxf")
+    export_drawing(ifc, drawing, pset, out, wall_mode="shapely",
+                   template_path=str(tmp_path / "no_such_template.dxf"))
+    doc = ezdxf.readfile(out)
+    assert "BONSAI_DIM" in doc.dimstyles, "the export still used a template"
+
+    dims = list(doc.modelspace().query("DIMENSION"))
+    assert dims, "no DIMENSION in the template-less export"
+    for name in {d.dxf.dimstyle for d in dims}:
+        style = doc.dimstyles.get(name)
+        assert style.dxf.get("dimscale", 1.0) == 0.0, \
+            f"fallback dimstyle {name} has a fixed DIMSCALE"
+        assert style.has_extension_dict and \
+            style.get_extension_dict().dictionary.get("AcadAnnotative") is not None, \
+            f"fallback dimstyle {name} lacks the AcadAnnotative XRECORD"
+        assert [t.value for t in style.get_xdata("AcadAnnotative") if t.code == 1070] \
+            == [1, 1], f"fallback dimstyle {name} lacks the AcadAnnotative XDATA"
+    # the context data class is not in ezdxf's own CLASS_DEFINITIONS
+    doc.classes.get("ACDB_ALDIMOBJECTCONTEXTDATA_CLASS")
+
+
 class TestCase01BasicPlan:
     """test_ifc_01.ifc — basic 1:100 plan: walls, door, window, slab, furniture."""
 

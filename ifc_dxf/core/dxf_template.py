@@ -326,23 +326,51 @@ def _fill_cartiglio(doc, scale_factor, scale_handle=None,
                 e.text = raw
 
 
+def _make_dim_style_annotative(doc, name):
+    """Mark a dimension style as annotative.
+
+    Dimension counterpart of _make_text_styles_annotative. DIMSCALE=0 alone does
+    not make a style annotative: a BricsCAD-written annotative dimension style
+    carries the AnnotativeData payload twice, as an XRECORD in the style's
+    extension dictionary *and* as AcadAnnotative XDATA on the table record, so
+    write both.
+    """
+    from ezdxf.lldxf.types import DXFTag
+
+    payload = [
+        DXFTag(1000, "AnnotativeData"), DXFTag(1002, "{"),
+        DXFTag(1070, 1), DXFTag(1070, 1), DXFTag(1002, "}"),
+    ]
+    style = doc.dimstyles.get(name)
+
+    ext_dict = (style.get_extension_dict() if style.has_extension_dict
+                else style.new_extension_dict())
+    if "AcadAnnotative" not in ext_dict:
+        xrec = ext_dict.add_xrecord("AcadAnnotative")
+        xrec.dxf.cloning = 1
+        xrec.reset(payload)
+
+    if "AcadAnnotative" not in doc.appids:
+        doc.appids.new("AcadAnnotative")
+    style.set_xdata("AcadAnnotative", payload)
+
+
 def _ensure_dim_style(doc, scale_factor):
-    """Return the dimension style name to use.
+    """Return the dimension style name to use, annotative.
 
-    Prefers the template's 'dimensions_metric_m' and uses it exactly as authored
-    -- arrow block, sizes, and its annotative dimscale=0 are all left untouched,
-    so the template alone controls dimension appearance. Only when the template
-    is absent do we create the 'BONSAI_DIM' fallback with our own standard sizes.
+    Prefers the template's 'dimensions_metric_m' and uses its sizes and arrow
+    block exactly as authored, so the template alone controls dimension
+    appearance. Only when the template is absent do we create the 'BONSAI_DIM'
+    fallback with our own standard sizes.
 
-    Dimension entities are individually marked as annotative (AcadAnnotative
-    XDATA) so BricsCAD/AutoCAD display them at the correct paper size.
+    Either way the style is annotative -- DIMSCALE=0 plus the AcadAnnotative
+    flag -- so its paper sizes are multiplied by the drawing's annotation scale.
     """
     if _DIM_STYLE_NAME in doc.dimstyles:
+        _make_dim_style_annotative(doc, _DIM_STYLE_NAME)
         return _DIM_STYLE_NAME
 
-    dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
-
-    # Paper-space sizes (metres) -- dimscale multiplies these to model space.
+    # Paper-space sizes (metres) -- the annotation scale multiplies these.
     text_h  = 0.0025
     ext_ext = 0.0015
     ext_off = 0.0005
@@ -354,7 +382,7 @@ def _ensure_dim_style(doc, scale_factor):
         "dimtxt": text_h, "dimtsz": arrow,
         "dimasz": arrow,
         "dimexe": ext_ext, "dimexo": ext_off, "dimgap": gap,
-        "dimscale": dim_scale,
+        "dimscale": 0.0,   # 0 = annotative
         "dimtih": 0, "dimtad": 1,
         "dimclrd": 256, "dimclrt": 256, "dimclre": 256,
     }
@@ -364,4 +392,5 @@ def _ensure_dim_style(doc, scale_factor):
         style = doc.dimstyles.get(_DIM_STYLE_FALLBACK)
         for k, v in attrs.items():
             style.dxf.set(k, v)
+    _make_dim_style_annotative(doc, _DIM_STYLE_FALLBACK)
     return _DIM_STYLE_FALLBACK
