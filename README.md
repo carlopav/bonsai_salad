@@ -11,7 +11,7 @@ Gpl 3.
 Each tool has it's own README.md file you can reference. 
 
 # Sheets to pdf
-Convert all existing sheets to pdf.
+Convert all existing sheets to pdf. It reads the built sheets, the ones Bonsai writes under sheets/ with Create Sheets, so drawings, schedules and titleblock are all in — sheets never built are skipped, not converted from their layout.
 Require Typst available in python blender. You can install it by getting https://extensions.blender.org/add-ons/typst-importer/
 
 # Ifc_dxf

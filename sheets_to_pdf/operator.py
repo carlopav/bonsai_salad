@@ -33,61 +33,44 @@ def _ensure_typst():
         return False
 
 
+def _sheet_identification(doc):
+    return getattr(doc, "Identification", None) or getattr(doc, "DocumentId", None) or ""
+
+
 def _find_sheet_svgs():
+    """Built sheets, not layouts: only the build embeds drawings, schedules and the
+    titleblock into a single SVG."""
     ifc = tool.Ifc.get()
     if ifc is None:
-        return []
-    ifc_path = tool.Ifc.get_path()
-    if not ifc_path:
-        return []
-    ifc_dir = os.path.dirname(os.path.abspath(ifc_path))
-    sheets_dir = os.path.join(ifc_dir, "sheets")
+        return [], []
 
-    try:
-        from bonsai.tool import Drawing as _Drawing
-        _get_uri = _Drawing.get_document_uri
-    except Exception:
-        _get_uri = None
-
-    svgs = []
+    found = []
+    unbuilt = []
     for doc in ifc.by_type("IfcDocumentInformation"):
         if getattr(doc, "Scope", None) != "SHEET":
             continue
 
-        path = None
+        ident = _sheet_identification(doc)
+        name = getattr(doc, "Name", None) or ""
 
-        if _get_uri is not None:
-            try:
-                path = _get_uri(doc)
-            except Exception:
-                path = None
-        if path and not os.path.isfile(path):
+        path = None
+        try:
+            path = tool.Drawing.get_document_uri(doc, "SHEET")
+        except Exception:
             path = None
 
         if not path:
-            loc = getattr(doc, "Location", None) or ""
-            if loc:
-                p = loc if os.path.isabs(loc) else os.path.join(ifc_dir, loc)
-                p = os.path.normpath(p)
-                if os.path.isfile(p):
-                    path = p
+            try:
+                path = tool.Ifc.resolve_uri(tool.Drawing.get_default_sheet_path(ident, name))
+            except Exception:
+                path = None
 
-        if not path:
-            ident = getattr(doc, "Identification", None) or ""
-            name = getattr(doc, "Name", None) or ""
-            for candidate in [
-                os.path.join(sheets_dir, f"{ident} - {name}.svg") if ident and name else None,
-                os.path.join(sheets_dir, f"{name}.svg") if name else None,
-                os.path.join(sheets_dir, f"{ident}.svg") if ident else None,
-            ]:
-                if candidate and os.path.isfile(candidate):
-                    path = candidate
-                    break
+        if path and os.path.isfile(path):
+            found.append(os.path.normpath(path))
+        else:
+            unbuilt.append(f"{ident} - {name}".strip(" -"))
 
-        if path:
-            svgs.append(os.path.normpath(path))
-
-    return svgs
+    return found, unbuilt
 
 
 def _inline_svg_images(svg_path, _depth=0):
@@ -201,23 +184,23 @@ class ExportSheetsToPdfOperator(bpy.types.Operator):
             )
             return {"CANCELLED"}
 
-        svgs = _find_sheet_svgs()
+        svgs, unbuilt = _find_sheet_svgs()
         if not svgs:
-            ifc = tool.Ifc.get()
-            if ifc:
-                sheets = [
-                    d for d in ifc.by_type("IfcDocumentInformation")
-                    if getattr(d, "Scope", None) == "SHEET"
-                ]
-                if sheets:
-                    self.report(
-                        {"WARNING"},
-                        f"Found {len(sheets)} sheet(s) in IFC but SVG files not found on disk. "
-                        "Build/export the sheets from Bonsai first.",
-                    )
-                else:
-                    self.report({"WARNING"}, "No sheet IfcDocumentInformation (Scope='SHEET') found.")
+            if unbuilt:
+                self.report(
+                    {"WARNING"},
+                    f"{len(unbuilt)} sheet(s) not built yet: {', '.join(unbuilt)}. "
+                    "Run Create Sheets in Bonsai first.",
+                )
+            else:
+                self.report({"WARNING"}, "No sheet IfcDocumentInformation (Scope='SHEET') found.")
             return {"CANCELLED"}
+
+        if unbuilt:
+            self.report(
+                {"WARNING"},
+                f"Skipping {len(unbuilt)} sheet(s) not built yet: {', '.join(unbuilt)}.",
+            )
 
         ok = 0
         generated = []
