@@ -38,8 +38,19 @@ plan(ifc_file, spaces, prefix, rename_named=True) -> Plan
 ```
 
 1. **Raggruppamento.** I locali si raggruppano per piano. I piani si ordinano
-   per `Elevation` crescente; quelli senza quota vanno in fondo (stessa chiave
-   `(value is None, value)` di `_elevation`).
+   con la stessa chiave con cui Bonsai ordina il proprio albero dei container
+   (`tool/spatial.py`): `(get_storey_elevation(storey), storey.Name)`.
+
+   `ifcopenshell.util.placement.get_storey_elevation` legge la Z del placement
+   e ripiega su `Elevation` solo per un piano che un placement non ce l'ha.
+   Leggere `Elevation` per prima è quello che la prima versione faceva, e non
+   regge sui file veri: l'attributo è opzionale in ogni schema (deprecato in
+   IFC4X3 a favore del placement) e un progetto reale lo lascia nullo su
+   **tutti** i piani, che così pareggiano fra loro e lasciano decidere l'ordine
+   di selezione — la numerazione partiva dal piano primo o dal terra a seconda
+   di come erano stati selezionati. Il nome chiude il pareggio fra due piani
+   alla stessa quota, ancora come fa Bonsai; l'ordine dei piani in numerazione
+   è quindi lo stesso che si vede nell'albero dello Spatial Decomposition.
 
 2. **Misure.** Per ogni locale:
    - **area** — `NetFloorArea` da `Qto_SpaceBaseQuantities`
@@ -108,12 +119,15 @@ conteggio: segnala, non blocca — l'utente ha chiesto quella numerazione.
 
 ## UI
 
-Tre righe nel pannello:
+Una riga sola, tre elementi in fila:
 
-- `Prefisso` — `StringProperty`, default vuoto
-- `Rinumera anche i locali già nominati` — `BoolProperty`, default `True`
-- bottone `Rinumera`, disabilitato quando non c'è nessun IfcSpace selezionato,
-  come già fa `daylight_ventilation/ui.py`
+- il campo del prefisso — `StringProperty`, default vuoto, senza etichetta
+- l'interruttore `rename_named` — `BoolProperty`, default `True`, ridotto alla
+  sola icona: su una riga non c'è spazio per "Rinumera anche i locali già
+  nominati", che resta nel tooltip
+- il bottone, anch'esso a sola icona, disabilitato quando non c'è nessun
+  IfcSpace selezionato — solo il bottone aspetta una selezione, il prefisso si
+  può scrivere prima
 
 Nessuna anteprima: l'annullamento è Ctrl+Z, che in Blender copre anche la
 scrittura IFC. Una lista di anteprima richiederebbe una cache da invalidare a
@@ -125,8 +139,12 @@ In `tests/ifc_spaces/`, ifcopenshell puro, senza Blender:
 
 - **catena** — pianta costruita a mano, con l'ordine atteso scritto per esteso
 - **padding** — 99 locali danno due cifre, 100 ne danno tre
-- **contatore fra piani** — due piani ordinati per `Elevation`, il secondo
-  riprende dal numero dopo l'ultimo del primo
+- **contatore fra piani** — due piani ordinati per quota, il secondo riprende
+  dal numero dopo l'ultimo del primo
+- **piani senza `Elevation`** — tre piani che dichiarano la quota solo nel
+  placement (il caso del progetto vero) si numerano dal basso
+- **piani alla stessa quota** — l'ordine cade sul nome, e non cambia
+  invertendo la selezione
 - **opzione spenta** — il locale già nominato fa da tappa, non consuma numero,
   e i rinominati restano contigui
 - **blocco** — locale senza piano, e locale con geometria illeggibile: zero

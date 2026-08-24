@@ -18,6 +18,7 @@ from . import ifc_cleanup
 from . import drawing_diff
 from . import urban_parameters
 from . import daylight_ventilation
+from . import ifc_spaces
 
 
 def register():
@@ -31,9 +32,11 @@ def register():
     drawing_diff.register()
     urban_parameters.register()
     daylight_ventilation.register()
+    ifc_spaces.register()
 
 
 def unregister():
+    ifc_spaces.unregister()
     daylight_ventilation.unregister()
     urban_parameters.unregister()
     drawing_diff.unregister()

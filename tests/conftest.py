@@ -34,3 +34,5 @@ _stub_package("urban_parameters.core", os.path.join(_REPO_ROOT, "urban_parameter
 _stub_package("daylight_ventilation", os.path.join(_REPO_ROOT, "daylight_ventilation"))
 _stub_package("daylight_ventilation.core", os.path.join(_REPO_ROOT, "daylight_ventilation", "core"))
 _stub_package("ifc_cleanup", os.path.join(_REPO_ROOT, "ifc_cleanup"))
+_stub_package("ifc_spaces", os.path.join(_REPO_ROOT, "ifc_spaces"))
+_stub_package("ifc_spaces.core", os.path.join(_REPO_ROOT, "ifc_spaces", "core"))
