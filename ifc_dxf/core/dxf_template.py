@@ -1,6 +1,7 @@
-"""DXF utilities: scale list, layer setup, font resolution, cartiglio fill, dimstyle.
+"""DXF utilities: scale list, layer setup, font resolution, cartiglio fill,
+dimstyle, drawing units.
 
-This module is a leaf — it has no dependencies on other core modules.
+Depends only on core/units.py.
 """
 
 import os
@@ -8,12 +9,15 @@ import sys
 
 import numpy as np
 
+from .units import dxf_insunits, is_imperial
+
 
 # Valid DXF lineweight values (hundredths of mm)
 _DXF_LW = (0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50,
             53, 60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211)
 
 _DIM_STYLE_NAME = "dimensions_metric_m"
+_DIM_STYLE_IMPERIAL = "dimensions_imperial"  # preferred when a template has it
 _DIM_STYLE_FALLBACK = "BONSAI_DIM"
 
 # Same priority order as Bonsai's SVG CSS font-family stack.
@@ -150,42 +154,82 @@ def _make_text_styles_annotative(doc):
         ])
 
 
-def _populate_scale_list(doc, scale_factor):
+# US architectural and engineering scales, named the way Bonsai writes
+# EPset_Drawing.HumanScale (e.g. 3/8"=1'-0"), so an imperial drawing's own
+# scale is found by name. Same tuple layout as _ARCH_SCALES.
+_IMPERIAL_SCALES = [
+    ('1/32"=1\'-0"',    1, 384, 0),
+    ('1/16"=1\'-0"',    1, 192, 0),
+    ('3/32"=1\'-0"',    1, 128, 0),
+    ('1/8"=1\'-0"',     1, 96,  0),
+    ('3/16"=1\'-0"',    1, 64,  0),
+    ('1/4"=1\'-0"',     1, 48,  0),
+    ('3/8"=1\'-0"',     1, 32,  0),
+    ('1/2"=1\'-0"',     1, 24,  0),
+    ('3/4"=1\'-0"',     1, 16,  0),
+    ('1"=1\'-0"',       1, 12,  0),
+    ('1-1/2"=1\'-0"',   1, 8,   0),
+    ('3"=1\'-0"',       1, 4,   0),
+    ('6"=1\'-0"',       1, 2,   0),
+    ('1"=10\'',         1, 120, 0),
+    ('1"=20\'',         1, 240, 0),
+    ('1"=30\'',         1, 360, 0),
+    ('1"=40\'',         1, 480, 0),
+    ('1"=50\'',         1, 600, 0),
+    ('1"=100\'',        1, 1200, 0),
+]
+
+
+def _add_scale(doc, scale_dict, name, paper, drawing, flag290=0):
+    """Add one SCALE object (paper:drawing) to ACAD_SCALELIST."""
+    from ezdxf.lldxf.types import DXFTag
+    from ezdxf.lldxf.tags import Tags
+
+    obj = doc.objects.new_entity("SCALE", dxfattribs={})
+    obj.__class__ = type("SCALE", (obj.__class__,), {"DXFTYPE": "SCALE"})
+    obj.xtags.subclasses = [Tags(), Tags([
+        DXFTag(100, "AcDbScale"),
+        DXFTag(70, 0),
+        DXFTag(300, name),
+        DXFTag(140, float(paper)),
+        DXFTag(141, float(drawing)),
+        DXFTag(290, flag290),
+    ])]
+    obj.dxf.owner = scale_dict.dxf.handle
+    scale_dict.add(key=name, entity=obj)
+
+
+def _populate_scale_list(doc, scale_factor, scale_name=None, imperial=False):
     """Fill ACAD_SCALELIST with SCALE objects and set the current annotation scale.
 
     BricsCAD/AutoCAD store the current scale in AcDbVariableDictionary ->
     DictionaryVariables entry 'CANNOSCALE', NOT in the $CANNOSCALE header
     variable (which ezdxf doesn't support anyway).
 
-    Returns {scale_name: handle} map for annotative entity creation.
-    """
-    from ezdxf.lldxf.types import DXFTag
-    from ezdxf.lldxf.tags import Tags
+    The current scale is the drawing's own: `scale_name` (its HumanScale) or
+    "1:N". A list entry of that name is added when missing -- CANNOSCALE
+    naming a scale the list lacks leaves every annotative entity without its
+    scale representation (a 3/8"=1'-0" drawing, 1:32, wrote none at all).
+    Imperial drawings also get the US architectural/engineering scales.
 
+    Returns ({scale_name: handle}, current scale name).
+    """
     # 1. populate ACAD_SCALELIST
     scale_dict = doc.rootdict["ACAD_SCALELIST"]
     existing = set(scale_dict.keys())
 
-    for name, paper, drawing, flag290 in _ARCH_SCALES:
-        if name in existing:
-            continue
-        obj = doc.objects.new_entity("SCALE", dxfattribs={})
-        obj.__class__ = type("SCALE", (obj.__class__,), {"DXFTYPE": "SCALE"})
-        obj.xtags.subclasses = [Tags(), Tags([
-            DXFTag(100, "AcDbScale"),
-            DXFTag(70, 0),
-            DXFTag(300, name),
-            DXFTag(140, float(paper)),
-            DXFTag(141, float(drawing)),
-            DXFTag(290, flag290),
-        ])]
-        obj.dxf.owner = scale_dict.dxf.handle
-        scale_dict.add(key=name, entity=obj)
+    for name, paper, drawing, flag290 in _ARCH_SCALES + (_IMPERIAL_SCALES if imperial else []):
+        if name not in existing:
+            _add_scale(doc, scale_dict, name, paper, drawing, flag290)
+            existing.add(name)
 
-    # 2. set current annotation scale via AcDbVariableDictionary
-    denom = int(round(1.0 / scale_factor))
-    scale_name = f"1:{denom}"
+    # 2. the drawing's own scale, added when the list lacks it
+    if not scale_name or scale_name.upper() == "NTS":
+        scale_name = f"1:{int(round(1.0 / scale_factor))}"
+    if scale_name not in existing:
+        _add_scale(doc, scale_dict, scale_name, 1, 1.0 / scale_factor)
 
+    # 3. set current annotation scale via AcDbVariableDictionary
     if "AcDbVariableDictionary" not in doc.rootdict:
         var_dict = doc.rootdict.add_new_dict("AcDbVariableDictionary")
     else:
@@ -194,9 +238,9 @@ def _populate_scale_list(doc, scale_factor):
     var_dict.discard("CANNOSCALE")
     var_dict.add_dict_var("CANNOSCALE", scale_name)
 
-    # 3. return {scale_name: handle} map for annotative entity creation
+    # 4. return {scale_name: handle} map for annotative entity creation
     scale_dict = doc.rootdict["ACAD_SCALELIST"]
-    return {k: scale_dict.get(k).dxf.handle for k in scale_dict.keys()}
+    return {k: scale_dict.get(k).dxf.handle for k in scale_dict.keys()}, scale_name
 
 
 def _system_font_dirs():
@@ -259,17 +303,58 @@ def _resolve_text_font(doc):
     return resolved
 
 
+# Dimension-style variables holding a length in drawing units; everything else
+# in a DIMSTYLE is a flag, a count or a pure ratio.
+_DIMSTYLE_LENGTHS = ("dimasz", "dimcen", "dimdle", "dimdli", "dimexe", "dimexo",
+                     "dimfxl", "dimgap", "dimrnd", "dimtm", "dimtp", "dimtsz",
+                     "dimtxt")
+
+
+def _apply_drawing_units(doc, unit_scale):
+    """Put the document in the project's length unit (`unit_scale` metres per
+    drawing unit), converting what the template states in its own unit.
+
+    A template's model-space sizes -- the text styles' paper heights, the
+    dimension styles' lengths -- are written in its $INSUNITS (metres for
+    ours; unitless counts as metres, the convention it was authored in).
+    Paper space is left alone: it plots by its own scale, and its linetypes
+    are sized for paper (PSLTSCALE), so $LTSCALE needs no conversion either.
+
+    Returns the factor from template units to drawing units, which the model
+    viewport's view height needs too (see _fill_cartiglio).
+    """
+    from ezdxf import units
+
+    target = dxf_insunits(unit_scale)
+    source = doc.header.get("$INSUNITS", units.M) or units.M
+    factor = units.conversion_factor(source, units.M) / unit_scale
+    if abs(factor - 1.0) > 1e-9:
+        for style in doc.styles:
+            height = style.dxf.get("height", 0.0)
+            if height:
+                style.dxf.height = height * factor
+        for dimstyle in doc.dimstyles:
+            for key in _DIMSTYLE_LENGTHS:
+                if dimstyle.dxf.hasattr(key):
+                    dimstyle.dxf.set(key, dimstyle.dxf.get(key) * factor)
+    doc.header["$INSUNITS"] = target
+    doc.header["$MEASUREMENT"] = 0 if is_imperial(target) else 1
+    return factor
+
+
 def _fill_cartiglio(doc, scale_factor, scale_handle=None,
                     drawing_name=None, drawing_identification=None,
-                    drawing_scale=None):
+                    drawing_scale=None, unit_factor=1.0):
     """Fill cartiglio placeholders in all paper-space layouts.
 
     Replaces {{scale}}, {{date}}, {{Name}}, {{Identification}} in TEXT/MTEXT.
     Updates the drawing viewport: view_height, center, and annotation scale
     (ASDK_XREC_ANNOTATION_SCALE_INFO extension-dict XREC -> code 340 handle).
 
-    The template is assumed to have been created at 1:100 (scale_factor=0.01).
-    view_height scales proportionally for other ratios.
+    The drawing viewport's view height comes from the drawing scale: its
+    paper height / scale, times `unit_factor` (template units -> drawing
+    units, from _apply_drawing_units) since paper space stays in template
+    units. Any viewport size and template baseline scale work.
     """
     import datetime
     from ezdxf.lldxf.types import DXFTag
@@ -284,12 +369,11 @@ def _fill_cartiglio(doc, scale_factor, scale_handle=None,
             continue
         layout = doc.layouts.get(layout_name)
 
-        # viewport: update the model-space drawing viewport (view_height > 1)
+        # viewport: size the model-space drawing viewport(s) from the scale
         for vp in layout.viewports():
-            if vp.dxf.view_height <= 1.0:
-                continue  # paper-layout sentinel viewport -- leave untouched
-            # Scale proportionally from the template's 1:100 baseline
-            new_h = vp.dxf.view_height * (0.01 / scale_factor)
+            if vp.dxf.id == 1:
+                continue  # the layout's own paper-space viewport
+            new_h = vp.dxf.height / scale_factor * unit_factor
             vp.dxf.view_height = new_h
             try:
                 vp.dxf.view_center_point = (0.0, 0.0)
@@ -310,23 +394,71 @@ def _fill_cartiglio(doc, scale_factor, scale_handle=None,
                 except Exception:
                     pass
 
-        # text placeholders
+        # text placeholders -- any of the four, in TEXT or MTEXT
+        values = {"scale": scale_str, "date": date_str,
+                  "Name": name_str, "Identification": ident_str}
         for e in layout:
             t = e.dxftype()
             if t == "TEXT":
-                txt = e.dxf.get("text", "")
-                txt = txt.replace("{{scale}}", scale_str)
-                txt = txt.replace("{{date}}", date_str)
-                e.dxf.text = txt
+                e.dxf.text = _fill_placeholders(e.dxf.get("text", ""), values)
             elif t == "MTEXT":
-                # raw MTEXT stores literal braces as \{ \}
-                raw = e.text
-                raw = raw.replace(r"\{\{Name\}\}", name_str)
-                raw = raw.replace(r"\{\{Identification\}\}", ident_str)
-                e.text = raw
+                e.text = _fill_placeholders(e.text, values)
 
 
-def _ensure_dim_style(doc, scale_factor):
+def _fill_placeholders(text, values):
+    """Replace {{key}} placeholders; raw MTEXT stores the braces escaped."""
+    for key, value in values.items():
+        text = text.replace("{{%s}}" % key, value)
+        text = text.replace("\\{\\{%s\\}\\}" % key, value)
+    return text
+
+
+_TEMPLATES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+_METRIC_TEMPLATE = "ifc_dxf_template_metric.dxf"
+_IMPERIAL_TEMPLATE = "ifc_dxf_template_imperial.dxf"
+
+
+def default_template(unit_scale):
+    """The bundled template for the project's unit system: imperial for
+    feet/inches (and yards/miles), metric otherwise or when missing."""
+    name = _IMPERIAL_TEMPLATE if is_imperial(dxf_insunits(unit_scale)) else _METRIC_TEMPLATE
+    path = os.path.join(_TEMPLATES_DIR, name)
+    return path if os.path.isfile(path) else os.path.join(_TEMPLATES_DIR, _METRIC_TEMPLATE)
+
+
+def _select_sheet(doc, drawing_w, drawing_h, paper_unit):
+    """Keep the smallest sheet whose drawing viewport holds the drawing.
+
+    A sheet is a paper layout with a drawing viewport (any viewport but the
+    layout's own, id 1); the others are deleted. drawing_w/h: the drawing's
+    size on paper in metres -- Bonsai sizes a drawing by its camera box times
+    the scale. paper_unit: metres per paper-space unit (paper space stays in
+    the template's unit). With no sheet big enough the largest is kept.
+    Returns (kept layout name, fits), or (None, True) without any sheet.
+    """
+    sheets = []
+    for name in doc.layouts.names():
+        if name == "Model":
+            continue
+        viewports = [vp for vp in doc.layouts.get(name).viewports() if vp.dxf.id != 1]
+        if viewports:
+            vp = max(viewports, key=lambda v: v.dxf.width * v.dxf.height)
+            sheets.append((vp.dxf.width * paper_unit, vp.dxf.height * paper_unit, name))
+    if not sheets:
+        return None, True
+    tol = 1e-3  # a millimetre
+    fitting = [s for s in sheets if s[0] + tol >= drawing_w and s[1] + tol >= drawing_h]
+    pool = fitting or sheets
+    keep = (min if fitting else max)(pool, key=lambda s: s[0] * s[1])[2]
+    for _w, _h, name in sheets:
+        if name != keep:
+            doc.layouts.delete(name)
+    doc.layouts.set_active_layout(keep)
+    return keep, bool(fitting)
+
+
+def _ensure_dim_style(doc, scale_factor, unit_scale=1.0):
     """Return the dimension style name to use.
 
     Prefers the template's 'dimensions_metric_m' and uses it exactly as authored
@@ -337,17 +469,19 @@ def _ensure_dim_style(doc, scale_factor):
     Dimension entities are individually marked as annotative (AcadAnnotative
     XDATA) so BricsCAD/AutoCAD display them at the correct paper size.
     """
-    if _DIM_STYLE_NAME in doc.dimstyles:
-        return _DIM_STYLE_NAME
+    for name in (_DIM_STYLE_IMPERIAL, _DIM_STYLE_NAME):
+        if name in doc.dimstyles:
+            return name
 
     dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
 
-    # Paper-space sizes (metres) -- dimscale multiplies these to model space.
-    text_h  = 0.0025
-    ext_ext = 0.0015
-    ext_off = 0.0005
+    # Paper-space sizes, stated in metres and converted to drawing units --
+    # dimscale multiplies these to model space.
+    text_h  = 0.0025 / unit_scale
+    ext_ext = 0.0015 / unit_scale
+    ext_off = 0.0005 / unit_scale
     gap     = text_h * 0.4
-    arrow   = 0.0020
+    arrow   = 0.0020 / unit_scale
 
     # fallback: create BONSAI_DIM with oblique ticks
     attrs = {

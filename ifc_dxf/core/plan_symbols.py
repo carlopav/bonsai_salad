@@ -29,7 +29,7 @@ from .camera import world_matrix_col_major
 def place_plan_symbol(element, layer, target_view, crease_angle_deg,
                        cam_R, cam_inv_np, cam_rot_deg,
                        block_defs, block_order, block_inserts, seen_blocks,
-                       direct_entities, role="view"):
+                       direct_entities, role="view", unit_scale=1.0):
     """Place one element via its native 2D plan representation.
 
     Elements whose geometry comes from the type share one BLOCK (built once)
@@ -64,7 +64,7 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
         # Shared type BLOCK: extract geometry once, then INSERT per instance.
         if block_name not in seen_blocks:
             geom = _extract_block_geom(element, plan_repr, crease_angle_deg,
-                                       cam_R, cam_rot_deg)
+                                       cam_R, cam_rot_deg, unit_scale)
             if geom is None:
                 return False
             geom.update({"ifc_class": ifc_class, "material": material,
@@ -81,7 +81,7 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
     # Direct draw on the IfcClass layer: bake the INSERT transform into the
     # geometry so output matches what a block+insert would have produced.
     geom = _extract_block_geom(element, plan_repr, crease_angle_deg,
-                               cam_R, cam_rot_deg)
+                               cam_R, cam_rot_deg, unit_scale)
     if geom is None:
         return False
     pos, rot = _compute_insert(wm, cam_inv_np)
@@ -90,7 +90,8 @@ def place_plan_symbol(element, layer, target_view, crease_angle_deg,
     return True
 
 
-def _extract_block_geom(element, plan_repr, crease_angle_deg, cam_R, cam_rot_deg):
+def _extract_block_geom(element, plan_repr, crease_angle_deg, cam_R, cam_rot_deg,
+                        unit_scale=1.0):
     """Extract block-local 2D geometry (lines/arcs/circles/ellipses) or None.
 
     Coordinates are element-local geometry rotated into the camera plane by
@@ -98,7 +99,7 @@ def _extract_block_geom(element, plan_repr, crease_angle_deg, cam_R, cam_rot_deg
     path) or by _append_direct (direct path).
     """
     verts, edges, arcs, circles, ellipses = _extract_local_curves(
-        element, plan_repr, crease_angle_deg
+        element, plan_repr, crease_angle_deg, unit_scale
     )
     if not (verts or edges or arcs or circles or ellipses):
         return None

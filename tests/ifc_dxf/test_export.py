@@ -652,3 +652,140 @@ class TestCase01BasicPlan:
             assert date_texts, "No date text found in paper-space layout"
             return
         pytest.skip("No paper-space layout in DXF")
+
+
+class TestProjectUnits:
+    """The DXF is written in the IFC project's own length unit.
+
+    Real case (Restaurant_E_Washington, a FOOT project): placements, curves and
+    annotations came out in feet while everything ifcopenshell's geometry
+    engine produced -- HLR cuts, camera extents, opening footprints -- stayed in
+    metres: one drawing at two scales, under a header claiming metres. The
+    metric fixture converted to another unit must export as the metric export
+    scaled by the unit ratio, layer for layer, with the header to match.
+    """
+
+    IFC = "test_ifc_01.ifc"
+    UNITS = [("FOOT", 0.3048, 2), ("MILLIMETER", 0.001, 4)]
+
+    def _export(self, tmp_path, unit, accurate):
+        import ifcopenshell.util.unit
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        if unit != "METER":
+            ifc = ifcopenshell.util.unit.convert_file_length_units(ifc, unit)
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / f"{unit}_{'acc' if accurate else 'app'}.dxf")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        if accurate:
+            export_drawing_accurate(ifc, drawing, pset, out, template_path=tpl)
+        else:
+            export_drawing(ifc, drawing, pset, out, wall_mode="shapely", template_path=tpl)
+        return ezdxf.readfile(out)
+
+    @staticmethod
+    def _layer_extents(doc):
+        """Per-layer bounding boxes, dimensions left out: a dimension's text is
+        the measured value, whose length legitimately changes with the unit
+        ("2.40" m, "2400.00" mm), so its box does not scale -- its definition
+        points are compared instead (_dim_points)."""
+        from ezdxf import bbox
+        by_layer = {}
+        for e in doc.modelspace():
+            if e.dxftype() != "DIMENSION":
+                by_layer.setdefault(e.dxf.layer, []).append(e)
+        return {layer: bbox.extents(ents) for layer, ents in by_layer.items()}
+
+    @staticmethod
+    def _dim_points(doc):
+        """Definition points of every DIMENSION, flattened in a stable order."""
+        dims = sorted((tuple(e.dxf.defpoint2), tuple(e.dxf.defpoint3))
+                      for e in doc.modelspace().query("DIMENSION"))
+        return [c for pair in dims for point in pair for c in point]
+
+    @pytest.mark.parametrize("accurate", [True, False])
+    @pytest.mark.parametrize("unit,metres,insunits", UNITS)
+    def test_export_scales_with_the_project_unit(self, unit, metres, insunits,
+                                                 accurate, tmp_path):
+        ref = self._export(tmp_path, "METER", accurate)
+        doc = self._export(tmp_path, unit, accurate)
+        assert ref.header["$INSUNITS"] == 6
+        assert doc.header["$INSUNITS"] == insunits
+        assert doc.header["$MEASUREMENT"] == (0 if unit == "FOOT" else 1)
+
+        ref_ext, ext = self._layer_extents(ref), self._layer_extents(doc)
+        assert set(ext) == set(ref_ext)
+        k = 1.0 / metres
+        for layer, want in ref_ext.items():
+            if not want.has_data:
+                continue
+            got = ext[layer]
+            for g, w in ((got.extmin, want.extmin), (got.extmax, want.extmax)):
+                assert g.isclose(w * k, abs_tol=1e-3 * k), \
+                    f"{layer}: {g} != {w} x {k:g}"
+
+        ref_dims = self._dim_points(ref)
+        assert ref_dims, "fixture carries no dimension"
+        assert self._dim_points(doc) == pytest.approx(
+            [v * k for v in ref_dims], abs=1e-6 * k)
+
+    @pytest.mark.parametrize("unit,metres,insunits", UNITS)
+    def test_paper_sizes_follow_the_drawing_unit(self, unit, metres, insunits,
+                                                 tmp_path):
+        """Text styles hold paper heights and dimension styles paper lengths,
+        both in drawing units: they convert with the geometry, or every
+        annotation plots at the wrong size."""
+        ref = self._export(tmp_path, "METER", accurate=False)
+        doc = self._export(tmp_path, unit, accurate=False)
+        k = 1.0 / metres
+        for style in ref.styles:
+            height = style.dxf.get("height", 0.0)
+            if height:
+                assert doc.styles.get(style.dxf.name).dxf.height == \
+                    pytest.approx(height * k)
+        name = "dimensions_metric_m"
+        assert doc.dimstyles.get(name).dxf.dimtxt == \
+            pytest.approx(ref.dimstyles.get(name).dxf.dimtxt * k)
+        ref_heights = sorted(e.dxf.height for e in ref.modelspace().query("TEXT"))
+        heights = sorted(e.dxf.height for e in doc.modelspace().query("TEXT"))
+        assert ref_heights
+        assert heights == pytest.approx([h * k for h in ref_heights])
+
+
+class TestDrawingFilters:
+    """EPset_Drawing Include/Exclude, evaluated the way Bonsai evaluates them.
+
+    Real case (Restaurant_E_Washington): Exclude = `IfcElement,
+    "EPset_Status"."Status" = "DEMOLISH" + ... + "EPset_Status"."Status" =
+    "OTHER" + ...`. From ifcopenshell 0.8.1 a filter group without a class
+    starts from every product; 0.8.0 started it empty, so the OTHER furniture
+    stayed in the headless export while Bonsai hid it.
+    """
+
+    IFC = "test_ifc_01.ifc"
+
+    def _drawing(self):
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, self.IFC))
+        drawing, pset = find_drawings(ifc)[0]
+        return ifc, drawing, pset
+
+    def test_classless_exclude_group_removes_its_elements(self):
+        from ifc_dxf.core import ifc_query
+        if not ifc_query._selector_starts_classless_groups():
+            pytest.skip("ifcopenshell predates 0.8.1: class-less filter groups match nothing")
+        ifc, drawing, pset = self._drawing()
+        furniture = next(e for e in ifc_query.get_elements(ifc, drawing, pset)
+                         if e.is_a("IfcFurniture"))
+        # Second group, no class of its own -- the shape of the real filter.
+        # The first group must match something: up to ifcopenshell 0.8.5 a
+        # group with no results makes the selector skip the ones after it
+        # (IfcOpenShell #8128, fixed after 0.8.5).
+        query = f'IfcSlab + GlobalId="{furniture.GlobalId}"'
+        kept = ifc_query.get_elements(ifc, drawing, dict(pset, Exclude=query))
+        assert furniture not in kept
+
+    def test_old_selector_is_reported(self, monkeypatch, capsys):
+        from ifc_dxf.core import ifc_query
+        monkeypatch.setattr(ifc_query, "_selector_starts_classless_groups", lambda: False)
+        ifc, drawing, pset = self._drawing()
+        ifc_query.get_elements(ifc, drawing, dict(pset, Exclude='GlobalId="x"'))
+        assert "predates 0.8.1" in capsys.readouterr().out
