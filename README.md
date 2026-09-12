@@ -1,7 +1,7 @@
 # Bonsai Salad
 
 This repo contains a collection of random scripts that help me with my everyday work with Bonsai and IfcOpenshell.
-The scripts are developed with the support of Cloud Code.
+The scripts are developed with the support of Claude Code.
 I Share them in the hope they can be useful and that they will be integrated into IfcOpenShell in the future.
 
 ## License
