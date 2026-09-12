@@ -11,3 +11,4 @@ pianta_test*.pdf
 pianta_test*.png
 *.bak
 .pytest_cache/
+docs/superpowers/
