@@ -619,13 +619,16 @@ def _extruded_circle_specs(items, element, view_axis, tol_deg=2.0):
     return circles
 
 
-def _extract_local_curves(element, plan_repr, crease_angle_deg=15.0, view_axis=None):
-    """Extract plan curves in element-local coords.
+def _extract_local_curves(element, plan_repr, crease_angle_deg=15.0,
+                          unit_scale=1.0, view_axis=None):
+    """Extract plan curves in element-local coords, in the project unit.
 
     Returns (verts_flat, edges_flat, arcs, circles, ellipses).
-    Tries manual item walking first, then -- when the caller supplies the view
-    axis -- circular profiles extruded at the viewer, and finally falls back to
-    the ifcopenshell geometry engine (tessellated lines only, no curve specs).
+    Tries manual item walking first (IFC values, already in the project unit),
+    then -- when the caller supplies the view axis -- circular profiles extruded
+    at the viewer, and finally falls back to the ifcopenshell geometry engine,
+    which produces tessellated lines only (no arc/circle/ellipse specs) in
+    metres -- divided by `unit_scale`, metres per project unit.
     """
     items = plan_repr.Items
     if items:
@@ -645,7 +648,7 @@ def _extract_local_curves(element, plan_repr, crease_angle_deg=15.0, view_axis=N
     s.set('context-ids', [ctx_id])
     shape = ifcopenshell.geom.create_shape(s, element)
     g = shape.geometry
-    verts = list(g.verts)
+    verts = [c / unit_scale for c in g.verts]
     faces = list(g.faces)
 
     if not faces:

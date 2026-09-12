@@ -141,13 +141,17 @@ class ExportDrawingToDxfOperator(bpy.types.Operator):
         except ImportError:
             wall_mode = "flat"
 
-        # Determine template path
+        # Template: the user's own when they picked one. Empty, or the bundled
+        # metric default pre-filled at registration, means "the bundled
+        # template for the project's units" (metric or imperial) -> None.
+        from . import get_template_path
         tpl = getattr(getattr(context.scene, "ifc_dxf", None), "template_path", "") or ""
-        if tpl:
-            template_path = bpy.path.abspath(tpl)
-        else:
-            from . import get_template_path
-            template_path = get_template_path() or None
+        template_path = bpy.path.abspath(tpl) if tpl else None
+        bundled = get_template_path()
+        if template_path and bundled and (
+                os.path.normcase(os.path.abspath(template_path))
+                == os.path.normcase(os.path.abspath(bundled))):
+            template_path = None
 
         props = context.scene.ifc_dxf
         try:

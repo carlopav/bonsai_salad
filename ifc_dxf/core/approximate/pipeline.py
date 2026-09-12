@@ -15,6 +15,7 @@ from ..camera import (
     camera_matrix_inv_col_major,
     camera_dir_pos,
     world_matrix_col_major,
+    camera_body_local_extents,
 )
 from ..ifc_query import (
     find_plan_repr,
@@ -34,9 +35,10 @@ from ..geometry import (
     _decompose_wall_to_layer_polygons,
     _wall_layer_subdivision_lines,
 )
-from ..dxf_template import _parse_scale_factor
+from ..dxf_template import _parse_scale_factor, default_template
 from ..dxf_writer import _write_dxf
 from ..plan_symbols import place_plan_symbol
+from ..units import project_unit_scale
 
 
 # ---------------------------------------------------------------------------
@@ -157,9 +159,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     print(f"  TargetView : {target_view}   Scale: {human_scale}   WallMode: {wall_mode}")
 
     if template_path is None:
-        # Try to find template in ifc_dxf/templates/
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        template_path = os.path.join(pkg_dir, "templates", "ifc_dxf_template_metric.dxf")
+        # The bundled template for the project's unit system
+        template_path = default_template(project_unit_scale(ifc))
     if os.path.isfile(template_path):
         print(f"  Template   : {os.path.basename(template_path)}")
     else:
@@ -168,6 +169,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
     col_major        = camera_matrix_inv_col_major(drawing)
     cam_dir, cam_pos = camera_dir_pos(drawing)
+    unit_scale       = project_unit_scale(ifc)  # metres per project unit
 
     _cam_inv_np  = np.array(col_major, dtype=float).reshape(4, 4, order='F')
     _cam_R       = _cam_inv_np[:3, :3]
@@ -250,7 +252,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
         if wall_mode == "shapely":
             try:
                 poly, _ = _extract_wall_polygon_with_openings(
-                    element, wm, col_major, cut_z, cam_dir
+                    element, wm, col_major, cut_z, cam_dir, unit_scale
                 )
                 if poly is not None:
                     if rec.role == "view":
@@ -284,7 +286,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
             if plan_repr_b is not None:
                 try:
                     verts, edges, _a, _c, _el = _extract_local_curves(element, plan_repr_b,
-                                                                       crease_angle_deg)
+                                                                       crease_angle_deg,
+                                                                       unit_scale)
                     if verts and edges:
                         n        = len(verts) // 3
                         va       = np.array(verts[:n*3]).reshape(n, 3)
@@ -349,7 +352,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                     element, rec.layer, target_view, crease_angle_deg,
                     _cam_R, _cam_inv_np, _cam_rot_deg,
                     block_defs, block_order, block_inserts, seen_blocks,
-                    direct_entities, role=rec.role,
+                    direct_entities, role=rec.role, unit_scale=unit_scale,
                 )
                 if placed:
                     bucket_a += 1
@@ -389,6 +392,8 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
 
     t0 = time.perf_counter()
     scale_factor_val = _parse_scale_factor(pset.get("Scale", "")) or 0.01
+    ext = camera_body_local_extents(drawing, unit_scale)
+    drawing_size = (ext[1] - ext[0], ext[3] - ext[2]) if ext else None
     if footprint_polys:
         print(f"  Footprints : {len(footprint_polys)} LWPOLYLINE groups")
     _write_dxf(output_path, block_defs, block_order, block_inserts,
@@ -401,7 +406,9 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                footprint_polys=footprint_polys,
                wall_layer_polys=wall_layer_polys_by_key or None,
                wall_subdivision_lines=wall_subdivision_lines or None,
-               direct_entities=direct_entities or None)
+               direct_entities=direct_entities or None,
+               unit_scale=unit_scale, drawing_size=drawing_size,
+               drawing_pset=pset)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")

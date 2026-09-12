@@ -1,13 +1,16 @@
 """IFC data access: drawing discovery, element queries, representation lookup."""
 
+import functools
 import json
 import re
 
 import ifcopenshell
+import ifcopenshell.guid
 import ifcopenshell.util.element
 import ifcopenshell.util.selector
 
 from .camera import get_camera_frustum_bbox, filter_elements_in_frustum
+from .units import project_unit_scale
 
 
 # Each entry: (ContextType, ContextIdentifier, TargetView).
@@ -41,9 +44,16 @@ _PLAN_SEARCH = {
 
 
 def find_drawings(ifc):
-    """Return [(IfcAnnotation, pset_dict)] for every Bonsai drawing."""
+    """Return [(IfcAnnotation, pset_dict)] for every Bonsai drawing.
+
+    A drawing is an IfcAnnotation with ObjectType 'DRAWING'. EPset_Drawing
+    alone is not enough: Bonsai also puts it (HasLinework, HasAnnotation, ...)
+    on text, dimension and linework annotations, often via their type.
+    """
     result = []
     for ann in ifc.by_type("IfcAnnotation"):
+        if ann.ObjectType != "DRAWING":
+            continue
         pset = ifcopenshell.util.element.get_psets(ann).get("EPset_Drawing", {})
         if pset:
             result.append((ann, pset))
@@ -231,6 +241,24 @@ def _get_elements_via_bonsai(ifc, drawing):
         return None
 
 
+@functools.lru_cache(maxsize=None)
+def _selector_starts_classless_groups():
+    """True when this ifcopenshell's selector starts a filter group that has
+    no class from every product, as Bonsai's does (ifcopenshell 0.8.1+).
+
+    0.8.0 starts such a group empty, so a drawing's
+    Exclude = `... + "EPset_Status"."Status" = "OTHER"` silently matched
+    nothing headless while Bonsai hid those elements. Probed on a one-wall
+    file rather than read from the version string.
+    """
+    probe = ifcopenshell.file(schema="IFC4")
+    probe.createIfcWall(ifcopenshell.guid.new(), None, "probe")
+    try:
+        return bool(ifcopenshell.util.selector.filter_elements(probe, 'Name="probe"'))
+    except Exception:
+        return False
+
+
 def get_elements(ifc, drawing, pset):
     """Element selection for a drawing.
 
@@ -258,6 +286,10 @@ def get_elements(ifc, drawing, pset):
     print("  Selection  : standalone fallback (pure ifcopenshell, origin-point frustum)")
     include = pset.get("Include", None)
     exclude = pset.get("Exclude", None)
+    if (include or exclude) and not _selector_starts_classless_groups():
+        print(f"  Warning    : ifcopenshell {ifcopenshell.version} predates 0.8.1 -- "
+              "Include/Exclude filter groups that start without a class match "
+              "nothing here, unlike in Bonsai; upgrade ifcopenshell")
 
     if include:
         try:
@@ -292,7 +324,7 @@ def get_elements(ifc, drawing, pset):
 
     # Spatial culling from camera frustum (Blender-agnostic): cheap origin
     # test + geometry-AABB second pass for origin-outside elements (long walls)
-    frustum = get_camera_frustum_bbox(drawing)
+    frustum = get_camera_frustum_bbox(drawing, project_unit_scale(ifc))
     if frustum is not None:
         before = len(elements)
         elements, n_rescued = filter_elements_in_frustum(ifc, elements, frustum)

@@ -20,7 +20,10 @@ from .dxf_template import (
     _populate_scale_list,
     _resolve_text_font,
     _fill_cartiglio,
+    _apply_drawing_units,
+    _select_sheet,
 )
+from .units import dxf_insunits, is_imperial
 from .annotations import (
     _write_dimension_annotations,
     _write_text_annotations,
@@ -60,7 +63,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                drawing_name=None, drawing_identification=None,
                drawing_scale=None, footprint_polys=None,
                wall_layer_polys=None, wall_subdivision_lines=None,
-               direct_entities=None, section_patch_union=None):
+               direct_entities=None, section_patch_union=None,
+               unit_scale=1.0, drawing_size=None, drawing_pset=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -93,11 +97,19 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     cam_inv_np:    4x4 numpy camera inverse matrix (needed for annotations)
     template_path: path to ifc_dxf_template.dxf (None -> minimal fallback)
     scale_factor:  drawing scale as a pure ratio (0.01 for 1:100, 0.02 for 1:50)
+    unit_scale:    metres per drawing unit. The DXF is written in the IFC
+                   project's length unit, which every coordinate above is
+                   already in; sizes stated in metres here are divided by it
+                   (see core/units.py).
+    drawing_size:  (width, height) of the drawing's camera box in drawing
+                   units, or None. With it, the template's smallest sheet
+                   that holds the drawing at its scale is kept and the other
+                   sheets are dropped (dxf_template._select_sheet).
+    drawing_pset:  the drawing's EPset_Drawing (dimension text precision).
     """
     import ezdxf
-    from ezdxf import units
 
-    SNAP_TOL = 0.0005  # 0.5 mm
+    SNAP_TOL = 0.0005 / unit_scale  # 0.5 mm
 
     # Entities inside block definitions use BYBLOCK so that the INSERT entity
     # (on its layer) controls colour, linetype and lineweight.
@@ -106,29 +118,40 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # lineweight -> -2 (BYBLOCK per DXF spec group-code 370)
     _BB = {"layer": "0", "color": 0, "linetype": "BYBLOCK", "lineweight": -2}
 
+    imperial = is_imperial(dxf_insunits(unit_scale))
     if template_path and os.path.isfile(template_path):
         doc = ezdxf.readfile(template_path)
         msp = doc.modelspace()
         msp.delete_all_entities()
         _resolve_text_font(doc)
         _make_text_styles_annotative(doc)
+        unit_factor = _apply_drawing_units(doc, unit_scale)
+        if drawing_size is not None:
+            # Camera box -> paper metres; paper space stays in template units.
+            w_m, h_m = (d * unit_scale * scale_factor for d in drawing_size)
+            sheet, fits = _select_sheet(doc, w_m, h_m, unit_factor * unit_scale)
+            if sheet:
+                print(f"  Sheet      : {sheet} (drawing {w_m * 1000:.0f} x "
+                      f"{h_m * 1000:.0f} mm on paper"
+                      f"{'' if fits else '; no sheet holds it, largest kept'})")
         doc.header["$LTSCALE"] = float(scale_factor)
-        scale_handles = _populate_scale_list(doc, scale_factor)
-        denom = int(round(1.0 / scale_factor))
-        current_scale_handle = scale_handles.get(f"1:{denom}")
+        scale_handles, scale_name = _populate_scale_list(
+            doc, scale_factor, drawing_scale, imperial)
+        current_scale_handle = scale_handles.get(scale_name)
         _fill_cartiglio(doc, scale_factor,
                         scale_handle=current_scale_handle,
                         drawing_name=drawing_name,
                         drawing_identification=drawing_identification,
-                        drawing_scale=drawing_scale)
+                        drawing_scale=drawing_scale,
+                        unit_factor=unit_factor)
     else:
         doc = ezdxf.new("R2010")
-        doc.units = units.M
+        _apply_drawing_units(doc, unit_scale)
         msp = doc.modelspace()
         doc.header["$LTSCALE"] = float(scale_factor)
-        scale_handles = _populate_scale_list(doc, scale_factor)
-        denom = int(round(1.0 / scale_factor))
-        current_scale_handle = scale_handles.get(f"1:{denom}")
+        scale_handles, scale_name = _populate_scale_list(
+            doc, scale_factor, drawing_scale, imperial)
+        current_scale_handle = scale_handles.get(scale_name)
 
     # IFC identity travels on every entity as XDATA; the appid must be
     # registered or the audit pass strips it.
@@ -276,8 +299,9 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                         for ring in poly.interiors:
                             try:
                                 hole = shapely.Polygon(ring)
-                                if (hole.area < 1.0
-                                        and hole.difference(section_patch_union).area < 1e-3
+                                if (hole.area < 1.0 / unit_scale ** 2
+                                        and hole.difference(section_patch_union).area
+                                        < 1e-3 / unit_scale ** 2
                                         and hole.difference(all_drawn).area > hole.area * 0.5):
                                     n_patched += 1
                                     poly_changed = True
@@ -403,8 +427,10 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                 apply_role(e, "view")
                 set_ifc_xdata(e, ifc_class, gid)
                 entities.append(e)
+        # The full GlobalId: GUIDs minted together often share their first
+        # characters, so a prefix is not a unique name.
         for gid, entities in entities_by_gid.items():
-            doc.groups.new(f"fp_{gid[:8]}").extend(entities)
+            doc.groups.new(f"fp_{gid}").extend(entities)
 
     # zoom extents
     xs, ys = [], []
@@ -429,7 +455,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
         for cx, cy, _mx, _my, _ratio, _t1, _t2 in ent.get("ellipses", []):
             xs.append(cx); ys.append(cy)
     if xs and ys:
-        pad = max((max(xs) - min(xs)) * 0.05, (max(ys) - min(ys)) * 0.05, 0.5)
+        pad = max((max(xs) - min(xs)) * 0.05, (max(ys) - min(ys)) * 0.05,
+                  0.5 / unit_scale)
         xmin, xmax = min(xs) - pad, max(xs) + pad
         ymin, ymax = min(ys) - pad, max(ys) + pad
         doc.header["$EXTMIN"] = (xmin, ymin, 0)
@@ -440,9 +467,9 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # Bucket D: annotations
     if annotations and cam_inv_np is not None:
         _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
-                                     current_scale_handle)
+                                     current_scale_handle, unit_scale, drawing_pset)
         _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
-                                current_scale_handle)
+                                current_scale_handle, unit_scale)
 
     # Clearing the template modelspace (delete_all_entities) leaves the sample
     # entities' OBJECTS-section satellites -- AcDbContextDataManager /

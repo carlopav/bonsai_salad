@@ -434,16 +434,17 @@ def _wall_layer_subdivision_lines(full_poly, element, wm_flat, cam_inv_col_major
     return result if result else None
 
 
-def _opening_footprint_polygon(opening, cam_inv_col_major):
+def _opening_footprint_polygon(opening, cam_inv_col_major, unit_scale=1.0):
     """Get plan footprint of an IfcOpeningElement via geom tessellation.
 
-    Returns (polygon_2d, z_min, z_max) in world space, or (None, None, None).
+    Returns (polygon_2d, z_min, z_max) in world space, or (None, None, None),
+    in the project unit: the engine's metres divided by `unit_scale`.
     """
     try:
         settings = ifcopenshell.geom.settings()
         settings.set('use-world-coords', True)
         shape = ifcopenshell.geom.create_shape(settings, opening)
-        verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
+        verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3) / unit_scale
         z_min = float(verts[:, 2].min())
         z_max = float(verts[:, 2].max())
 
@@ -507,7 +508,7 @@ def _wall_z_range(element, wm_flat):
 
 
 def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_col_major,
-                                         cut_z, camera_dir):
+                                         cut_z, camera_dir, unit_scale=1.0):
     """Wall plan polygon = IfcExtrudedAreaSolid profile minus ALL openings.
 
     All openings are subtracted regardless of their height relative to cut_z --
@@ -535,7 +536,8 @@ def _extract_wall_polygon_with_openings(element, wm_flat, cam_inv_col_major,
         op = rel.RelatedOpeningElement
         if not hasattr(op, 'ObjectPlacement') or op.ObjectPlacement is None:
             continue
-        op_poly, _zmin, _zmax = _opening_footprint_polygon(op, cam_inv_col_major)
+        op_poly, _zmin, _zmax = _opening_footprint_polygon(op, cam_inv_col_major,
+                                                           unit_scale)
         if op_poly is not None and op_poly.area > 1e-6:
             opening_polys.append(op_poly)
 

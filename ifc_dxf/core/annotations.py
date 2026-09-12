@@ -1,5 +1,6 @@
 """Text and dimension annotation writing for DXF output."""
 
+import math
 import re
 
 import numpy as np
@@ -10,11 +11,13 @@ from .camera import world_matrix_col_major
 from .ifc_query import _get_drawing_annotations, get_assigned_product, get_type_block_name
 from .dxf_template import _ensure_dim_style
 from .xdata import set_ifc_xdata
+from .units import dxf_insunits
 
 
 # Paper-space heights in mm, mirroring the Bonsai CSS class names.
-# At export time: model_height [m] = paper_mm * 0.001 / scale_factor
-# e.g. "regular" 2.5 mm at 1:100 -> 0.25 m in model space.
+# At export time: model_height = paper_mm * 0.001 / scale_factor / unit_scale,
+# in drawing units (unit_scale = metres per project unit), e.g. "regular"
+# 2.5 mm at 1:100 -> 0.25 m in model space, or 0.82 ft in a feet project.
 _TEXT_STYLES_MM = {
     "title":     7.0,
     "header":    5.0,
@@ -215,8 +218,105 @@ def _make_dim_annotative(doc, dim_entity, scale_handle):
     dim_entity.set_xdata("AcadAnnotative", annotative_xdata)
 
 
+# BBIM_Dimension.CustomUnit choices that are imperial -> (length unit, fractional)
+_IMPERIAL_CUSTOM_UNITS = {
+    "Feet and Inches - Fractional": ("FEET", True),
+    "Feet - Decimal": ("FEET", False),
+    "Inches - Fractional": ("INCHES", True),
+    "Inches - Decimal": ("INCHES", False),
+}
+
+
+def _format_imperial_length(value_m, unit_length="FEET", fraction=True,
+                            precision=None, suppress_zero_inches=False):
+    """Bonsai's text for an imperial length, from a value in metres.
+
+    A port of the length branch of Bonsai's
+    bim.module.drawing.helper.format_distance for imperial units -- the
+    formatter behind its SVG dimensions -- so the DXF reads like the SVG:
+    3' - 0, 2' - 9", 3' - 7 1/2". `precision` is EPset_Drawing's precision
+    string ("1/2" rounds to the half inch; none means 1/256).
+    ifcopenshell.util.unit.format_length is a different formatter (it writes
+    13' - 12" for 13.937 ft, Bonsai 13' - 11").
+    """
+    dec_inches = value_m * 39.3700787401574887
+    dec_feet = dec_inches / 12
+
+    if not precision:
+        base = 256
+    elif precision == "1":
+        base = 1
+    elif "/" in str(precision):
+        base = int(str(precision).split("/")[1])
+    else:
+        base = int(precision)
+
+    if unit_length == "FEET" and not fraction:
+        feet = round(dec_inches / 12.0, 3)  # keep decimal
+        dec_inches = 0
+    elif unit_length != "INCHES":
+        feet = int(dec_inches / 12.0)
+        dec_inches -= feet * 12.0
+    else:
+        feet = 0
+
+    dec_inches = abs(dec_inches)
+    inches = math.floor(dec_inches)
+    fractional = dec_inches - inches
+    if fractional < 0.01:          # about 1/100 of an inch
+        frac = 0
+    elif fractional > 1.0 - 0.01:
+        frac = 0
+        inches += 1
+    else:
+        frac = round(base * fractional)
+    if frac != base:
+        divisor = math.gcd(int(frac), int(base))
+        frac = int(frac / divisor)
+        base = int(base / divisor)
+    else:
+        frac = 0
+        inches += 1
+
+    if inches == 12 and unit_length == "FEET":
+        feet += 1
+        inches = 0
+
+    if not fraction:
+        inches = round(dec_inches, 3)
+        frac = None
+
+    add_inches = bool(inches) or not suppress_zero_inches or (inches == 0 and frac)
+    text = ""
+    if feet:
+        text += f"{feet}'"
+    if not feet and not add_inches:
+        text += f"{feet}'"
+    if not feet and add_inches and unit_length != "INCHES":
+        text += "-0' - " if value_m < 0 else "0' - "
+    elif feet and add_inches:
+        text += " - "
+    if add_inches:
+        if feet == 0 and inches == 0 and not frac:
+            text += "0"
+        elif not (feet == 0 and inches == 0):
+            text += str(inches)
+    if add_inches and frac and not (feet == 0 and inches == 0):
+        text += " "
+    if frac:
+        text += f"{frac}/{base}"
+    if (add_inches or frac) and (inches > 0 or (frac or 0) > 0 or feet == 0):
+        text += '"'
+    if precision == "12":
+        text = f"{round(dec_feet)}'"
+    if text == '"':
+        text = "0' - 0\""
+    return text
+
+
 def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
-                                 current_scale_handle):
+                                 current_scale_handle, unit_scale=1.0,
+                                 drawing_pset=None):
     """Write DIMENSION annotations as native DXF DIMENSION entities.
 
     Each IfcAnnotation(ObjectType='DIMENSION') stores a chain of 2D points
@@ -230,11 +330,19 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
     from the point distance unless overridden by BBIM_Dimension pset.
     """
     _DIM_LAYER = "IfcAnnotation_Dimension"
-    dim_style_name = _ensure_dim_style(doc, scale_factor)
+    dim_style_name = _ensure_dim_style(doc, scale_factor, unit_scale)
+    # Feet and inch projects get Bonsai's text written out: ezdxf bakes the
+    # dimension picture itself and cannot format architectural units, so a
+    # style-computed "<>" would read 36 or 3.00 instead of 3' - 0. Metric
+    # projects keep "<>", formatted by the template's dimension style.
+    project_unit = {2: "FEET", 1: "INCHES"}.get(dxf_insunits(unit_scale))
+    drawing_pset = drawing_pset or {}
+    precision = drawing_pset.get("MetricPrecision") or drawing_pset.get("ImperialPrecision")
     # The style is annotative (dimscale=0), which ezdxf would render ~1:1 (text
     # and arrows 100x too small at 1:100) when it bakes the picture block, so
-    # override dimscale per entity. BricsCAD keeps that same override on its own
-    # annotative dimensions -- annotativity lives in the context data, not here.
+    # override dimscale per entity rather than mutate the shared style. BricsCAD
+    # keeps that same override on its own annotative dimensions -- annotativity
+    # lives in the context data, not here.
     dim_scale = 1.0 / scale_factor   # e.g. 100 for 1:100
 
     for ann in annotations:
@@ -247,6 +355,12 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
         suffix      = bbim_dim.get("TextSuffix", "") or ""
         show_desc   = bbim_dim.get("ShowDescriptionOnly", False)
         description = getattr(ann, "Description", None) or ""
+        suppress_zero_inches = bbim_dim.get("SuppressZeroInches", False)
+        custom_unit = bbim_dim.get("CustomUnit") or ""
+        if isinstance(custom_unit, (list, tuple)):
+            custom_unit = custom_unit[0] if custom_unit else ""
+        unit_length, fraction = _IMPERIAL_CUSTOM_UNITS.get(
+            custom_unit, (project_unit, True))
 
         polylines = _annotation_polylines_2d(ann, cam_inv_np)
         for pts in polylines:
@@ -260,10 +374,18 @@ def _write_dimension_annotations(msp, doc, annotations, cam_inv_np, scale_factor
 
                 if show_desc and description:
                     text = description
+                elif unit_length:
+                    text = prefix + _format_imperial_length(
+                        length * unit_scale, unit_length, fraction, precision,
+                        suppress_zero_inches) + suffix
                 elif prefix or suffix:
                     text = f"{prefix}{length:.3f}{suffix}"
                 else:
                     text = "<>"   # let DXF auto-compute from geometry
+                if description and not show_desc:
+                    # Bonsai prints the description under the value
+                    # ("3' - 0" over "MIN."); \X breaks below the dimension line.
+                    text += "\\X" + description
 
                 dim = msp.add_aligned_dim(
                     p1=p0,
@@ -365,13 +487,8 @@ def _resolve_text_literal_variables(text, product):
     if not product:
         return text
 
-    for command in re.findall(_TEMPLATE_CMD_RE, text):
-        try:
-            value = ifcopenshell.util.selector.format(command[2:-2], product)
-        except Exception:
-            value = ""
-        text = text.replace(command, str(value))
-
+    # Variables first: a formula is evaluated on its own text, so the values it
+    # refers to must already be substituted into it (format() takes no element).
     for variable in re.findall(_TEMPLATE_VAR_RE, text):
         try:
             value = ifcopenshell.util.selector.get_element_value(product, variable[2:-2])
@@ -380,6 +497,13 @@ def _resolve_text_literal_variables(text, product):
         if isinstance(value, (list, tuple)):
             value = ", ".join(str(v) for v in value)
         text = text.replace(variable, "" if value is None else str(value))
+
+    for command in re.findall(_TEMPLATE_CMD_RE, text):
+        try:
+            value = ifcopenshell.util.selector.format(command[2:-2])
+        except Exception:
+            value = ""
+        text = text.replace(command, str(value))
 
     return text
 
@@ -476,13 +600,14 @@ def _literal_local_xy(item, mapping_op=None, y_line_offset=0.0):
 
 
 def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
-                            current_scale_handle):
+                            current_scale_handle, unit_scale=1.0):
     """Write TEXT annotations as annotative DXF TEXT entities, or as a shared
     BLOCK+ATTRIB (one ATTDEF per text literal) when the annotation shares its
     geometry with an IfcTypeProduct (e.g. a space tag: one BLOCK per tag type,
     one INSERT per tagged IfcSpace with resolved {{Name}}/{{Area}} values).
 
-    Text height: paper_mm * 0.001 / scale_factor (model-space metres).
+    Text height: paper_mm * 0.001 / scale_factor / unit_scale (model space,
+    drawing units).
     Plain (untyped) TEXT entities get a single annotative scale representation
     for the current drawing scale via _make_text_annotative().
     """
@@ -505,7 +630,7 @@ def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
             (c for c in classes_str.split() if c in _TEXT_STYLES_MM), "regular"
         )
         paper_mm   = _TEXT_STYLES_MM[style]
-        txt_height = paper_mm * 0.001 / scale_factor   # model-space metres
+        txt_height = paper_mm * 0.001 / scale_factor / unit_scale  # drawing units
 
         # world position -> 2D
         wm = world_matrix_col_major(ann)
@@ -548,7 +673,9 @@ def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                 }
                 if halign or valign:
                     text_dxfattribs["align_point"] = (px, py)
-                text_entity = msp.add_text(item.Literal or "", dxfattribs=text_dxfattribs)
+                literal = _resolve_text_literal_variables(
+                    item.Literal or "", get_assigned_product(ann) or ann)
+                text_entity = msp.add_text(literal, dxfattribs=text_dxfattribs)
                 set_ifc_xdata(text_entity, ann.is_a(), ann.GlobalId)
                 if current_scale_handle:
                     _make_text_annotative(
@@ -596,7 +723,9 @@ def _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                     })
             seen_blocks[block_name] = True
 
-        product = get_assigned_product(ann)
+        # A tag with no assigned product resolves against the annotation itself,
+        # as Bonsai's SVG does ({{Name}} -> the annotation's own Name).
+        product = get_assigned_product(ann) or ann
         px, py = _world_to_2d(0.0, 0.0)
         blockref = msp.add_blockref(block_name, (px, py), dxfattribs={
             "layer":    _TXT_LAYER,

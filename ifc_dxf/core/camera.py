@@ -7,6 +7,8 @@ import numpy as np
 import ifcopenshell.util.placement
 import ifcopenshell.geom
 
+from .units import project_unit_scale
+
 
 def _placement_matrix(drawing):
     """Return the 4x4 numpy placement matrix for the drawing annotation."""
@@ -54,19 +56,21 @@ def camera_pos_dir_ref(drawing):
     return pos, view_dir, ref_dir
 
 
-def get_camera_frustum_bbox(drawing):
+def get_camera_frustum_bbox(drawing, unit_scale=1.0):
     """Return (x_min, x_max, y_min, y_max, z_min, z_max) in world coordinates
     from the drawing camera's body geometry (IfcCsgSolid / IfcExtrudedAreaSolid).
 
     ifcopenshell.geom does not apply ObjectPlacement for IfcAnnotation, so we
-    read local coords and transform manually with the placement matrix.
+    read local coords and transform manually with the placement matrix. The
+    engine's metres are first converted to the placement's project unit
+    (`unit_scale` metres each).
     Returns None if the body geometry is unavailable.
     """
     try:
         s = ifcopenshell.geom.settings()
         s.set('use-world-coords', False)
         shape = ifcopenshell.geom.create_shape(s, drawing)
-        v_local = np.array(shape.geometry.verts).reshape(-1, 3)
+        v_local = np.array(shape.geometry.verts).reshape(-1, 3) / unit_scale
         m = ifcopenshell.util.placement.get_local_placement(drawing.ObjectPlacement)
         ones = np.ones((len(v_local), 1))
         v_world = (m @ np.hstack([v_local, ones]).T).T[:, :3]
@@ -77,22 +81,23 @@ def get_camera_frustum_bbox(drawing):
         return None
 
 
-def camera_body_local_extents(drawing):
+def camera_body_local_extents(drawing, unit_scale=1.0):
     """Return (x_min, x_max, y_min, y_max) of the camera body geometry in the
-    drawing placement's local frame, or None if unavailable.
+    drawing placement's local frame, in the project unit (`unit_scale` metres
+    each), or None if unavailable.
 
     Used to map the native SVG serializer's paper-frame output back to
-    camera-space metres deterministically (no empirical calibration): with the
+    camera space deterministically (no empirical calibration): with the
     ElevationRefGuid configuration the SVG origin is the top-left corner of
     this box, x growing right and y growing down, at 1000*scale units per
-    metre. So x_cam = x_svg/(1000*scale) + x_min and
-    y_cam = y_max - y_svg/(1000*scale).
+    metre. So, with f = 1000*scale*unit_scale svg units per project unit,
+    x_cam = x_svg/f + x_min and y_cam = y_max - y_svg/f.
     """
     try:
         s = ifcopenshell.geom.settings()
         s.set('use-world-coords', False)
         shape = ifcopenshell.geom.create_shape(s, drawing)
-        v = np.array(shape.geometry.verts).reshape(-1, 3)
+        v = np.array(shape.geometry.verts).reshape(-1, 3) / unit_scale
         if not len(v):
             return None
         return (float(v[:, 0].min()), float(v[:, 0].max()),
@@ -147,6 +152,8 @@ def _aabb_overlap_pass(ifc, elements, frustum):
     if not by_guid:
         return set()
     x_min, x_max, y_min, y_max, z_min, z_max = frustum
+    # The engine yields metres; the frustum is in the project unit.
+    unit_scale = project_unit_scale(ifc)
 
     kept = set()
     try:
@@ -160,7 +167,7 @@ def _aabb_overlap_pass(ifc, elements, frustum):
                 shape = it.get()
                 elem = by_guid.get(shape.guid)
                 if elem is not None:
-                    v = np.array(shape.geometry.verts).reshape(-1, 3)
+                    v = np.array(shape.geometry.verts).reshape(-1, 3) / unit_scale
                     if len(v) and not (
                         v[:, 0].max() < x_min or v[:, 0].min() > x_max or
                         v[:, 1].max() < y_min or v[:, 1].min() > y_max or

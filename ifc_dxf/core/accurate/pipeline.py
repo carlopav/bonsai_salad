@@ -95,7 +95,7 @@ from ..ifc_query import (
     find_plan_repr,
     _get_drawing_annotations,
 )
-from ..dxf_template import _parse_scale_factor
+from ..dxf_template import _parse_scale_factor, default_template
 from ..dxf_writer import _write_dxf
 from ..plan_symbols import place_plan_symbol, _chain_segments
 from ..geometry import (
@@ -103,6 +103,7 @@ from ..geometry import (
     _extract_wall_polygon_with_openings,
     _slab_footprint_world,
 )
+from ..units import project_unit_scale
 
 
 _SVG_NS = "{http://www.w3.org/2000/svg}"
@@ -172,18 +173,19 @@ def _is_space_volume(element):
     return False
 
 
-def _projected_mesh_outline(element, cam_inv_np):
+def _projected_mesh_outline(element, cam_inv_np, unit_scale=1.0):
     """Camera-space outline of an element's whole body, from its mesh.
 
     Fallback for bodies whose authored footprint cannot be read (BReps,
     IfcPolygonalFaceSet, unsupported profiles): project every triangle and take
-    their union, which is the silhouette for a prismatic volume.
+    their union, which is the silhouette for a prismatic volume. The mesh
+    comes in metres, divided by `unit_scale` to meet the project-unit camera.
     """
     try:
         s = ifcopenshell.geom.settings()
         s.set("use-world-coords", True)
         shape = ifcopenshell.geom.create_shape(s, element)
-        verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
+        verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3) / unit_scale
         faces = np.array(shape.geometry.faces, dtype=int).reshape(-1, 3)
     except Exception:
         return None
@@ -204,7 +206,7 @@ def _projected_mesh_outline(element, cam_inv_np):
     return None if merged.is_empty else merged
 
 
-def _space_boundary_entries(elements, cam_inv_np):
+def _space_boundary_entries(elements, cam_inv_np, unit_scale=1.0):
     """Each space/zone as a closed boundary polyline in camera space.
 
     Authored footprint first (exact); mesh silhouette when that fails.
@@ -227,7 +229,7 @@ def _space_boundary_entries(elements, cam_inv_np):
             polys = [(_proj(fp_world.exterior),
                       [_proj(r) for r in fp_world.interiors])]
         else:
-            merged = _projected_mesh_outline(element, cam_inv_np)
+            merged = _projected_mesh_outline(element, cam_inv_np, unit_scale)
             if merged is None:
                 continue
             geoms = (merged.geoms if hasattr(merged, "geoms") else [merged])
@@ -462,11 +464,11 @@ def _count_edge_classes(hlr_out):
 # Matches the writer's SNAP_TOL: section groups are fused with a 0.5 mm miter
 # snap, so what the hatch finally covers is the raw union grown by that much.
 # 0.5 mm in model metres is 0.005 mm on paper at 1:100 -- nothing drawable is
-# at risk.
+# at risk. Metres: divided by the project's unit scale before use.
 _SECTION_COVER_TOL = 5e-4
 
 
-def _drop_lines_covered_by_section(lines, section_polys):
+def _drop_lines_covered_by_section(lines, section_polys, tol=_SECTION_COVER_TOL):
     """Drop the open segments that merely retrace the element's own cut.
 
     A wall crossing the cut plane reports its section loop *and* a projection
@@ -477,7 +479,7 @@ def _drop_lines_covered_by_section(lines, section_polys):
     if not lines or not section_polys:
         return lines, 0
     try:
-        area = shapely.unary_union(section_polys).buffer(_SECTION_COVER_TOL)
+        area = shapely.unary_union(section_polys).buffer(tol)
     except Exception:
         return lines, 0
     kept = []
@@ -518,6 +520,11 @@ def _run_hlr_scene(ifc, drawing, elements, scale_factor_val, target_view,
     t0 = time.perf_counter()
     n_written = 0
     include = [e for e in elements if not _is_space_volume(e)] + [drawing]
+    # Known issue (set 2026): the HLR result is not deterministic. On a real
+    # plan (Restaurant_E_Washington, 1046 elements written) identical runs gave
+    # either 525 elements with visible output (~400 s) or 462 (~80 s, with 41
+    # furniture, 6 doors and 5 columns silently hidden) -- single-threaded as
+    # well as multicore. Cause not found yet.
     it = ifcopenshell.geom.iterator(gs, ifc, multiprocessing.cpu_count(), include=include)
     if it.initialize():
         while True:
@@ -529,14 +536,18 @@ def _run_hlr_scene(ifc, drawing, elements, scale_factor_val, target_view,
     svg_text = buf.get_value()
     t_hlr = time.perf_counter() - t0
 
-    ext = camera_body_local_extents(drawing)
+    unit_scale = project_unit_scale(ifc)
+    ext = camera_body_local_extents(drawing, unit_scale)
     if ext is None:
         raise RuntimeError(
             "accurate pipeline: camera body geometry unavailable, cannot "
             "derive the paper->camera transform"
         )
     x_min_l, _x_max_l, _y_min_l, y_max_l = ext
-    factor = 1000.0 * scale_factor_val  # svg units (paper mm) per metre
+    # svg units (paper mm) per project length unit: the serializer draws from
+    # metres, the camera extents and the rest of the drawing are in the
+    # project unit.
+    factor = 1000.0 * scale_factor_val * unit_scale
 
     out = _parse_hlr_svg(svg_text, x_min_l, y_max_l, factor)
     return out, n_written, t_hlr, edge_classification
@@ -637,7 +648,7 @@ _SIMPLIFY_PAPER_MM = 0.05   # Douglas-Peucker vertex tolerance
 _CULL_PAPER_MM     = 0.15   # min bbox diagonal for a whole chained polyline
 
 
-def _chain_lines(lines, scale_factor=None, seen_segments=None):
+def _chain_lines(lines, scale_factor=None, seen_segments=None, unit_scale=1.0):
     """Chain open visible-edge polylines into longer runs by shared endpoints,
     then clean them below plot resolution.
 
@@ -676,7 +687,7 @@ def _chain_lines(lines, scale_factor=None, seen_segments=None):
 
     if not scale_factor:
         return polylines
-    to_model  = 0.001 / scale_factor          # paper mm -> model metres
+    to_model  = 0.001 / scale_factor / unit_scale  # paper mm -> model (project unit)
     cull_diag = _CULL_PAPER_MM * to_model
     simp_tol  = _SIMPLIFY_PAPER_MM * to_model
     cleaned = []
@@ -713,8 +724,8 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
     print(f"  TargetView : {target_view}   Scale: {human_scale}   Pipeline: accurate (HLR oracle)")
 
     if template_path is None:
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        template_path = os.path.join(pkg_dir, "templates", "ifc_dxf_template_metric.dxf")
+        # The bundled template for the project's unit system
+        template_path = default_template(project_unit_scale(ifc))
     if os.path.isfile(template_path):
         print(f"  Template   : {os.path.basename(template_path)}")
     else:
@@ -722,6 +733,8 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
         template_path = None
 
     scale_factor_val = _parse_scale_factor(pset.get("Scale", "")) or 0.01
+    unit_scale = project_unit_scale(ifc)  # metres per project unit
+    cover_tol = _SECTION_COVER_TOL / unit_scale
 
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")
@@ -779,7 +792,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
     # polyline from the authored footprint, on their own no-plot layer.
     space_volumes = [e for e in elements if _is_space_volume(e)]
     if space_volumes:
-        entries = _space_boundary_entries(space_volumes, _cam_inv_np)
+        entries = _space_boundary_entries(space_volumes, _cam_inv_np, unit_scale)
         footprint_polys.extend(entries)
         print(f"  Spaces     : {len({e[0] for e in entries})}/{len(space_volumes)} "
               f"outlined ({len(entries)} polylines, no-plot layer, excluded "
@@ -813,7 +826,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
                     element, ifc_class, target_view, crease_angle_deg,
                     _cam_R, _cam_inv_np, _cam_rot_deg,
                     block_defs, block_order, block_inserts, seen_blocks,
-                    direct_entities,
+                    direct_entities, unit_scale=unit_scale,
                 )
             except Exception:
                 placed = False
@@ -868,14 +881,14 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
         # Open visible-edge segments (the common form for viewed geometry):
         # HLR already clipped the hidden parts, draw them as-is.
         if lines and sec:
-            lines, n_dropped = _drop_lines_covered_by_section(lines, sec)
+            lines, n_dropped = _drop_lines_covered_by_section(lines, sec, cover_tol)
             n_cut_dup += n_dropped
         if lines:
             # Dedup is per (layer, role): section and view share a layer now, and
             # a segment drawn in both roles must survive in both.
             seen = seen_layer_segments.setdefault((ifc_class, "view"), set())
             for edge_class, cls_lines in _group_lines_by_class(lines).items():
-                chained = _chain_lines(cls_lines, scale_factor_val, seen)
+                chained = _chain_lines(cls_lines, scale_factor_val, seen, unit_scale)
                 if chained:
                     direct_entities.append({"layer": ifc_class, "role": "view",
                                             "gid": gid,
@@ -902,7 +915,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
     # under the neighbour it joins): the element's own cut was already
     # subtracted above, this drops what other cuts hide.
     if sections_union is not None:
-        buried = sections_union.buffer(_SECTION_COVER_TOL)
+        buried = sections_union.buffer(cover_tol)
         for key, polys in list(wall_polys_by_key.items()):
             if key[2] != "view":
                 continue
@@ -931,7 +944,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
                     footprint_polys.append((gid, ifc_class, ifc_class, ext_pts, holes))
             seen = seen_layer_segments.setdefault((ifc_class, "view"), set())
             for edge_class, cls_lines in _group_lines_by_class(rec["lines"]).items():
-                chained = _chain_lines(cls_lines, scale_factor_val, seen)
+                chained = _chain_lines(cls_lines, scale_factor_val, seen, unit_scale)
                 if chained:
                     direct_entities.append({"layer": ifc_class, "role": "view",
                                             "gid": gid,
@@ -951,7 +964,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
     # authored 2D symbols keep every stroke, a door leaf legitimately runs
     # inside the wall it sits in.
     if sections_union is not None and footprint_polys:
-        buried = sections_union.buffer(_SECTION_COVER_TOL)
+        buried = sections_union.buffer(cover_tol)
 
         def _is_buried(ring):
             try:
@@ -972,7 +985,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
         footprint_polys = kept_fp
 
     if sections_union is not None and direct_entities:
-        buried = sections_union.buffer(_SECTION_COVER_TOL)
+        buried = sections_union.buffer(cover_tol)
         for ent in direct_entities:
             if not ent.get("from_hlr") or not ent["polylines"]:
                 continue
@@ -1015,7 +1028,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
         try:
             poly, _ = _extract_wall_polygon_with_openings(
                 element, world_matrix_col_major(element), col_major,
-                _cam_pos[2], cam_dir)
+                _cam_pos[2], cam_dir, unit_scale)
         except Exception:
             poly = None
         if poly is not None and not poly.is_empty:
@@ -1027,6 +1040,9 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
         print(f"  Annotations: {len(annotations)}"
               f" ({sum(1 for a in annotations if a.ObjectType == 'DIMENSION')} dims)")
 
+    ext = camera_body_local_extents(drawing, unit_scale)
+    drawing_size = (ext[1] - ext[0], ext[3] - ext[2]) if ext else None
+
     t1 = time.perf_counter()
     _write_dxf(output_path, block_defs, block_order, block_inserts,
                [], wall_polys_by_key,
@@ -1037,7 +1053,9 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
                drawing_scale=human_scale,
                footprint_polys=footprint_polys or None,
                direct_entities=direct_entities or None,
-               section_patch_union=section_patch_union)
+               section_patch_union=section_patch_union,
+               unit_scale=unit_scale, drawing_size=drawing_size,
+               drawing_pset=pset)
     print(f"  DXF gen    : {time.perf_counter() - t1:.2f}s")
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  >> {output_path}  ({size_kb} KB)")

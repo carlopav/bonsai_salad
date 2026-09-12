@@ -31,6 +31,23 @@ below-cut view walls, which HLR structurally cannot produce, and remains the
 second opinion when HLR misbehaves on a model). `wall_mode="flat"` will be
 dropped in the merge.
 
+### Command line
+
+The core has no Blender dependency, so drawings can be exported headless. Run
+from the repository root (needs `ifcopenshell`, `ezdxf`, `shapely`, `numpy`):
+
+```
+python -m ifc_dxf model.ifc --list                      # drawings in the file
+python -m ifc_dxf model.ifc                             # every drawing -> <ifc dir>/drawings/
+python -m ifc_dxf model.ifc -d "MY STOREY PLAN" -o plan.dxf
+python -m ifc_dxf model.ifc --pipeline approximate --audit
+```
+
+`-d` takes a drawing's Name or GlobalId and can be repeated; `-h` lists every
+option. Outside Blender, element selection takes the pure-ifcopenshell fallback
+path (see *Element selection according to the view limits*), so the result can
+differ slightly from the in-Blender export.
+
 ---
 
 ## Shared Reference
@@ -81,7 +98,19 @@ IfcGeometricRepresentationContext   (ContextType = "Model" | "Plan")
 
 ### DXF Coordinate System
 
-- Real metres 1:1. `$INSUNITS = 6` (Metres), `$MEASUREMENT = 1` (Metric).
+- Real size 1:1 **in the IFC project's own length unit** (`core/units.py`):
+  `$INSUNITS` follows it (6 metres, 4 millimetres, 2 feet, 1 inches, ...) and
+  `$MEASUREMENT` is 0 for imperial units, 1 otherwise. Every coordinate read
+  from IFC data is already in that unit; what ifcopenshell's geometry engine
+  returns (HLR output, tessellated fallbacks, opening and camera bodies) is in
+  metres and is divided by the unit scale where it meets them, as are the
+  sizes the code states in metres (paper heights, snap tolerances). The
+  template's model-space sizes -- text-style paper heights, dimension-style
+  lengths, the viewport's view height -- are converted from its own
+  `$INSUNITS`; paper space is left untouched. Before this (set 2026) a FOOT
+  project exported its placements, symbols and annotations in feet but its HLR
+  cuts and camera box in metres, under a metre header. Locked by
+  `TestProjectUnits`.
 - Camera centre → drawing origin (0, 0). Y increases upward.
 - `$LTSCALE`: numeric scale factor (e.g. 0.01 for 1:100). Read from `EPset_Drawing.Scale` (format `"1/100"`).
 
@@ -107,6 +136,42 @@ At export: `ezdxf.readfile()` + `msp.delete_all_entities()`. `_fill_cartiglio()`
 Current annotation scale written to `AcDbVariableDictionary → DictionaryVariables("CANNOSCALE", "1:100")`, not to `$CANNOSCALE` (ignored by BricsCAD/AutoCAD).
 
 The scale list (`ACAD_SCALELIST`) uses `SCALE`/`AcDbScale` entities (group codes 300/140/141/290) not natively supported by ezdxf; workaround via `new_entity("SCALE")` + manual subclass setup.
+
+The current annotation scale is always the drawing's own, named by its
+`HumanScale` (`1:100`, `3/8"=1'-0"`); an entry is added when the list lacks
+it. Before (set 2026) the list held only fixed metric ratios, so a 1:32
+drawing set CANNOSCALE to a scale the list did not have and no text or
+dimension got its annotative scale data. Imperial drawings also get the US
+architectural and engineering scales.
+
+### Imperial template and sheet selection
+
+`ifc_dxf_template_imperial.dxf` is generated from the metric template by
+`templates/build_imperial_template.py` (re-running it overwrites hand edits):
+the same layers, blocks and text styles converted to feet, a
+`dimensions_imperial` style (architectural units, "." decimal point,
+architectural ticks) that the export prefers over `dimensions_metric_m`, and
+one layout per US sheet -- 11x17, 18x24, 24x36, 30x42, 36x48 in -- each with a
+drawing viewport and a title block carrying the same placeholders. Its paper
+space is in feet, plotted at 12 in per unit (the metric one: metres, 1000 mm).
+
+With no template given, the export takes the bundled one for the project's
+unit system (`dxf_template.default_template`; in Blender, an empty template
+path or the pre-filled metric default counts as "none given"). Any template
+may hold several sheets: the export keeps the smallest whose drawing viewport
+holds the drawing at its scale -- Bonsai's paper size, the camera box times
+the scale -- drops the others, and sizes the viewport from the scale
+(`view_height = viewport height / scale`), so templates need no fixed
+baseline scale (`dxf_template._select_sheet`). A drawing no sheet holds gets
+the largest, with a note in the log.
+
+Feet and inch projects get their dimension text written out, formatted as
+Bonsai's SVG writes it (a port of the imperial branch of Bonsai's
+`helper.format_distance`: `3' - 0`, `3' - 7 1/2"`, precision from
+`EPset_Drawing.ImperialPrecision`, `BBIM_Dimension` `SuppressZeroInches` and
+`CustomUnit`), because ezdxf bakes the dimension picture itself and cannot
+format architectural units. Metric projects keep `<>`, formatted by the
+template's dimension style.
 
 ### Layer Naming and drawing roles
 
@@ -210,7 +275,7 @@ To be implemented
 
 **Primary path (inside Blender):** `get_elements` delegates to Bonsai's own `tool.Drawing.get_drawing_elements(drawing)` whenever Bonsai is importable, its loaded file is the *same object* passed to the exporter, and the drawing has a Blender camera object. This reuses Bonsai's exact selection semantics: full Blender `bound_box` AABB vs camera box culling (`is_in_camera_view`), `Include`/`Exclude` handling including the `filter_structure` JSON form (via `tool.Search`), and aggregate re-addition — so DXF and SVG exports agree on what is in view. Bonsai re-adds the drawing's own annotations to the set (its SVG pipeline draws them inline); we strip them since annotations are handled separately as Bucket D.
 
-**Fallback path (standalone, no bpy/Bonsai):** pure-ifcopenshell reproduction of the same pipeline. A world-space bounding box `(x_min, x_max, y_min, y_max, z_min, z_max)` is derived from the camera body geometry (`IfcCsgSolid` / `IfcExtrudedAreaSolid`) transformed by the camera's `ObjectPlacement`. Each element's `ObjectPlacement` origin is tested against this box. Elements outside are excluded.
+**Fallback path (standalone, no bpy/Bonsai):** pure-ifcopenshell reproduction of the same pipeline. `Include`/`Exclude` go through `ifcopenshell.util.selector.filter_elements` exactly as in Bonsai, which needs ifcopenshell 0.8.1+: earlier builds start a filter group without a class (`"EPset_Status"."Status" = "OTHER"`) empty instead of from every product, so such a group silently matches nothing and those elements stay in the export. The export prints a warning when the selector behaves that way (`_selector_starts_classless_groups`, set 2026). A world-space bounding box `(x_min, x_max, y_min, y_max, z_min, z_max)` is derived from the camera body geometry (`IfcCsgSolid` / `IfcExtrudedAreaSolid`) transformed by the camera's `ObjectPlacement`. Each element's `ObjectPlacement` origin is tested against this box. Elements outside are excluded.
 
 **Two-pass culling (fallback path):** pass 1 is the cheap `ObjectPlacement`-origin test (`element_in_frustum`); elements whose origin falls outside are not discarded but re-tested in pass 2 with a real world-AABB overlap check from tessellated body geometry (`filter_elements_in_frustum` → `_aabb_overlap_pass`, one batched multicore `ifcopenshell.geom.iterator` run over only the failed candidates). This keeps long walls/slabs/beams whose placement origin lies outside the view but whose body extends into it. Elements the iterator yields no shape for stay excluded. The export log reports how many elements the AABB pass rescued.
 
@@ -301,7 +366,7 @@ Future: wireframe fallback from projected 3D Body.
 
 Multiple instances of the same type share one BLOCK named `{TypeName}_{TypeGlobalId[:8]}`.
 
-**2. Footprint LWPOLYLINE + GROUP** — `IfcSlab`, `IfcCovering`, `IfcRoof` with instance-specific geometry. Profile extracted from `IfcExtrudedAreaSolid` (through `IfcBooleanResult` chain), projected to drawing space, written as closed `LWPOLYLINE`. Each element gets a GROUP `fp_{GlobalId[:8]}`; interior rings produce additional LWPOLYLINEs in the same GROUP. Scoped to these classes to avoid capturing the Body solid of doors/windows that also contain `IfcExtrudedAreaSolid`.
+**2. Footprint LWPOLYLINE + GROUP** — `IfcSlab`, `IfcCovering`, `IfcRoof` with instance-specific geometry. Profile extracted from `IfcExtrudedAreaSolid` (through `IfcBooleanResult` chain), projected to drawing space, written as closed `LWPOLYLINE`. Each element gets a GROUP `fp_{GlobalId}` (the full GlobalId: GUIDs minted together share prefixes, and an 8-character one collided on a real model); interior rings produce additional LWPOLYLINEs in the same GROUP. Scoped to these classes to avoid capturing the Body solid of doors/windows that also contain `IfcExtrudedAreaSolid`.
 
 **3. Unique BLOCK + INSERT** — all other elements with instance-specific geometry: one BLOCK per instance, named `{IfcClass}_{GlobalId[:8]}`. Preserves exact arcs and circles from the 2D plan symbol.
 
@@ -349,7 +414,7 @@ for rel in ifc.by_type("IfcRelAssignsToGroup"):
 | `regular` | 2.5 | 0.25 m |
 | `small` | 1.8 | 0.18 m |
 
-`txt_height = paper_mm * 0.001 / scale_factor`, written on the entity as the
+`txt_height = paper_mm * 0.001 / scale_factor / unit_scale` (drawing units), written on the entity as the
 model height, the way BricsCAD itself writes annotative text.
 
 **A fixed-height text style must be annotative.** The template's styles carry the
@@ -459,10 +524,11 @@ closed loops of slabs/coverings/roofs become footprint LWPOLYLINE GROUPs
 (roadmap item 12); elements outside the hatchable set (spatial elements,
 furnishing) are never hatched — their cut loops draw as unhatched outlines.
 The paper-frame →
-camera-metres affine is *computed* from the camera body's local extents
-(`camera.camera_body_local_extents`), not calibrated:
-`x_cam = x_svg/(1000·scale) + x_min_local`,
-`y_cam = y_max_local − y_svg/(1000·scale)`.
+camera affine is *computed* from the camera body's local extents
+(`camera.camera_body_local_extents`), not calibrated; with
+`f = 1000·scale·unit_scale` svg units per project unit:
+`x_cam = x_svg/f + x_min_local`,
+`y_cam = y_max_local − y_svg/f`.
 
 **Wall fusion grouping (ago 2026):** section polygons are fused per
 `(class, material, role, z_top)` and `material` is **None by default** — every
@@ -609,6 +675,19 @@ terrain, no below-cut stairs in the DXF, all misclassified as "hidden" by the
 oracle). Open segments are re-chained by shared endpoints
 (`plan_symbols._chain_segments`) into polylines — a viewed wall's four edges
 merge back into one closed outline.
+
+**Known issue -- non-deterministic scene (set 2026):** identical runs of the
+HLR scene do not always agree. On a real plan (Restaurant_E_Washington, 1046
+elements written) the result was either 525 elements with visible output
+(~400 s) or 462 (~80 s), the short run hiding 41 furniture, 6 doors and 5
+columns that are plainly in view. It happened single-threaded as well as with
+Bonsai's multicore iterator, so thread count is not the cause; the cause is not
+found yet. Bonsai's SVG export uses the same serializer configuration and is
+presumably exposed too. Until fixed, check the export log's "with visible
+output" count when a plan looks thin. Every short run so far was on
+ifcopenshell 0.8.0 (about 5 of 9 runs); after upgrading to 0.8.5, five
+consecutive runs all came out complete and identical -- suggestive, not yet
+proof that the upgrade fixed it.
 
 ### HLR section cut (Wall / WallStandardCase / Column, cut by the plane)
 
