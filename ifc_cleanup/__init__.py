@@ -6,11 +6,17 @@ from .align_base_to_cursor import AlignBaseToCursor
 from .add_clipping_plane import AddClippingPlaneAtCursor
 from .copy_clipping_planes import CopyClippingPlanes
 from .split_layers import SplitLayers
+from .sync_opening_dimensions import SyncOpeningDimensions
 from .ui import IfcCleanupProperties, classes as _ui_classes
 
-classes = (PipeCleaner, AlignBaseToCursor, AddClippingPlaneAtCursor, CopyClippingPlanes, SplitLayers) + tuple(
-    _ui_classes
-)
+classes = (
+    PipeCleaner,
+    AlignBaseToCursor,
+    AddClippingPlaneAtCursor,
+    CopyClippingPlanes,
+    SplitLayers,
+    SyncOpeningDimensions,
+) + tuple(_ui_classes)
 class_register, class_unregister = bpy.utils.register_classes_factory(classes)
 
 

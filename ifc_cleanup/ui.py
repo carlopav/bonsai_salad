@@ -17,6 +17,21 @@ class IfcCleanupProperties(bpy.types.PropertyGroup):
         "geometry to match",
         default=False,
     )
+    opening_width_delta: bpy.props.FloatProperty(
+        name="Width Correction",
+        description="Signed correction added to the width read from the type, "
+        "for every door and window in the selection: -0.10 records a "
+        "door's net passage rather than its lining",
+        default=0.0,
+        subtype="DISTANCE",
+    )
+    opening_height_delta: bpy.props.FloatProperty(
+        name="Height Correction",
+        description="Signed correction added to the height read from the type, "
+        "for every door and window in the selection",
+        default=0.0,
+        subtype="DISTANCE",
+    )
 
 
 class IfcCleanupGeometryPanel(bpy.types.Panel):
@@ -44,6 +59,10 @@ class IfcCleanupGeometryPanel(bpy.types.Panel):
         row.operator("bim.copy_clipping_planes", icon="MOD_BOOLEAN")
         row.operator("bim.add_clipping_plane_at_cursor", text="New at Cursor", icon="MESH_PLANE")
         layout.operator("bim.split_layers", icon="MOD_BUILD")
+        row = layout.row(align=True)
+        row.operator("bim.sync_opening_dimensions", text="Sync Sizes", icon="FILE_REFRESH")
+        row.prop(props, "opening_width_delta", text="W")
+        row.prop(props, "opening_height_delta", text="H")
 
 
 class MepCleanerPanel(bpy.types.Panel):
