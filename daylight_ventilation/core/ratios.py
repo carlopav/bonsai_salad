@@ -29,6 +29,7 @@ DAYLIGHT_REQUIREMENT = "Requisito illuminazione"
 AIR_REQUIREMENT = "Requisito aerazione"
 DAYLIGHT_RATIO = "Rapporto illuminazione"
 AIR_RATIO = "Rapporto aerazione"
+MINIMUM = "Superficie minima aeroilluminante"
 VERIFIED = "Verificato"
 
 DEFAULT_REQUIREMENT = 0.125
@@ -203,16 +204,18 @@ def requirements(space):
 
 
 def write_requirements(ifc_file, space, daylight, air):
-    """Sets what the room has to reach, and drops the stored verdict: it was
-    reached against the requirement being replaced, and nothing recomputes it
-    until the next run. Left there, the file would carry a Verificato against a
-    requirement it plainly fails, and every reader of it would believe that."""
+    """Sets what the room has to reach, and drops the stored verdict and the
+    area it was taken over: both were reached against the requirement being
+    replaced, and nothing recomputes them until the next run. Left there, the
+    file would carry a Verificato against a requirement it plainly fails, and a
+    schedule column would head a bar that is no longer in force."""
     ifcopenshell.api.pset.edit_pset(
         ifc_file,
         pset=_pset_entity(ifc_file, space, SPACE_PSET),
         properties={
             DAYLIGHT_REQUIREMENT: ifc_file.createIfcRatioMeasure(float(daylight)),
             AIR_REQUIREMENT: ifc_file.createIfcRatioMeasure(float(air)),
+            MINIMUM: None,
             VERIFIED: None,
         },
         should_purge=True,
@@ -275,16 +278,32 @@ def measure_spaces(ifc_file, spaces, geom_settings=None):
     return rows
 
 
+def _minimum(row):
+    """The area the room has to reach, so a schedule reads it as a column
+    instead of recomputing it from the ratio.
+
+    Only where one area answers for the room: where illuminazione and aerazione
+    ask for different fractions there are two, and one property cannot hold
+    them — half the truth in a column read as the whole is worse than an empty
+    cell. A room the rule asks nothing of owes no area at all."""
+    daylight, air = row.daylight_requirement, row.air_requirement
+    if daylight != air or daylight <= NOT_REQUIRED:
+        return None
+    return row.net * daylight
+
+
 def write_space_results(ifc_file, row):
     """The computed half of the room's pset. The two requirements are seeded on
     the way, so a room the user never touched still says what it was checked
     against. A filling whose area nobody knows withholds the verdict rather than
     let the room claim one it has not earned."""
+    minimum = _minimum(row)
     properties = {
         DAYLIGHT: ifc_file.createIfcAreaMeasure(row.daylight),
         AIR: ifc_file.createIfcAreaMeasure(row.air),
         DAYLIGHT_RATIO: ifc_file.createIfcRatioMeasure(row.daylight_ratio),
         AIR_RATIO: ifc_file.createIfcRatioMeasure(row.air_ratio),
+        MINIMUM: None if minimum is None else ifc_file.createIfcAreaMeasure(minimum),
         VERIFIED: None if row.unmeasured_fillings > 0 else ifc_file.createIfcBoolean(bool(row.verified)),
     }
     existing = _pset(row.space, SPACE_PSET)

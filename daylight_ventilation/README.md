@@ -25,9 +25,17 @@ applies, so recalculating can never destroy a correction.
   longer reaches the count for that window.
 - **Requisito illuminazione / aerazione** on the room — the ratio it has to
   reach, 0.125 unless you set otherwise. `0` marks a room the regulation asks
-  nothing of. Setting it drops the room's stored `Verificato`: that verdict was
-  reached against the requirement you just replaced, and only a recalculation
-  can earn a new one.
+  nothing of. Setting it drops the room's stored `Verificato` and
+  `Superficie minima aeroilluminante`: both were reached against the requirement
+  you just replaced, and only a recalculation can earn new ones.
+- **Superficie minima aeroilluminante** on the room — the requirement in square
+  metres rather than as a ratio, rewritten on every calculation. It is there so
+  a schedule can print the bar as a column instead of working it out from the
+  ratio and the floor: the room schedule under **Schedules > IfcSpaces** reads
+  exactly this. Only where one area answers for the room — where illuminazione
+  and aerazione ask for different fractions there are two, and where the
+  regulation asks nothing there is none, so the property is absent and the
+  schedule prints a dash.
 
 A window's clear opening can fail to measure. The void has no body, or it does
 not overlap its host along the wall's thickness — a broken or unusual model — or

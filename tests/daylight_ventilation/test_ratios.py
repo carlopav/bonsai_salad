@@ -212,6 +212,55 @@ def test_requirements_are_read_back(ifc_file, add_space):
     assert ratios.requirements(space) == pytest.approx((0.125, 0.0))
 
 
+def stored(room):
+    return ifcopenshell.util.element.get_pset(room, ratios.SPACE_PSET, should_inherit=False)
+
+
+def test_the_area_the_room_has_to_reach_is_stored(ifc_file, lit_room):
+    """A schedule reads it as a column instead of recomputing it: the room is
+    12 m² and owes an eighth of it."""
+    room, _ = lit_room()
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+
+    ratios.write_space_results(ifc_file, row)
+
+    assert stored(room)[ratios.MINIMUM] == pytest.approx(1.5, rel=1e-6)
+
+
+def test_two_requirements_that_differ_store_no_single_area(ifc_file, lit_room):
+    """One property cannot hold two areas, and half the truth in a column read
+    as the whole is worse than an empty cell."""
+    room, _ = lit_room()
+    ratios.write_requirements(ifc_file, room, 0.125, 0.0625)
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+
+    ratios.write_space_results(ifc_file, row)
+
+    assert ratios.MINIMUM not in stored(room)
+
+
+def test_a_room_the_rule_asks_nothing_of_owes_no_area(ifc_file, lit_room):
+    room, _ = lit_room()
+    ratios.write_requirements(ifc_file, room, 0.0, 0.0)
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+
+    ratios.write_space_results(ifc_file, row)
+
+    assert ratios.MINIMUM not in stored(room)
+
+
+def test_setting_a_requirement_drops_the_area_it_was_taken_over(ifc_file, lit_room):
+    """It was an eighth of the floor: left there, it would head a schedule
+    column against a requirement that is no longer the one in force."""
+    room, _ = lit_room()
+    (row,) = ratios.measure_spaces(ifc_file, [room])
+    ratios.write_space_results(ifc_file, row)
+
+    ratios.write_requirements(ifc_file, room, 0.5, 0.5)
+
+    assert ratios.MINIMUM not in stored(room)
+
+
 def test_setting_a_requirement_drops_the_stored_verdict(ifc_file, lit_room):
     """The verdict was reached against the requirement being replaced, and
     nothing recomputes it until the next run: leaving it would publish a
