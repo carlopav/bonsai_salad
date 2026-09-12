@@ -19,6 +19,7 @@ from . import drawing_diff
 from . import urban_parameters
 from . import daylight_ventilation
 from . import ifc_spaces
+from . import invarianza_idraulica
 
 
 def register():
@@ -33,9 +34,11 @@ def register():
     urban_parameters.register()
     daylight_ventilation.register()
     ifc_spaces.register()
+    invarianza_idraulica.register()
 
 
 def unregister():
+    invarianza_idraulica.unregister()
     ifc_spaces.unregister()
     daylight_ventilation.unregister()
     urban_parameters.unregister()

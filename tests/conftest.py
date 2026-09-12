@@ -36,5 +36,7 @@ _stub_package("daylight_ventilation.core", os.path.join(_REPO_ROOT, "daylight_ve
 _stub_package("ifc_cleanup", os.path.join(_REPO_ROOT, "ifc_cleanup"))
 _stub_package("ifc_spaces", os.path.join(_REPO_ROOT, "ifc_spaces"))
 _stub_package("ifc_spaces.core", os.path.join(_REPO_ROOT, "ifc_spaces", "core"))
+_stub_package("invarianza_idraulica", os.path.join(_REPO_ROOT, "invarianza_idraulica"))
+_stub_package("invarianza_idraulica.core", os.path.join(_REPO_ROOT, "invarianza_idraulica", "core"))
 _stub_package("sheets_to_pdf", os.path.join(_REPO_ROOT, "sheets_to_pdf"))
 _stub_package("sheets_to_pdf.core", os.path.join(_REPO_ROOT, "sheets_to_pdf", "core"))
