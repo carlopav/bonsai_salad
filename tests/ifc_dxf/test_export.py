@@ -700,6 +700,107 @@ def test_fallback_dimstyle_is_annotative(tmp_path):
     doc.classes.get("ACDB_ALDIMOBJECTCONTEXTDATA_CLASS")
 
 
+def _add_extruded_pipe(ifc, direction, name="TestPipe",
+                       location=(1.0, 1.0, 0.0), radius=0.04,
+                       thickness=0.001, depth=2.5):
+    """Add an IfcPipeSegment: hollow circle profile extruded along `direction`."""
+    body_ctx = next(c for c in ifc.by_type("IfcGeometricRepresentationSubContext")
+                    if c.ContextIdentifier == "Body" and c.ContextType == "Model")
+    storey = ifc.by_type("IfcBuildingStorey")[0]
+
+    def pt(*c):
+        return ifc.createIfcCartesianPoint([float(v) for v in c])
+
+    def dr(*c):
+        return ifc.createIfcDirection([float(v) for v in c])
+
+    solid = ifc.createIfcExtrudedAreaSolid(
+        ifc.createIfcCircleHollowProfileDef("AREA", "PIPE_TEST", None,
+                                            radius, thickness),
+        ifc.createIfcAxis2Placement3D(pt(0, 0, 0), dr(0, 0, 1), dr(1, 0, 0)),
+        dr(*direction), depth,
+    )
+    pipe = ifc.createIfcPipeSegment(
+        ifcopenshell.guid.new(), None, name, None, None,
+        ifc.createIfcLocalPlacement(
+            storey.ObjectPlacement,
+            ifc.createIfcAxis2Placement3D(pt(*location), dr(0, 0, 1), dr(1, 0, 0))),
+        ifc.createIfcProductDefinitionShape(
+            None, None,
+            [ifc.createIfcShapeRepresentation(body_ctx, "Body", "SweptSolid", [solid])]),
+        None, None,
+    )
+    rel = ifc.by_type("IfcRelContainedInSpatialStructure")[0]
+    rel.RelatedElements = list(rel.RelatedElements) + [pipe]
+    return pipe
+
+
+class TestExtrudedCircularProfile:
+    """A circular profile extruded along the view axis is a circle in plan.
+
+    Tessellating it instead costs a Ø80 pipe two 52-vertex polylines that trace
+    the same 26-gon twice -- visibly faceted, and not a circle to snap to. The
+    authored profile is the shape; the mesh is only a fallback.
+    """
+
+    PLACEMENT = (1.0, 1.0, 0.0)
+
+    def _export(self, tmp_path, direction):
+        """Export the fixture with one pipe added; also return where the pipe's
+        placement lands in drawing coordinates (the camera has its own origin)."""
+        import numpy as np
+        from ifc_dxf.core.camera import camera_matrix_inv_col_major
+
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        pipe = _add_extruded_pipe(ifc, direction, location=self.PLACEMENT)
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / "pipe.dxf")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing(ifc, drawing, pset, out, wall_mode="shapely", template_path=tpl)
+
+        cam_inv = np.array(camera_matrix_inv_col_major(drawing)).reshape(4, 4, order="F")
+        expected = cam_inv @ np.array([*self.PLACEMENT, 1.0])
+        return ezdxf.readfile(out), pipe.GlobalId, (expected[0], expected[1])
+
+    @staticmethod
+    def _entities_of(doc, gid):
+        from ezdxf.lldxf.const import DXFValueError
+
+        found = []
+        for e in doc.modelspace():
+            try:
+                tags = e.get_xdata("IFC_DXF")
+            except DXFValueError:
+                continue
+            if gid in [t.value for t in tags if t.code == 1000][1:]:
+                found.append(e)
+        return found
+
+    def test_vertical_pipe_exports_as_circles(self, tmp_path):
+        """Outer and inner wall of the pipe, as native CIRCLE entities."""
+        doc, gid, (cx, cy) = self._export(tmp_path, (0.0, 0.0, 1.0))
+        entities = self._entities_of(doc, gid)
+        assert entities, "the pipe is missing from the export"
+        assert {e.dxftype() for e in entities} == {"CIRCLE"}, \
+            f"pipe exported as {sorted(e.dxftype() for e in entities)}"
+
+        radii = sorted(round(e.dxf.radius, 6) for e in entities)
+        assert radii == [0.039, 0.04], f"radii {radii} are not the profile's"
+        for e in entities:
+            assert abs(e.dxf.center.x - cx) < 1e-6 and abs(e.dxf.center.y - cy) < 1e-6, \
+                f"circle at {e.dxf.center}, not at the pipe's placement ({cx}, {cy})"
+
+    def test_pipe_across_the_view_keeps_the_tessellation(self, tmp_path):
+        """The profile is the plan shape only when it faces the viewer. Extruded
+        across the view the pipe reads as a rectangle, which the profile cannot
+        describe -- so that case must stay on the mesh fallback."""
+        doc, gid, _ = self._export(tmp_path, (1.0, 0.0, 0.0))
+        entities = self._entities_of(doc, gid)
+        assert entities, "the pipe is missing from the export"
+        assert "CIRCLE" not in {e.dxftype() for e in entities}, \
+            "a pipe extruded across the view was drawn as its profile"
+
+
 class TestCase01BasicPlan:
     """test_ifc_01.ifc — basic 1:100 plan: walls, door, window, slab, furniture."""
 

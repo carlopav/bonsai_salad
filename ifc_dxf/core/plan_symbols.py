@@ -97,8 +97,10 @@ def _extract_block_geom(element, plan_repr, crease_angle_deg, cam_R, cam_rot_deg
     cam_R; the element's world placement is applied later by an INSERT (block
     path) or by _append_direct (direct path).
     """
+    # cam_R maps world to camera, so its third row is the view axis in world
+    # coords -- what tells a profile facing the viewer from one seen edge-on.
     verts, edges, arcs, circles, ellipses = _extract_local_curves(
-        element, plan_repr, crease_angle_deg
+        element, plan_repr, crease_angle_deg, view_axis=np.asarray(cam_R)[2, :]
     )
     if not (verts or edges or arcs or circles or ellipses):
         return None

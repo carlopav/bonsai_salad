@@ -14,6 +14,8 @@ import math
 import numpy as np
 import ifcopenshell.geom
 
+from .camera import world_matrix_col_major
+
 
 # ---------------------------------------------------------------------------
 # IFC curve extraction helpers
@@ -544,18 +546,97 @@ def _extract_curves_from_items(items, mapping_target=None):
     return verts, edges, arcs, circles, ellipses
 
 
-def _extract_local_curves(element, plan_repr, crease_angle_deg=15.0):
+def _placement3d_axes(placement):
+    """Return (origin, x_axis, y_axis, z_axis) of an IfcAxis2Placement3D."""
+    origin = np.zeros(3)
+    za = np.array([0.0, 0.0, 1.0])
+    xa = np.array([1.0, 0.0, 0.0])
+    if placement is not None:
+        c = placement.Location.Coordinates
+        origin = np.array([float(c[0]), float(c[1]),
+                           float(c[2]) if len(c) > 2 else 0.0])
+        if placement.Axis is not None:
+            r = placement.Axis.DirectionRatios
+            za = np.array([float(r[0]), float(r[1]), float(r[2])])
+        if placement.RefDirection is not None:
+            r = placement.RefDirection.DirectionRatios
+            xa = np.array([float(r[0]), float(r[1]),
+                           float(r[2]) if len(r) > 2 else 0.0])
+    za = za / np.linalg.norm(za)
+    xa = xa - np.dot(xa, za) * za          # Gram-Schmidt, as IFC prescribes
+    xa = xa / np.linalg.norm(xa)
+    return origin, xa, np.cross(za, xa), za
+
+
+def _extruded_circle_specs(items, element, view_axis, tol_deg=2.0):
+    """Circles for circular profiles extruded straight at the viewer.
+
+    An extrusion seen end-on draws its own profile, so a circular one is a
+    DXF CIRCLE -- exact, one entity, and something the CAD can snap to. Left to
+    the mesh fallback it comes back tessellated: a DN80 pipe becomes a 26-gon
+    traced twice (both end rings project onto each other).
+
+    Any other orientation draws a silhouette the profile cannot describe, so it
+    is refused. Both frames must agree: the extrusion is along the element's
+    local Z (which is what places the profile in the drawing plane here) and,
+    in world space, along the view axis.
+    """
+    axis = np.asarray(view_axis, dtype=float)
+    axis = axis / np.linalg.norm(axis)
+    rot = np.array(world_matrix_col_major(element),
+                   dtype=float).reshape(4, 4, order="F")[:3, :3]
+    cos_tol = math.cos(math.radians(tol_deg))
+
+    circles = []
+    for item in items:
+        if not item.is_a("IfcExtrudedAreaSolid"):
+            continue
+        profile = item.SweptArea
+        if not profile.is_a("IfcCircleProfileDef"):   # incl. IfcCircleHollowProfileDef
+            continue
+
+        origin, xa, ya, za = _placement3d_axes(item.Position)
+        d = item.ExtrudedDirection.DirectionRatios
+        local_dir = xa * float(d[0]) + ya * float(d[1]) + za * float(d[2])
+        local_dir = local_dir / np.linalg.norm(local_dir)
+        if abs(local_dir[2]) < cos_tol:               # not along local Z
+            return []
+        world_dir = rot @ local_dir
+        world_dir = world_dir / np.linalg.norm(world_dir)
+        if abs(float(np.dot(world_dir, axis))) < cos_tol:
+            return []                                 # not facing the viewer
+
+        centre = origin
+        if profile.Position is not None:
+            c = profile.Position.Location.Coordinates
+            centre = origin + xa * float(c[0]) + ya * float(c[1])
+
+        radius = float(profile.Radius)
+        circles.append((float(centre[0]), float(centre[1]), radius))
+        thickness = float(getattr(profile, "WallThickness", 0.0) or 0.0)
+        if 0.0 < thickness < radius:
+            circles.append((float(centre[0]), float(centre[1]), radius - thickness))
+    return circles
+
+
+def _extract_local_curves(element, plan_repr, crease_angle_deg=15.0, view_axis=None):
     """Extract plan curves in element-local coords.
 
     Returns (verts_flat, edges_flat, arcs, circles, ellipses).
-    Tries manual item walking first; falls back to ifcopenshell geometry engine
-    (which produces tessellated lines only, no arc/circle/ellipse specs).
+    Tries manual item walking first, then -- when the caller supplies the view
+    axis -- circular profiles extruded at the viewer, and finally falls back to
+    the ifcopenshell geometry engine (tessellated lines only, no curve specs).
     """
     items = plan_repr.Items
     if items:
         v, e, arcs, circles, ellipses = _extract_curves_from_items(list(items))
         if v or e or arcs or circles or ellipses:
             return v, e, arcs, circles, ellipses
+
+    if items and view_axis is not None:
+        circles = _extruded_circle_specs(list(items), element, view_axis)
+        if circles:
+            return [], [], [], circles, []
 
     # Fallback: ifcopenshell geometry engine with the specific context
     ctx_id = plan_repr.ContextOfItems.id()
