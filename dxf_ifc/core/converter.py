@@ -10,6 +10,8 @@ import math
 from typing import Optional
 
 import ifcopenshell
+import ifcopenshell.util.unit
+from ezdxf.math import bulge_to_arc as _ezdxf_bulge_to_arc
 
 
 # ---------------------------------------------------------------------------
@@ -26,28 +28,67 @@ def _axis2d(model: ifcopenshell.file, cx: float, cy: float, scale: float = 1.0):
     )
 
 
+def _trim_point(model: ifcopenshell.file, cx: float, cy: float, r: float,
+                angle: float, scale: float = 1.0):
+    """The point at *angle* (radians) on the circle (cx, cy, r), for a CARTESIAN trim."""
+    return _pt2(model, cx + r * math.cos(angle), cy + r * math.sin(angle), scale)
+
+
+def angle_unit_scale(model: ifcopenshell.file) -> float:
+    """
+    Radians -> the model's plane angle unit, for IfcParameterValue trims.
+
+    IfcTrimmedCurve parameters on a conic are angles expressed in the project's
+    PLANEANGLEUNIT, so writing degrees into a radian model sweeps the arc well
+    past where it should stop. A model declaring no plane angle unit is read as
+    radians. These parameters are written alongside CARTESIAN trim points but
+    are not what IfcOpenShell reads: see the note on MasterRepresentation.
+    """
+    try:
+        unit = ifcopenshell.util.unit.get_project_unit(model, "PLANEANGLEUNIT")
+    except Exception:
+        return 1.0
+    if unit is None:
+        return 1.0
+    if unit.is_a("IfcConversionBasedUnit"):
+        try:
+            # ConversionFactor is radians per one of these units.
+            factor = float(unit.ConversionFactor.ValueComponent.wrappedValue)
+        except Exception:
+            return 1.0
+        return 1.0 / factor if factor else 1.0
+    prefix = getattr(unit, "Prefix", None)
+    if prefix:
+        try:
+            return 1.0 / ifcopenshell.util.unit.get_prefix_multiplier(prefix)
+        except Exception:
+            return 1.0
+    return 1.0
+
+
 # ---------------------------------------------------------------------------
 # Bulge → arc helper
 # ---------------------------------------------------------------------------
 
 def bulge_to_arc(p1: tuple, p2: tuple, bulge: float) -> tuple:
-    """Return (center_xy, radius, start_angle_rad, end_angle_rad)."""
-    d = math.dist(p1, p2)
-    r = d * (1 + bulge ** 2) / (4 * abs(bulge))
-    alpha = 2 * math.atan(bulge)
-    mid_angle = math.atan2(p2[1] - p1[1], p2[0] - p1[0]) - math.pi / 2
-    cx = (p1[0] + p2[0]) / 2 - r * math.cos(mid_angle) * math.copysign(1, bulge)
-    cy = (p1[1] + p2[1]) / 2 - r * math.sin(mid_angle) * math.copysign(1, bulge)
-    start = math.atan2(p1[1] - cy, p1[0] - cx)
-    end = math.atan2(p2[1] - cy, p2[0] - cx)
-    return (cx, cy), r, start, end
+    """
+    Return (center_xy, radius, start_angle_rad, end_angle_rad) for a DXF bulge.
+
+    Delegates to ezdxf rather than deriving the centre here: the centre sits on
+    the chord's perpendicular bisector at the apothem sqrt(r^2 - (d/2)^2), not at
+    r, and the side it falls on depends on whether |bulge| > 1 (a major arc).
+    ezdxf always hands back a counter-clockwise arc, swapping the angles for a
+    negative bulge instead of reversing direction.
+    """
+    center, start, end, radius = _ezdxf_bulge_to_arc(p1, p2, bulge)
+    return (center.x, center.y), radius, start, end
 
 
 # ---------------------------------------------------------------------------
 # Entity converters
 # ---------------------------------------------------------------------------
 
-def _line_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _line_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     p1 = entity.dxf.start
     p2 = entity.dxf.end
     return model.createIfcPolyline([
@@ -56,7 +97,7 @@ def _line_to_ifc(model: ifcopenshell.file, entity, scale: float):
     ])
 
 
-def _lwpolyline_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _lwpolyline_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     """LWPOLYLINE → list of IfcPolyline / IfcTrimmedCurve items."""
     points = list(entity.get_points("xyb"))
     if not points:
@@ -84,14 +125,15 @@ def _lwpolyline_to_ifc(model: ifcopenshell.file, entity, scale: float):
                 Position=_axis2d(model, cx, cy, scale),
                 Radius=r * scale,
             )
-            t1 = model.createIfcParameterValue(math.degrees(start))
-            t2 = model.createIfcParameterValue(math.degrees(end))
             items.append(model.createIfcTrimmedCurve(
                 BasisCurve=circle,
-                Trim1=[t1],
-                Trim2=[t2],
-                SenseAgreement=bulge > 0,
-                MasterRepresentation="PARAMETER",
+                Trim1=[model.createIfcParameterValue(start * angle_scale),
+                       _trim_point(model, cx, cy, r, start, scale)],
+                Trim2=[model.createIfcParameterValue(end * angle_scale),
+                       _trim_point(model, cx, cy, r, end, scale)],
+                # bulge_to_arc already normalises to a counter-clockwise arc.
+                SenseAgreement=True,
+                MasterRepresentation="CARTESIAN",
             ))
 
     if not items:
@@ -102,14 +144,14 @@ def _lwpolyline_to_ifc(model: ifcopenshell.file, entity, scale: float):
     return model.createIfcGeometricCurveSet(Elements=items)
 
 
-def _polyline_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _polyline_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     pts = [v.dxf.location for v in entity.vertices]
     if len(pts) < 2:
         return None
     return model.createIfcPolyline([_pt2(model, p.x, p.y, scale) for p in pts])
 
 
-def _arc_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _arc_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     c = entity.dxf.center
     r = entity.dxf.radius * scale
     start_deg = entity.dxf.start_angle
@@ -118,16 +160,23 @@ def _arc_to_ifc(model: ifcopenshell.file, entity, scale: float):
         Position=_axis2d(model, c.x, c.y, scale),
         Radius=r,
     )
+    start, end = math.radians(start_deg), math.radians(end_deg)
+    # Trimmed by points, not by parameter: a project that declares no
+    # PLANEANGLEUNIT (Bonsai does not add one) makes IfcOpenShell take the
+    # complementary arc from parameter trims, turning a 60 degree swing into
+    # 300. The angles ride along for readers that prefer PARAMETER.
     return model.createIfcTrimmedCurve(
         BasisCurve=circle,
-        Trim1=[model.createIfcParameterValue(start_deg)],
-        Trim2=[model.createIfcParameterValue(end_deg)],
+        Trim1=[model.createIfcParameterValue(start * angle_scale),
+               _trim_point(model, c.x, c.y, entity.dxf.radius, start, scale)],
+        Trim2=[model.createIfcParameterValue(end * angle_scale),
+               _trim_point(model, c.x, c.y, entity.dxf.radius, end, scale)],
         SenseAgreement=True,
-        MasterRepresentation="PARAMETER",
+        MasterRepresentation="CARTESIAN",
     )
 
 
-def _circle_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _circle_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     c = entity.dxf.center
     r = entity.dxf.radius * scale
     return model.createIfcCircle(
@@ -136,7 +185,7 @@ def _circle_to_ifc(model: ifcopenshell.file, entity, scale: float):
     )
 
 
-def _ellipse_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _ellipse_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     c = entity.dxf.center
     major = entity.dxf.major_axis
     semi_major = math.sqrt(major.x ** 2 + major.y ** 2) * scale
@@ -154,7 +203,7 @@ def _ellipse_to_ifc(model: ifcopenshell.file, entity, scale: float):
     )
 
 
-def _spline_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _spline_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     """Approximate spline as polyline from control points."""
     try:
         pts = list(entity.control_points)
@@ -165,7 +214,7 @@ def _spline_to_ifc(model: ifcopenshell.file, entity, scale: float):
     return model.createIfcPolyline([_pt2(model, p[0], p[1], scale) for p in pts])
 
 
-def _hatch_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _hatch_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     """Extract boundary loops of a HATCH as IfcPolyline items."""
     items = []
     try:
@@ -192,7 +241,7 @@ def _hatch_to_ifc(model: ifcopenshell.file, entity, scale: float):
     return model.createIfcGeometricCurveSet(Elements=items)
 
 
-def _text_to_ifc(model: ifcopenshell.file, entity, scale: float):
+def _text_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
     try:
         text = entity.dxf.text
         insert = entity.dxf.insert
@@ -230,6 +279,7 @@ def dxf_entity_to_ifc(
     model: ifcopenshell.file,
     entity,
     scale: float = 1.0,
+    angle_scale: float = 1.0,
 ) -> Optional[object]:
     """Convert a single ezdxf entity to an IFC geometry item, or None if unsupported."""
     dxftype = entity.dxftype()
@@ -237,7 +287,7 @@ def dxf_entity_to_ifc(
     if converter is None:
         return None
     try:
-        return converter(model, entity, scale)
+        return converter(model, entity, scale, angle_scale)
     except Exception:
         return None
 
@@ -251,9 +301,10 @@ def block_to_representation_map(
     block_def,
     subcontext,
     scale: float = 1.0,
+    angle_scale: float = 1.0,
 ):
     """Convert a DXF block definition to IfcRepresentationMap."""
-    items = [dxf_entity_to_ifc(model, e, scale) for e in block_def]
+    items = [dxf_entity_to_ifc(model, e, scale, angle_scale) for e in block_def]
     items = [i for i in items if i is not None]
     if not items:
         return None

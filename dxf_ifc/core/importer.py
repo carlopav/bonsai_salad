@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Optional
 
 import ezdxf
+from ezdxf.upright import upright
 import ifcopenshell
 import ifcopenshell.api
 import ifcopenshell.util.representation
+import ifcopenshell.util.unit
 
-from .converter import dxf_entity_to_ifc
+from .converter import angle_unit_scale, dxf_entity_to_ifc
 from .styles import (
     layer_colour,
     lineweight_to_mm,
@@ -115,7 +117,11 @@ def import_dxf_as_representation(
     """
     dxf_path = Path(dxf_path)
     doc = ezdxf.readfile(str(dxf_path))
-    scale = _dxf_scale(doc)
+    # _dxf_scale gives metres per DXF unit; the IFC stores lengths in the
+    # project's own unit, so divide that out or a mm project lands 1000x small.
+    project_scale = ifcopenshell.util.unit.calculate_unit_scale(model) or 1.0
+    scale = _dxf_scale(doc) / project_scale
+    angle_scale = angle_unit_scale(model)
 
     if source_block:
         if source_block not in doc.blocks:
@@ -142,6 +148,11 @@ def import_dxf_as_representation(
         if entity.dxftype() == "INSERT":
             # Expand block to world-space entities via ezdxf
             for virtual in entity.virtual_entities():
+                # A mirrored INSERT (negative scale) expands into entities whose
+                # coordinates are given in an inverted OCS, extrusion (0, 0, -1).
+                # Read raw they land mirrored about the Y axis, so flip them
+                # upright first. Other extrusions are left alone by ezdxf.
+                upright(virtual)
                 layer_name = virtual.dxf.layer
                 if layer_name in _skip:
                     continue
@@ -149,6 +160,7 @@ def import_dxf_as_representation(
                     continue
                 layer_entities[layer_name].append(virtual)
         else:
+            upright(entity)
             layer_name = entity.dxf.layer
             if layer_name in _skip:
                 continue
@@ -162,7 +174,7 @@ def import_dxf_as_representation(
     for layer_name, entities in layer_entities.items():
         ifc_items = []
         for entity in entities:
-            item = dxf_entity_to_ifc(model, entity, scale)
+            item = dxf_entity_to_ifc(model, entity, scale, angle_scale)
             if item is None:
                 continue
             if item.is_a("IfcGeometricCurveSet"):
@@ -190,14 +202,15 @@ def import_dxf_as_representation(
                 pass
 
         font = linetype_to_ifc_font(model, linetype_name)
-        lw_mm = lineweight_to_mm(lineweight_raw)
+        # lineweight_to_mm returns mm; CurveWidth is a length in project units.
+        lw = lineweight_to_mm(lineweight_raw) * 1e-3 / project_scale
         colour = layer_colour(model, dxf_layer) if dxf_layer else model.createIfcColourRgb(None, 1.0, 1.0, 1.0)
 
         curve_style = model.createIfcCurveStyle(
             Name=layer_name,
             CurveFont=font,
             CurveColour=colour,
-            CurveWidth=model.createIfcPositiveLengthMeasure(lw_mm) if lw_mm else None,
+            CurveWidth=model.createIfcPositiveLengthMeasure(lw) if lw else None,
         )
 
         model.createIfcPresentationLayerWithStyle(
