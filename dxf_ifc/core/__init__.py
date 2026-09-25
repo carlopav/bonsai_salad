@@ -2,6 +2,16 @@
 # Copyright (C) 2026 Carlo Pavan <carlopav@gmail.com>
 # GPL-3.0
 
-from .importer import import_dxf_as_representation, get_or_create_subcontext
+from . import mapping
+from .importer import (
+    get_or_create_subcontext,
+    import_dxf_as_elements,
+    import_dxf_as_representation,
+)
 
-__all__ = ["import_dxf_as_representation", "get_or_create_subcontext"]
+__all__ = [
+    "get_or_create_subcontext",
+    "import_dxf_as_elements",
+    "import_dxf_as_representation",
+    "mapping",
+]

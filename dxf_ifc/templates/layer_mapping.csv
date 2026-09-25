@@ -1,0 +1,93 @@
+# dxf_ifc layer mapping — starting template
+#
+# One IFC element is created per DXF layer, carrying that layer's linework as a
+# Plan/Annotation/PLAN_VIEW representation. Copy this file next to your DXF and
+# edit it; the panel can also generate one pre-filled with the layers actually
+# found in a drawing.
+#
+# dxf_layer        layer name, or an fnmatch pattern (* ? [abc]). Exact names
+#                  beat patterns, and patterns are tried top to bottom, so keep
+#                  the specific rows above the general ones.
+# ifc_class        e.g. IfcWall, IfcColumn, IfcFurniture. Must be a class the
+#                  project's schema can instantiate.
+# predefined_type  optional, e.g. SOLIDWALL. Leave blank if unsure.
+# name             optional element name; defaults to the layer name.
+#
+# Layers with no row at all become IfcBuildingElementProxy.
+#
+# Ordered after the AIA convention D-MJRM-MINR-STAT: discipline, major group,
+# minor group, status. The minor group often overrides the major one, so the
+# tag and pattern rows come first — A-WALL-IDEN is wall tags, not a wall.
+dxf_layer,ifc_class,predefined_type,name
+#
+# --- 1. tags, dimensions, hatching: drawing, whatever they label -----------
+*IDEN*,IfcAnnotation,,
+*IDEC*,IfcAnnotation,,
+*ANNO*,IfcAnnotation,,
+*PATT*,IfcAnnotation,,
+*TEXT*,IfcAnnotation,,
+*text*,IfcAnnotation,,
+*DIMS*,IfcAnnotation,,
+*NOTE*,IfcAnnotation,,
+*KEYN*,IfcAnnotation,,
+*TTLB*,IfcAnnotation,,
+*SYMB*,IfcAnnotation,,
+*HATCH*,IfcAnnotation,,
+#
+# --- 2. details, elevations, sections: drafted linework throughout ---------
+A-DETL*,IfcAnnotation,,
+A-ELEV*,IfcAnnotation,,
+A-SECT*,IfcAnnotation,,
+#
+# --- 3. minor groups that mean something else than their major group -------
+A-CLNG-LITE*,IfcLightFixture,,
+A-CLNG-HVAC*,IfcAirTerminal,,
+A-CLNG-FIRE*,IfcFireSuppressionTerminal,,
+A-CLNG-GRID*,IfcCovering,CEILING,
+A-GLAZ-MULL*,IfcMember,MULLION,
+A-GLAZ-SILL*,IfcMember,,
+A-FLOR-LEVL*,IfcSlab,FLOOR,
+A-FLOR-STRS*,IfcStair,,
+A-FLOR-HRAL*,IfcRailing,HANDRAIL,
+A-FLOR-GRAL*,IfcRailing,GUARDRAIL,
+A-FLOR-TPTN*,IfcWall,PARTITIONING,
+A-FLOR-EVTR*,IfcTransportElement,,
+A-FLOR-FIN*,IfcCovering,FLOORING,
+#
+# --- 4. exact layer names from this office's drawings ----------------------
+WALL-EXST,IfcWall,,Existing wall
+WALL-CORE,IfcWall,,Core wall
+WALL-BASE,IfcWall,,Base building wall
+COL,IfcColumn,,
+GRID,IfcAnnotation,,
+Cabinets,IfcFurniture,,Casework
+#
+# --- 5. major groups -------------------------------------------------------
+A-CURTWALL*,IfcCurtainWall,,
+A-WALL*,IfcWall,,
+A-GLAZ*,IfcWindow,,
+A-DOOR*,IfcDoor,,
+A-CASE*,IfcFurniture,,
+A-CLNG*,IfcCovering,CEILING,
+A-FLOR*,IfcSlab,FLOOR,
+A-ROOF*,IfcRoof,,
+A-COLS*,IfcColumn,,
+A-FURN*,IfcFurniture,,
+A-EQPM*,IfcSystemFurnitureElement,,
+A-AREA*,IfcSpace,,
+A-ROOM*,IfcSpace,,
+S-BEAM*,IfcBeam,,
+S-COLS*,IfcColumn,,
+S-SLAB*,IfcSlab,,
+S-FNDN*,IfcFooting,,
+S-GRID*,IfcAnnotation,,
+P-SANR*,IfcSanitaryTerminal,,
+P-DOMW*,IfcPipeSegment,,
+M-HVAC-DUCT*,IfcDuctSegment,,
+M-HVAC*,IfcDuctFitting,,
+E-LITE*,IfcLightFixture,,
+E-POWR*,IfcElectricAppliance,,
+G-ANNO*,IfcAnnotation,,
+#
+# --- 6. everything else ----------------------------------------------------
+*,IfcBuildingElementProxy,,

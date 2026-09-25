@@ -20,5 +20,14 @@ class DxfIfcPanel(bpy.types.Panel):
         layout = self.layout
         layout.operator("bim.import_dxf_as_representation", icon="IMPORT")
 
+        # The mapping CSV is picked here, not in the import dialog: that dialog is
+        # itself a file browser, and Blender allows only one open at a time.
+        box = layout.box()
+        box.label(text="Elements by layer", icon="OUTLINER")
+        props = getattr(context.scene, "dxf_ifc", None)
+        if props is not None:
+            box.prop(props, "mapping_filepath", text="")
+        box.operator("bim.write_dxf_layer_mapping", icon="FILE_TEXT")
+
 
 classes = [DxfIfcPanel]
