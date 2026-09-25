@@ -186,32 +186,86 @@ def _circle_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: 
 
 
 def _ellipse_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
+    """
+    ELLIPSE -> IfcEllipse, trimmed when the DXF says it is an elliptical arc.
+
+    Nearly every ELLIPSE in the wild is partial. Drawing one untrimmed replaces
+    a sliver with the whole ellipse, which for a shallow curve means a figure
+    hundreds of times the size of the thing it was part of.
+    """
     c = entity.dxf.center
     major = entity.dxf.major_axis
-    semi_major = math.sqrt(major.x ** 2 + major.y ** 2) * scale
-    semi_minor = semi_major * entity.dxf.ratio
-    angle = math.degrees(math.atan2(major.y, major.x))
-    ref_dir = model.createIfcDirection([math.cos(math.radians(angle)), math.sin(math.radians(angle))])
-    placement = model.createIfcAxis2Placement2D(
-        Location=_pt2(model, c.x, c.y, scale),
-        RefDirection=ref_dir,
+    a = math.hypot(major.x, major.y)
+    if a <= 0:
+        return None
+    b = a * entity.dxf.ratio
+    ux, uy = major.x / a, major.y / a
+    # The minor axis is the major one turned a quarter turn.
+    vx, vy = -uy, ux
+
+    ellipse = model.createIfcEllipse(
+        Position=model.createIfcAxis2Placement2D(
+            Location=_pt2(model, c.x, c.y, scale),
+            RefDirection=model.createIfcDirection([ux, uy]),
+        ),
+        SemiAxis1=a * scale,
+        SemiAxis2=b * scale,
     )
-    return model.createIfcEllipse(
-        Position=placement,
-        SemiAxis1=semi_major,
-        SemiAxis2=semi_minor,
+
+    start = float(getattr(entity.dxf, "start_param", 0.0) or 0.0)
+    end = float(getattr(entity.dxf, "end_param", math.tau) or 0.0)
+    if abs(start) < 1e-9 and abs(end - math.tau) < 1e-9:
+        return ellipse  # a genuine full ellipse
+
+    def point_at(t: float):
+        # DXF start/end_param are the parametric angle, not the polar angle.
+        return _pt2(model,
+                    c.x + a * math.cos(t) * ux + b * math.sin(t) * vx,
+                    c.y + a * math.cos(t) * uy + b * math.sin(t) * vy,
+                    scale)
+
+    return model.createIfcTrimmedCurve(
+        BasisCurve=ellipse,
+        Trim1=[model.createIfcParameterValue(start * angle_scale), point_at(start)],
+        Trim2=[model.createIfcParameterValue(end * angle_scale), point_at(end)],
+        SenseAgreement=True,
+        MasterRepresentation="CARTESIAN",
     )
+
+
+def _spline_tolerance(entity) -> float:
+    """Flattening tolerance in drawing units: a fraction of the spline's size."""
+    try:
+        pts = [(p[0], p[1]) for p in entity.control_points]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        diagonal = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    except Exception:
+        return 0.01
+    return max(diagonal * 0.002, 1e-9)
 
 
 def _spline_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
-    """Approximate spline as polyline from control points."""
+    """
+    Approximate a spline as a polyline along the curve itself.
+
+    The control points are a hull the curve is pulled towards, not points on it,
+    so joining them up draws a different shape. ezdxf evaluates the real curve
+    to a tolerance instead; the control points remain a last resort.
+    """
+    pts = []
     try:
-        pts = list(entity.control_points)
+        pts = [(p.x, p.y) for p in entity.flattening(_spline_tolerance(entity))]
     except Exception:
-        return None
+        pts = []
+    if len(pts) < 2:
+        try:
+            pts = [(p[0], p[1]) for p in entity.control_points]
+        except Exception:
+            return None
     if len(pts) < 2:
         return None
-    return model.createIfcPolyline([_pt2(model, p[0], p[1], scale) for p in pts])
+    return model.createIfcPolyline([_pt2(model, x, y, scale) for x, y in pts])
 
 
 def _hatch_to_ifc(model: ifcopenshell.file, entity, scale: float, angle_scale: float = 1.0):
