@@ -4,6 +4,55 @@ This repo contains a collection of random scripts that help me with my everyday 
 The scripts are developed with the support of Claude Code.
 I Share them in the hope they can be useful and that they will be integrated into IfcOpenShell in the future.
 
+## Install
+An add-on for Blender 4.2 or newer, on top of Bonsai: every tool here talks to the model through `bonsai.tool` and `ifcopenshell`, so install and enable Bonsai first.
+
+Blender installs the add-on from a zip holding a single folder named `bonsai_salad`, the one with `__init__.py` in it — that folder name becomes the module name, so the `bonsai_salad-main` GitHub's *Download ZIP* gives you has to be renamed before zipping it back. Cloning avoids the round trip:
+
+```
+git clone https://github.com/carlopav/bonsai_salad.git
+zip -r bonsai_salad.zip bonsai_salad -x "*.git*" "*__pycache__*"
+```
+
+Then Edit > Preferences > Add-ons > the dropdown on the right > *Install from Disk...*, pick the zip, and tick *Bonsai Salad*.
+
+The panel is in the 3D view sidebar (N) under *Bonsai Salad*; the tools that write schedules live under Bonsai's Schedules panel instead.
+
+### From a clone, without the zip
+To follow the repo rather than a snapshot of it, link the clone into Blender's add-ons directory instead of installing a zip: Blender reads the working tree as it stands, so a `git pull` or a branch switch is all it takes to change what loads — the branch you have checked out is the one that runs.
+
+The directory is next to the other per-version Blender settings, `<version>` being the one you are installing into, `5.2` and so on:
+
+- Windows: `%APPDATA%\Blender Foundation\Blender\<version>\scripts\addons\`
+- macOS: `~/Library/Application Support/Blender/<version>/scripts/addons/`
+- Linux: `~/.config/blender/<version>/scripts/addons/`
+
+The link has to be named `bonsai_salad`, whatever the clone is called on disk, since the name is the module name. On macOS and Linux a symlink does it:
+
+```
+ln -s ~/src/bonsai_salad ~/.config/blender/5.2/scripts/addons/bonsai_salad
+```
+
+On Windows use a junction rather than a symlink — `mklink /D` wants administrator rights or Developer Mode, `mklink /J` wants neither, and works across drives just as well:
+
+```
+mklink /J "%APPDATA%\Blender Foundation\Blender\5.2\scripts\addons\bonsai_salad" "D:\src\bonsai_salad"
+```
+
+Enable it as above; the add-ons list shows it tagged *Legacy*, this being a `bl_info` add-on and not an extension. Edits to the code land on the next Blender restart. Should the clone's `__pycache__/` have been written by another python, delete it if imports start failing.
+
+To undo the link, remove the link itself and not what it points at. On Windows that means `rmdir`, never a recursive delete: PowerShell's `Remove-Item -Recurse` follows a junction and empties the repo behind it.
+
+```
+cmd /c rmdir "%APPDATA%\Blender Foundation\Blender\5.2\scripts\addons\bonsai_salad"
+```
+
+Some tools need a package Bonsai does not bring: `ezdxf` for ifc_dxf and dxf_ifc, `odfpy` for the ODS schedules, `Pillow` for the rasters ifc_dxf reads, `typst` for sheets_to_pdf. A missing one stops its own tool, not the add-on. Install them into Blender's python, e.g. on Windows
+
+```
+"C:\Program Files\Blender Foundation\Blender 4.2\4.2\python\bin\python.exe" -m pip install ezdxf odfpy
+```
+
 ## License
 Gpl 3.
 
