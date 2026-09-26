@@ -4,11 +4,14 @@
 #
 # Thin Blender wrapper: reads bpy context, calls dxf_ifc.core functions.
 
+import collections
+
 import bpy
 
 from bonsai import tool
 
-from .core import import_dxf_as_representation, get_or_create_subcontext
+from .core import import_dxf_as_elements, import_dxf_as_representation, get_or_create_subcontext
+from .core import mapping as layer_mapping
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +41,80 @@ def _create_annotation_object(context, name: str, object_type: str = "LINEWORK")
     # Products need an ObjectPlacement before they carry a representation.
     core_geometry.edit_object_placement(tool.Ifc, tool.Geometry, tool.Surveyor, obj=obj)
     return obj, element
+
+
+def _create_mapped_object(context, name: str, ifc_class: str, predefined_type=None):
+    """
+    Create a Blender object linked to a new IFC element of *ifc_class*.
+
+    Returns (obj, element), or (None, None) if the class cannot be created in
+    this project's schema.
+    """
+    import bonsai.core.geometry as core_geometry
+    import bonsai.core.root as core_root
+
+    ifc = tool.Ifc.get()
+    if not layer_mapping.is_valid_class(ifc, ifc_class):
+        return None, None
+
+    obj = bpy.data.objects.new(name, bpy.data.meshes.new(name))
+    context.scene.collection.objects.link(obj)
+    try:
+        element = core_root.assign_class(
+            tool.Ifc,
+            tool.Collector,
+            tool.Root,
+            obj=obj,
+            ifc_class=ifc_class,
+            predefined_type=predefined_type or None,
+            should_add_representation=False,
+        )
+    except Exception:
+        # A class Bonsai will not assign (or a predefined type it rejects):
+        # drop the half-made object rather than leave it in the scene.
+        bpy.data.objects.remove(obj)
+        return None, None
+    # Products need an ObjectPlacement before they carry a representation.
+    core_geometry.edit_object_placement(tool.Ifc, tool.Geometry, tool.Surveyor, obj=obj)
+    return obj, element
+
+
+def _place_in_spatial_tree(ifc, element) -> None:
+    """
+    Put *element* somewhere in the spatial tree if nothing else has.
+
+    Spatial structure elements (IfcSpace and friends) are aggregated into their
+    parent, ordinary elements are contained by it, so the two take different
+    relationships.
+    """
+    import ifcopenshell.api
+    import ifcopenshell.util.element
+
+    if ifcopenshell.util.element.get_container(element):
+        return
+    if element.is_a("IfcSpatialStructureElement") or element.is_a("IfcSpatialElement"):
+        parent = None
+        for cls in ("IfcBuildingStorey", "IfcBuilding", "IfcSite", "IfcProject"):
+            items = ifc.by_type(cls)
+            if items:
+                parent = items[0]
+                break
+        if parent is None or ifcopenshell.util.element.get_parent(element):
+            return
+        try:
+            ifcopenshell.api.run("aggregate.assign_object", ifc,
+                                 products=[element], relating_object=parent)
+        except Exception:
+            pass
+        return
+    container = _find_spatial_container(ifc)
+    if container is None:
+        return
+    try:
+        ifcopenshell.api.run("spatial.assign_container", ifc,
+                             products=[element], relating_structure=container)
+    except Exception:
+        pass
 
 
 def _reload_object_geometry(obj, representation) -> None:
@@ -73,6 +150,96 @@ def _find_spatial_container(ifc):
     return None
 
 
+def _resolve_dxf(op):
+    """
+    The DXF *op* should read, or None after reporting why there isn't one.
+
+    Blender leaves `filepath` holding the folder when the accept button is
+    pressed without a file highlighted, and calling an operator bare from the
+    console runs execute() without the browser opening at all. Neither should be
+    a dead end, so a folder holding exactly one DXF is used.
+    """
+    import os
+    from pathlib import Path
+
+    candidate = bpy.path.abspath(op.filepath) if op.filepath else ""
+    if candidate and os.path.isfile(candidate):
+        return candidate
+
+    directory = getattr(op, "directory", "") or ""
+    filename = getattr(op, "filename", "") or ""
+    if directory and filename:
+        joined = os.path.join(bpy.path.abspath(directory), filename)
+        if os.path.isfile(joined):
+            return joined
+
+    folder = candidate if candidate and os.path.isdir(candidate) else ""
+    if not folder and directory:
+        folder = bpy.path.abspath(directory)
+    if folder and os.path.isdir(folder):
+        found = sorted(p for p in Path(folder).iterdir()
+                       if p.is_file() and p.suffix.lower() == ".dxf")
+        if len(found) == 1:
+            return str(found[0])
+        if not found:
+            op.report({"ERROR"}, f"No .dxf file in {Path(folder).name}. Select one.")
+            return None
+        names = ", ".join(p.name for p in found[:3])
+        more = f" and {len(found) - 3} more" if len(found) > 3 else ""
+        op.report({"ERROR"}, f"Select which DXF: {names}{more}")
+        return None
+
+    if not candidate:
+        op.report({"ERROR"}, "No DXF chosen. Use the panel button, or pass "
+                             "filepath= when calling this from Python.")
+    else:
+        op.report({"ERROR"}, f"Not a valid file: {candidate}")
+    return None
+
+
+def _resolve_mapping_path(mapping_filepath: str, dxf_filepath: str, scene=None):
+    """
+    Return (Path, where_it_came_from) for the mapping CSV, or (None, reason).
+
+    A CSV sitting beside the drawing beats the panel's setting. The panel field
+    is a default for drawings that have none of their own, and it is sticky:
+    left pointing at the last drawing's CSV it would quietly classify a new
+    drawing against another one's layer names, which match nothing and send
+    every layer to the fallback class.
+    """
+    from pathlib import Path
+
+    # Explicit argument, for scripted calls: this one really does win.
+    if mapping_filepath:
+        p = Path(bpy.path.abspath(mapping_filepath))
+        return (p, "given") if p.is_file() else (None, "the given path is not a file")
+
+    if dxf_filepath:
+        dxf = Path(bpy.path.abspath(dxf_filepath))
+        if dxf.is_dir():
+            found = sorted(p for p in dxf.iterdir()
+                           if p.is_file() and p.suffix.lower() == ".dxf")
+            dxf = found[0] if len(found) == 1 else dxf
+        for candidate in (dxf.with_suffix(".layers.csv"),
+                          dxf.with_suffix(".csv"),
+                          dxf.parent / "layer_mapping.csv"):
+            if candidate.is_file():
+                return candidate, "beside the DXF"
+
+    if scene is not None:
+        props = getattr(scene, "dxf_ifc", None)
+        panel_path = getattr(props, "mapping_filepath", "") if props else ""
+        if panel_path:
+            p = Path(bpy.path.abspath(panel_path))
+            if p.is_file():
+                return p, "from the panel"
+
+    shipped = Path(__file__).parent / "templates" / "layer_mapping.csv"
+    if shipped.is_file():
+        return shipped, "add-on template"
+    return None, "no mapping CSV found"
+
+
 # ---------------------------------------------------------------------------
 # DXF source content cache — populated by ScanDxfSourceOperator.
 # ---------------------------------------------------------------------------
@@ -104,14 +271,14 @@ def _scan_dxf_source(filepath: str) -> None:
             for b in doc.blocks
             if not b.name.startswith("*")
         ]
-        seen: set = set()
-        layers: list = []
-        for e in doc.modelspace():
-            ln = e.dxf.layer
-            if ln not in seen:
-                layers.append((ln, ln, ""))
-                seen.add(ln)
-        _dxf_layers = layers
+        # Layers as the importer sees them, blocks expanded. Listing only the
+        # layers of top-level entities offers layers that hold nothing but block
+        # references, which import as nothing, and hides every layer that exists
+        # only inside a block.
+        _dxf_layers = [
+            (name, f"{name}  ({count})", f"{count} entities")
+            for name, count in layer_mapping.dxf_layers(path).items()
+        ]
     except Exception:
         pass
 
@@ -172,6 +339,10 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    # The browser fills these even when the accept button is pressed without a
+    # file highlighted, which leaves filepath holding the folder on its own.
+    directory: bpy.props.StringProperty(subtype="DIR_PATH", options={"HIDDEN"})
+    filename: bpy.props.StringProperty(options={"HIDDEN"})
     filter_glob: bpy.props.StringProperty(default="*.dxf;*.DXF", options={"HIDDEN"})
 
     # Labels cached at invoke time — stored as registered RNA props (no underscore).
@@ -198,8 +369,19 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
         items=[
             ("ACTIVE", "Active element", "Import on the currently selected IFC element"),
             ("NEW",    "New annotation", "Create a new IfcAnnotation (Plan/Annotation/PLAN_VIEW)"),
+            ("MAPPED", "Elements by layer", "Create one IFC element per DXF layer, classed by a mapping CSV"),
         ],
         default="ACTIVE",
+    )
+    # Deliberately not subtype="FILE_PATH": this operator already runs inside a
+    # file browser, and Blender refuses to open a second one ("Cannot activate a
+    # file selector dialog, one already open"). The browsable field lives on the
+    # sidebar panel instead; this one exists so scripts can override it.
+    mapping_filepath: bpy.props.StringProperty(
+        name="Mapping CSV",
+        description="Layer to IFC class mapping. Leave blank to use the panel's setting, "
+                    "a CSV beside the DXF, or the template shipped with the add-on",
+        default="",
     )
     import_mode: bpy.props.EnumProperty(
         name="Mode",
@@ -218,7 +400,7 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
     def poll(cls, context):
         return tool.Ifc.get() is not None
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
 
         # Source
@@ -251,6 +433,19 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
                     box.label(text=sub_label, icon="SCENE_DATA")
             else:
                 box.prop(self, "target_subcontext", text="")
+        elif self.target_mode == "MAPPED":
+            box.label(text="One element per DXF layer", icon="OUTLINER")
+            resolved, origin = _resolve_mapping_path(
+                self.mapping_filepath, self.filepath, context.scene)
+            if resolved is None:
+                box.label(text="No mapping CSV found", icon="ERROR")
+                box.label(text="Set one in the Bonsai Salad panel")
+            else:
+                box.label(text=resolved.name, icon="FILE_TEXT")
+                # Which file won matters: the panel setting is sticky, and a
+                # previous drawing's CSV classifies nothing in this one.
+                box.label(text=f"({origin})")
+            box.label(text="Plan / Annotation / PLAN_VIEW", icon="SCENE_DATA")
         else:
             box.label(text="Plan / Annotation / PLAN_VIEW", icon="SCENE_DATA")
 
@@ -264,7 +459,10 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
         ifc = tool.Ifc.get()
         element = _get_selected_element()
 
-        if element is None:
+        if self.target_mode == "MAPPED":
+            self.element_label = ""
+            self.subcontext_label = ""
+        elif element is None:
             self.target_mode = "NEW"
             self.element_label = ""
             self.subcontext_label = ""
@@ -293,12 +491,13 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
             self.report({"ERROR"}, "No IFC file loaded.")
             return {"CANCELLED"}
 
-        import os
         from pathlib import Path
-        filepath = bpy.path.abspath(self.filepath)
-        if not os.path.isfile(filepath):
-            self.report({"ERROR"}, f"Not a valid file: {filepath}")
+        filepath = _resolve_dxf(self)
+        if filepath is None:
             return {"CANCELLED"}
+
+        if self.target_mode == "MAPPED":
+            return self._execute_mapped(context, ifc, filepath)
 
         if self.target_mode == "NEW":
             name = Path(filepath).stem
@@ -379,13 +578,140 @@ class ImportDxfAsRepresentationOperator(bpy.types.Operator, tool.Ifc.Operator):
         self.report({"INFO"}, f"Imported {n_items} items into {getattr(element, 'Name', element)} — visible in 2D Drawing view")
         return {"FINISHED"}
 
+    def _execute_mapped(self, context, ifc, filepath):
+        """One IFC element per DXF layer, classed by the mapping CSV."""
+        # filepath here is the resolved DXF; self.filepath may still be the
+        # folder the browser was left in, which finds no CSV beside anything.
+        mapping_path, origin = _resolve_mapping_path(
+            self.mapping_filepath, filepath, context.scene)
+        if mapping_path is None:
+            self.report({"ERROR"}, f"No mapping CSV: {origin}. Generate one with the panel button.")
+            return {"CANCELLED"}
+        try:
+            rules = layer_mapping.load_mapping(mapping_path)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not read {mapping_path.name}: {exc}")
+            return {"CANCELLED"}
+
+        subcontext = get_or_create_subcontext(ifc)
+        created, rejected = [], []
+
+        def create_element(layer_name, ifc_class, predefined_type, name):
+            obj, element = _create_mapped_object(context, name, ifc_class, predefined_type)
+            if element is None:
+                rejected.append((layer_name, ifc_class))
+                return None
+            _place_in_spatial_tree(ifc, element)
+            created.append((layer_name, obj, element))
+            return element
+
+        source_block = self.source_block if self.source_mode == "BLOCK" and self.source_block != "NONE" else None
+        source_layer = self.source_layer if self.source_mode == "LAYER" and self.source_layer != "NONE" else None
+
+        try:
+            results = import_dxf_as_elements(
+                ifc, filepath, create_element,
+                subcontext=subcontext,
+                mapping_rules=rules,
+                source_block=source_block,
+                source_layer=source_layer,
+            )
+        except Exception as exc:
+            # Objects already made for earlier layers would otherwise linger
+            # without the geometry that justifies them.
+            for _layer, obj, _el in created:
+                try:
+                    bpy.data.objects.remove(obj)
+                except Exception:
+                    pass
+            self.report({"ERROR"}, f"DXF import failed: {exc}")
+            return {"CANCELLED"}
+
+        by_element = {el.id(): obj for _layer, obj, el in created}
+        for _layer_name, element, representation in results:
+            obj = by_element.get(element.id())
+            if obj is None:
+                continue
+            try:
+                _reload_object_geometry(obj, representation)
+            except Exception as exc:
+                self.report({"WARNING"}, f"{element.Name}: representation written but reload failed: {exc}")
+
+        classes = collections.Counter(el.is_a() for _l, _o, el in created)
+        summary = ", ".join(f"{n}x {c}" for c, n in classes.most_common())
+        msg = (f"Created {len(results)} elements using {mapping_path.name} "
+               f"({origin}): {summary}")
+        if rejected:
+            msg += f" — skipped {len(rejected)} ({', '.join(f'{l} as {c}' for l, c in rejected[:3])})"
+            self.report({"WARNING"}, msg)
+        else:
+            self.report({"INFO"}, msg + " — visible in 2D Drawing view")
+        return {"FINISHED"}
+
+
+class WriteDxfLayerMappingOperator(bpy.types.Operator):
+    """Write a layer mapping CSV pre-filled with the layers found in a DXF."""
+
+    bl_idname = "bim.write_dxf_layer_mapping"
+    bl_label = "Generate Layer Mapping CSV"
+    bl_options = {"REGISTER"}
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    # The browser fills these even when the accept button is pressed without a
+    # file highlighted, which leaves filepath holding the folder on its own.
+    directory: bpy.props.StringProperty(subtype="DIR_PATH", options={"HIDDEN"})
+    filename: bpy.props.StringProperty(options={"HIDDEN"})
+    filter_glob: bpy.props.StringProperty(default="*.dxf;*.DXF", options={"HIDDEN"})
+
+    def invoke(self, context, event):
+        self.filepath = bpy.path.abspath("//")
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        from pathlib import Path
+
+        filepath = _resolve_dxf(self)
+        if filepath is None:
+            return {"CANCELLED"}
+        try:
+            layers = layer_mapping.dxf_layers(filepath)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not read DXF: {exc}")
+            return {"CANCELLED"}
+        if not layers:
+            self.report({"ERROR"}, "No layers with geometry found in that DXF.")
+            return {"CANCELLED"}
+
+        # Sits beside the DXF, where the importer looks for it by default.
+        out = Path(filepath).with_suffix(".layers.csv")
+        try:
+            layer_mapping.write_mapping_template(
+                out, layers, comment=f"seeded from {Path(filepath).name}",
+                model=tool.Ifc.get())
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not write {out.name}: {exc}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Wrote {out.name} — {len(layers)} layers, edit it then import")
+        return {"FINISHED"}
+
 
 # ---------------------------------------------------------------------------
 # Properties
 # ---------------------------------------------------------------------------
 
 class DxfIfcProperties(bpy.types.PropertyGroup):
-    pass
+    # Browsable here rather than on the import operator: that one runs inside a
+    # file browser, and Blender allows only one open at a time.
+    mapping_filepath: bpy.props.StringProperty(
+        name="Layer Mapping",
+        description="CSV mapping DXF layers to IFC classes, used by the "
+                    "'Elements by layer' import. Leave blank to use a CSV sitting "
+                    "beside the DXF, or the template shipped with the add-on",
+        subtype="FILE_PATH",
+        default="",
+    )
 
 
-classes = [DxfIfcProperties, ImportDxfAsRepresentationOperator]
+classes = [DxfIfcProperties, ImportDxfAsRepresentationOperator,
+           WriteDxfLayerMappingOperator]
