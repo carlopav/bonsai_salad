@@ -4,6 +4,7 @@ import math
 import multiprocessing
 
 import numpy as np
+import ifcopenshell.util.element
 import ifcopenshell.util.placement
 import ifcopenshell.geom
 
@@ -24,15 +25,73 @@ def _placement_matrix(drawing):
     return _placement_to_matrix(drawing.ObjectPlacement)
 
 
+# A reflected ceiling plan looks up, so its drawing is the plan reflected in Y.
+# The SVG serializer is told separately (svg-mirror-y / setMirrorY), and Bonsai
+# keeps the two halves of a drawing in one frame by putting the same reflection
+# in the camera itself -- tool.Drawing.get_camera_shape_matrix negates the
+# camera's Y for a REFLECTED_PLAN_VIEW, so geometry, annotations and symbols all
+# inherit it. With the mirror on the serializer alone, an RCP came out with its
+# linework reflected and its text left where the unmirrored projection put it:
+# all 48 light tags on the wrong side of the plan.
+_MIRRORED_TARGET_VIEWS = frozenset({"REFLECTED_PLAN_VIEW"})
+
+# Reflect the projected Y. Composed on the left of the camera inverse, this is
+# the same drawing as negating the camera's own Y axis before inverting.
+_MIRROR_Y_4 = np.diag([1.0, -1.0, 1.0, 1.0])
+_MIRROR_Y_3 = np.diag([1.0, -1.0, 1.0])
+
+
+def drawing_target_view(drawing):
+    """Return the drawing's EPset_Drawing TargetView, defaulting to PLAN_VIEW."""
+    try:
+        return ifcopenshell.util.element.get_pset(
+            drawing, "EPset_Drawing", "TargetView") or "PLAN_VIEW"
+    except Exception:
+        return "PLAN_VIEW"
+
+
+def projection_is_mirrored(cam_inv_np):
+    """True when the camera projection reflects as well as rotates.
+
+    Read off the matrix rather than passed around, so every consumer of a
+    camera inverse can tell without the target view having to reach it.
+    """
+    return bool(np.linalg.det(np.asarray(cam_inv_np, dtype=float)[:3, :3]) < 0.0)
+
+
 def camera_matrix_inv_col_major(drawing):
     """Column-major flat list of the inverse camera world matrix.
 
     Required by the projection pipeline.  Column-major = Fortran order in numpy,
     matching the expected layout (glam DMat4::from_cols_array).
+
+    For a mirrored target view the reflection is baked in here -- see
+    _MIRRORED_TARGET_VIEWS.
     """
     m = _placement_matrix(drawing)
     m_inv = np.linalg.inv(m)
+    if drawing_target_view(drawing) in _MIRRORED_TARGET_VIEWS:
+        m_inv = _MIRROR_Y_4 @ m_inv
     return list(m_inv.flatten(order="F"))
+
+
+def camera_plan_rotation(cam_inv_np):
+    """Return (cam_R, cam_rot_deg): the camera's in-plane turn, reflection removed.
+
+    plan_symbols builds block-local geometry with cam_R and turns arc start/end
+    angles by cam_rot_deg, which only describes a rotation -- a reflection has no
+    such angle. So the reflection a mirrored target view adds is taken back out
+    here, and reapplied per instance by dxf_template._compute_insert, which
+    reports it as the INSERT's yscale -1. cam_R's third row (the view axis) and
+    its Z column are untouched either way, so the view-axis and plan-parallel
+    tests read the same.
+    """
+    cam_R = np.asarray(cam_inv_np, dtype=float)[:3, :3]
+    if projection_is_mirrored(cam_R):
+        cam_R = _MIRROR_Y_3 @ cam_R
+    x_proj = cam_R @ np.array([1.0, 0.0, 0.0])
+    return cam_R, float(np.degrees(np.arctan2(float(x_proj[1]),
+                                              float(x_proj[0]))))
 
 
 def camera_dir_pos(drawing):

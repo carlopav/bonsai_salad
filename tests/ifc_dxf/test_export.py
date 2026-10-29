@@ -1238,3 +1238,214 @@ class TestFlippedPlacementsMirror:
         original = np.array([[cols[0][0], cols[1][0]],
                              [cols[0][1], cols[1][1]]])
         assert np.abs(rebuilt - original).max() < 1e-4
+
+
+class TestReflectedPlanKeepsTextWithItsLinework:
+    """A reflected ceiling plan reflects in Y. The SVG serializer is told so
+    (``svg-mirror-y``), and the camera inverse has to carry the same reflection
+    or the two halves of the drawing end up in different frames: the linework
+    comes back mirrored while annotations stay where the unmirrored projection
+    put them. One real RCP drew all 48 of its light tags on the wrong side of
+    the plan, every one of them at the exactly-right coordinates for a plan
+    view that was not being drawn.
+    """
+
+    @staticmethod
+    def _set_target_view(ifc, drawing, target_view):
+        """Rewrite the drawing's EPset_Drawing.TargetView in place."""
+        for rel in drawing.IsDefinedBy or []:
+            pset = getattr(rel, "RelatingPropertyDefinition", None)
+            if not (pset and pset.is_a("IfcPropertySet")
+                    and pset.Name == "EPset_Drawing"):
+                continue
+            for prop in pset.HasProperties:
+                if prop.Name == "TargetView":
+                    prop.NominalValue = ifc.create_entity(
+                        "IfcLabel", wrappedValue=target_view)
+                    return
+        raise AssertionError("fixture has no EPset_Drawing.TargetView to set")
+
+    def _camera(self, target_view):
+        import numpy as np
+        from ifc_dxf.core.camera import camera_matrix_inv_col_major
+
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        drawing, _pset = find_drawings(ifc)[0]
+        self._set_target_view(ifc, drawing, target_view)
+        return np.array(camera_matrix_inv_col_major(drawing)).reshape(
+            4, 4, order="F")
+
+    def test_reflected_view_mirrors_the_camera_inverse(self):
+        """Only Y is negated, and only for the reflected view."""
+        import numpy as np
+        from ifc_dxf.core.camera import projection_is_mirrored
+
+        plan = self._camera("PLAN_VIEW")
+        rcp = self._camera("REFLECTED_PLAN_VIEW")
+        assert not projection_is_mirrored(plan)
+        assert projection_is_mirrored(rcp)
+        assert np.abs(np.diag([1.0, -1.0, 1.0, 1.0]) @ plan - rcp).max() < 1e-12
+
+    def test_the_reflection_is_kept_out_of_the_plan_rotation(self):
+        """plan_symbols turns block-local arc angles by cam_rot_deg, which can
+        only describe a rotation, so camera_plan_rotation hands it one -- the
+        reflection travels on the INSERT instead (_compute_insert)."""
+        import numpy as np
+        from ifc_dxf.core.camera import camera_plan_rotation
+
+        for target_view in ("PLAN_VIEW", "REFLECTED_PLAN_VIEW"):
+            cam_R, _rot = camera_plan_rotation(self._camera(target_view))
+            assert np.linalg.det(cam_R) > 0, \
+                f"{target_view}: cam_R still reflects, arc angles will be wrong"
+
+    def test_a_mirrored_camera_flips_the_insert(self):
+        """Mirror . Rot(a) == Rot(-a) . Mirror: the camera's reflection turns
+        the angle around and flips the handedness on top of the element's own."""
+        import numpy as np
+        from ifc_dxf.core.dxf_template import _compute_insert
+
+        # A placement turned 30 degrees in plan, at (2, 3).
+        t = np.radians(30.0)
+        wm = np.eye(4)
+        wm[:2, :2] = [[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]]
+        wm[:3, 3] = (2.0, 3.0, 0.0)
+        wm_flat = list(wm.flatten(order="F"))
+
+        plan_pos, plan_rot, plan_mirrored = _compute_insert(wm_flat, np.eye(4))
+        rcp_pos, rcp_rot, rcp_mirrored = _compute_insert(
+            wm_flat, np.diag([1.0, -1.0, 1.0, 1.0]))
+
+        assert plan_pos[1] == pytest.approx(-rcp_pos[1])
+        assert plan_pos[0] == pytest.approx(rcp_pos[0])
+        assert plan_rot == pytest.approx(-rcp_rot)
+        assert plan_mirrored is False and rcp_mirrored is True
+
+    def _export(self, tmp_path, target_view):
+        """Accurate export of the fixture under one target view.
+
+        The accurate pipeline is the one that can disagree with itself: its
+        linework comes from the serializer and its annotations from the camera
+        inverse. Returns (text_position, wall_linework_bbox).
+        """
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        drawing, _pset = find_drawings(ifc)[0]
+        self._set_target_view(ifc, drawing, target_view)
+        drawing, pset = find_drawings(ifc)[0]   # re-read with the new view
+        out = str(tmp_path / f"{target_view}.dxf")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing_accurate(ifc, drawing, pset, out, template_path=tpl)
+
+        doc = ezdxf.readfile(out)
+        texts = [e for e in doc.modelspace() if e.dxftype() == "TEXT"
+                 and e.dxf.layer == "IfcAnnotation_Text"]
+        assert texts, f"{target_view}: the fixture's TEXT annotation is missing"
+        ys = [p[1] for e in doc.modelspace() if e.dxftype() == "LWPOLYLINE"
+              and e.dxf.layer == "IfcWall" for p in e.get_points("xy")]
+        assert ys, f"{target_view}: no wall linework to compare the text against"
+        return (texts[0].dxf.insert.x, texts[0].dxf.insert.y), (min(ys), max(ys))
+
+    def test_text_and_linework_reflect_together(self, tmp_path):
+        """Both halves move, so the text keeps its place on the plan."""
+        (_px, plan_text_y), (plan_lo, plan_hi) = self._export(tmp_path, "PLAN_VIEW")
+        (_rx, rcp_text_y), (rcp_lo, rcp_hi) = self._export(
+            tmp_path, "REFLECTED_PLAN_VIEW")
+
+        assert rcp_lo == pytest.approx(-plan_hi, abs=1e-6), \
+            "the wall linework did not reflect"
+        assert rcp_hi == pytest.approx(-plan_lo, abs=1e-6)
+        assert rcp_text_y == pytest.approx(-plan_text_y, abs=1e-6), \
+            "the text stayed in the plan frame while the linework reflected"
+        # What the reader actually sees: the gap from the text to the walls.
+        assert (rcp_text_y - rcp_lo) == pytest.approx(plan_hi - plan_text_y,
+                                                      abs=1e-6)
+
+
+def _add_horizontal_slab(ifc, z, name, ifc_class="IfcCovering",
+                         size=4.0, thickness=0.1):
+    """Add a flat square plate of `ifc_class` with its underside at `z`."""
+    body_ctx = next(c for c in ifc.by_type("IfcGeometricRepresentationSubContext")
+                    if c.ContextIdentifier == "Body" and c.ContextType == "Model")
+    storey = ifc.by_type("IfcBuildingStorey")[0]
+
+    def pt(*c):
+        return ifc.createIfcCartesianPoint([float(v) for v in c])
+
+    def dr(*c):
+        return ifc.createIfcDirection([float(v) for v in c])
+
+    solid = ifc.createIfcExtrudedAreaSolid(
+        ifc.createIfcRectangleProfileDef("AREA", name, None, size, size),
+        ifc.createIfcAxis2Placement3D(pt(0, 0, 0), dr(0, 0, 1), dr(1, 0, 0)),
+        dr(0.0, 0.0, 1.0), thickness,
+    )
+    element = ifc.create_entity(
+        ifc_class, ifcopenshell.guid.new(), None, name, None, None,
+        ifc.createIfcLocalPlacement(
+            storey.ObjectPlacement,
+            ifc.createIfcAxis2Placement3D(pt(0.0, 0.0, z), dr(0, 0, 1), dr(1, 0, 0))),
+        ifc.createIfcProductDefinitionShape(
+            None, None,
+            [ifc.createIfcShapeRepresentation(body_ctx, "Body", "SweptSolid", [solid])]),
+        None,
+    )
+    rel = ifc.by_type("IfcRelContainedInSpatialStructure")[0]
+    rel.RelatedElements = list(rel.RelatedElements) + [element]
+    return element
+
+
+class TestFootprintPaintingFollowsTheCamera:
+    """Which of two stacked ceilings you see depends on which way you look.
+
+    Footprint recomposition resolves slabs/coverings/roofs with a painter's
+    algorithm instead of HLR, so unlike the rest of the accurate pipeline it
+    does not inherit the camera's view direction -- it has to read it. Written
+    as "highest wins" it is right for a plan and backwards for a reflected
+    ceiling plan, which looks up: one real RCP lost 47 of its 52 ceilings
+    behind the slabs and roof above them, two of which were reported as simply
+    missing.
+    """
+
+    @staticmethod
+    def _stack():
+        """Two overlapping coverings, one 1 m above the other.
+
+        The file is returned and has to stay referenced for as long as the
+        entities are used: on the 0.9 lane `util.placement.get_placement` goes
+        through the geometry kernel, so entities whose file has been collected
+        are a hard crash (access violation), not an exception. 0.8's pure-Python
+        get_local_placement never notices.
+        """
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        lower = _add_horizontal_slab(ifc, 2.5, "LOWER CEILING")
+        upper = _add_horizontal_slab(ifc, 3.5, "UPPER CEILING")
+        candidates = [(e, e.GlobalId, None) for e in (lower, upper)]
+        return ifc, candidates, lower.GlobalId, upper.GlobalId
+
+    @staticmethod
+    def _camera(looking_up):
+        """A zenithal camera inverse, looking down (plan) or up (RCP)."""
+        import numpy as np
+        return np.diag([1.0, 1.0, -1.0, 1.0]) if looking_up else np.eye(4)
+
+    def _painted(self, looking_up):
+        ifc, candidates, lower_gid, upper_gid = self._stack()
+        entries, fallback = accurate_pipeline._recompose_plan_footprints(
+            candidates, self._camera(looking_up), None)
+        assert not fallback, "both footprints are extruded areas and must extract"
+        assert ifc is not None  # keep the file alive past the call -- see _stack
+        return {gid for gid, _cls, _layer, _ext, _holes in entries}, lower_gid, upper_gid
+
+    def test_a_plan_keeps_the_higher_ceiling(self):
+        """Looking down, the upper one hides the lower: unchanged behaviour."""
+        painted, lower_gid, upper_gid = self._painted(looking_up=False)
+        assert upper_gid in painted
+        assert lower_gid not in painted, \
+            "a plan should not see a ceiling under another one"
+
+    def test_a_reflected_plan_keeps_the_lower_ceiling(self):
+        """Looking up, the lower one is the one in front."""
+        painted, lower_gid, upper_gid = self._painted(looking_up=True)
+        assert lower_gid in painted, \
+            "the RCP dropped the ceiling nearest the viewer"
+        assert upper_gid not in painted, \
+            "the RCP drew a ceiling hidden behind a lower one"

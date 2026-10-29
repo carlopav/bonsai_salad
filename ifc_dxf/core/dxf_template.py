@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 
+from .camera import projection_is_mirrored
 from .units import dxf_insunits, is_imperial
 
 
@@ -84,6 +85,12 @@ def _compute_insert(wm_flat, cam_inv_np):
     INSERT expresses as yscale -1. The rotation is unaffected: for a reflected
     frame M == [[cos, sin], [sin, -cos]], so atan2(M[1][0], M[0][0]) is still
     the angle, and rotation plus yscale -1 reproduces M exactly.
+
+    The camera can reflect too (a reflected ceiling plan). Block geometry is
+    built from the rotation alone -- camera.camera_plan_rotation takes that
+    reflection back out -- so the INSERT has to carry it: since
+    Mirror . Rot(a) == Rot(-a) . Mirror, the camera's reflection turns the angle
+    around and flips the handedness once more on top of the element's own.
     """
     wm = np.array(wm_flat, dtype=float).reshape(4, 4, order='F')
     orig_h = np.array([0.0, 0.0, 0.0, 1.0])
@@ -92,6 +99,9 @@ def _compute_insert(wm_flat, cam_inv_np):
     rot_deg = float(np.degrees(np.arctan2(float(local_x_world[1]),
                                           float(local_x_world[0]))))
     mirrored = bool(np.linalg.det(wm[:2, :2]) < 0.0)
+    if projection_is_mirrored(cam_inv_np):
+        rot_deg  = -rot_deg
+        mirrored = not mirrored
     return (float(pos_h[0]), float(pos_h[1])), rot_deg, mirrored
 
 

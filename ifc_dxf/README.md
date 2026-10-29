@@ -2,6 +2,10 @@
 
 Export an IFC drawing view to DXF with maximum structural and geometric fidelity.
 
+[NOTES.md](NOTES.md) collects what was not obvious about projection, IFC
+annotations and the serializer — symptom first. Add to it in the same commit
+that fixes the thing.
+
 **Upstream-merge principle:** this work is aimed at being merged upstream into
 Bonsai. Therefore ifc_dxf must not reimplement what Bonsai already provides:
 whenever `bonsai.tool` is importable, its functions are reused directly (e.g.

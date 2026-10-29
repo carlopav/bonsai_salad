@@ -13,6 +13,7 @@ import numpy as np
 
 from ..camera import (
     camera_matrix_inv_col_major,
+    camera_plan_rotation,
     camera_dir_pos,
     world_matrix_col_major,
     camera_body_local_extents,
@@ -175,10 +176,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
     unit_scale       = project_unit_scale(ifc)  # metres per project unit
 
     _cam_inv_np  = np.array(col_major, dtype=float).reshape(4, 4, order='F')
-    _cam_R       = _cam_inv_np[:3, :3]
-    _cam_x_proj  = _cam_R @ np.array([1.0, 0.0, 0.0])
-    _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]),
-                                               float(_cam_x_proj[0]))))
+    _cam_R, _cam_rot_deg = camera_plan_rotation(_cam_inv_np)
 
     elements = get_elements(ifc, drawing, pset)
     print(f"  Elements   : {len(elements)}")

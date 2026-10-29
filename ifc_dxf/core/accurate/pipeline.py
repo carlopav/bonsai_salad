@@ -58,8 +58,11 @@ y down, origin at the camera box top-left), not camera metres. They are mapped
 back deterministically from the camera body's local extents
 (``camera.camera_body_local_extents``) — computed, not calibrated.
 
-Only PLAN_VIEW / REFLECTED_PLAN_VIEW are exercised; the transform for mirrored
-or non-zenithal views is untested.
+Only PLAN_VIEW / REFLECTED_PLAN_VIEW are exercised; the transform for
+non-zenithal views is untested. A REFLECTED_PLAN_VIEW reflects in Y, which the
+serializer is told about (``svg-mirror-y``) and the camera inverse carries as
+well, so the SVG mapping above and the rest of the drawing stay in one frame --
+see ``camera._MIRRORED_TARGET_VIEWS``.
 
 Remaining v1 parity gaps (see README roadmap): material-layer hatch
 decomposition (item 9) and overhead-fill re-addition (item 11 — note: overhead
@@ -85,6 +88,7 @@ except ImportError:
 
 from ..camera import (
     camera_matrix_inv_col_major,
+    camera_plan_rotation,
     camera_dir_pos,
     world_matrix_col_major,
     camera_body_local_extents,
@@ -602,9 +606,18 @@ def _recompose_plan_footprints(candidates, cam_inv_np, sections_union):
     rest into segments. For slabs/coverings/roofs in a plan the visibility
     problem is really 2.5D, so it is solved exactly here instead: each
     element's authored footprint (`_slab_footprint_world`, extrusion profile
-    through booleans) minus every footprint above it (z_top descending,
-    `_FOOTPRINT_PRIORITY` breaks coplanar ties) minus the section hatch areas.
+    through booleans) minus every footprint nearer the viewer than it
+    (`_FOOTPRINT_PRIORITY` breaks coplanar ties) minus the section hatch areas.
     One clean closed outline per element, no duplicate fragments.
+
+    "Nearer the viewer" cannot be read as "higher": a plan looks down, so the
+    highest surface wins, but a reflected ceiling plan looks *up* -- Bonsai
+    flips the camera's Z for it (`generate_drawing_matrix`: ``m.col[2] *= -1``)
+    -- and there the lowest surface is the one you see. Painting an RCP top-down
+    hid 47 of one drawing's 52 ceilings behind the slabs and roof above them.
+    The order follows the camera instead; only the depth flips, the priority
+    tie-break reads the same either way (the finish still shows over the
+    structure it is fixed to, whichever side you view it from).
 
     candidates: [(element, gid, rec)] -- oracle-visible footprint-class
     elements. Returns (footprint_entries, fallback) where footprint_entries
@@ -612,6 +625,12 @@ def _recompose_plan_footprints(candidates, cam_inv_np, sections_union):
     authored footprint could not be extracted (BReps...) -- the caller draws
     those from their HLR output as before.
     """
+    # Sign that turns a world Z into depth towards the viewer. The camera looks
+    # along its own -Z, so cam_inv's Z row says how world Z maps to camera
+    # depth: +1 for a plan (looking down), -1 for a reflected ceiling plan. A
+    # footprint is a plan construct, so only this zenithal component matters.
+    towards_viewer = 1.0 if cam_inv_np[2, 2] >= 0 else -1.0
+
     prepared = []
     fallback = []
     for element, gid, rec in candidates:
@@ -641,14 +660,18 @@ def _recompose_plan_footprints(candidates, cam_inv_np, sections_union):
         if fp_cam.is_empty:
             fallback.append((element, gid, rec))
             continue
-        _, z_top = _wall_z_range(element, wm)
+        z_bot, z_top = _wall_z_range(element, wm)
         prio = _FOOTPRINT_PRIORITY.get(element.is_a(), 0)
-        prepared.append((z_top if z_top is not None else z_elem, prio, gid,
+        # Depth of the element's near face, measured towards the viewer: see
+        # `towards_viewer`. Both faces are scored and the nearer one kept, so
+        # the key is the face the drawing actually shows.
+        faces = [z for z in (z_top, z_bot) if z is not None] or [z_elem]
+        prepared.append((max(towards_viewer * z for z in faces), prio, gid,
                          element.is_a(), fp_cam))
 
     entries = []
-    covered = None  # union of footprints already painted (they lie above)
-    for z_top, prio, gid, cls, fp in sorted(
+    covered = None  # union of footprints already painted (they lie nearer)
+    for _depth, prio, gid, cls, fp in sorted(
             prepared, key=lambda t: (t[0], t[1], t[2]), reverse=True):
         region = fp
         try:
@@ -782,9 +805,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
 
     col_major   = camera_matrix_inv_col_major(drawing)
     _cam_inv_np = np.array(col_major, dtype=float).reshape(4, 4, order='F')
-    _cam_R      = _cam_inv_np[:3, :3]
-    _cam_x_proj = _cam_R @ np.array([1.0, 0.0, 0.0])
-    _cam_rot_deg = float(np.degrees(np.arctan2(float(_cam_x_proj[1]), float(_cam_x_proj[0]))))
+    _cam_R, _cam_rot_deg = camera_plan_rotation(_cam_inv_np)
 
     cam_dir, _cam_pos = camera_dir_pos(drawing)
     # Linework filtering belongs to the serializer, driven by the drawing's own

@@ -487,8 +487,23 @@ def _resolve_text_literal_variables(text, product):
     if not product:
         return text
 
-    # Variables first: a formula is evaluated on its own text, so the values it
-    # refers to must already be substituted into it (format() takes no element).
+    # Formulas first, each handed the product: format() resolves the {{...}}
+    # inside a formula itself, quoting and typing the values the way its own
+    # grammar needs.
+    #
+    # Substituting the variables beforehand instead pastes bare text into the
+    # expression -- concat(L2, " (", substr(EXISTING, 2, 4), ")") -- which the
+    # parser rejects on the first unquoted word, and the except branch below
+    # then replaced the whole tag with "". On a real RCP that emptied 40 of 48
+    # light tags, silently: the blocks and their attributes were all written,
+    # carrying nothing to draw.
+    for command in re.findall(_TEMPLATE_CMD_RE, text):
+        try:
+            value = ifcopenshell.util.selector.format(command[2:-2], product)
+        except Exception:
+            value = ""
+        text = text.replace(command, str(value))
+
     for variable in re.findall(_TEMPLATE_VAR_RE, text):
         try:
             value = ifcopenshell.util.selector.get_element_value(product, variable[2:-2])
@@ -497,13 +512,6 @@ def _resolve_text_literal_variables(text, product):
         if isinstance(value, (list, tuple)):
             value = ", ".join(str(v) for v in value)
         text = text.replace(variable, "" if value is None else str(value))
-
-    for command in re.findall(_TEMPLATE_CMD_RE, text):
-        try:
-            value = ifcopenshell.util.selector.format(command[2:-2])
-        except Exception:
-            value = ""
-        text = text.replace(command, str(value))
 
     return text
 
