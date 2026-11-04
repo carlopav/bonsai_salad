@@ -1110,7 +1110,7 @@ def export_drawing(ifc, drawing, pset, output_path, template_path=None,
                direct_entities=direct_entities or None,
                section_patch_union=section_patch_union,
                unit_scale=unit_scale, drawing_size=drawing_size,
-               drawing_pset=pset)
+               drawing_pset=pset, clip_frame=ext)
     print(f"  DXF gen    : {time.perf_counter() - t1:.2f}s")
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  >> {output_path}  ({size_kb} KB)")

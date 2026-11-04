@@ -56,6 +56,101 @@ def _dedup_ring(pts, tol=0.0005):
     return out
 
 
+# Entities on these layers are never culled by _cull_outside_the_drawing: a tag
+# or dimension is placed for the reader, not by the geometry, and one that leads
+# off the frame is a drafting decision rather than stray linework.
+_CULL_EXEMPT_LAYER_PREFIX = "IfcAnnotation"
+
+# How far past the drawing frame geometry may reach before it counts as stray,
+# as a fraction of the frame's larger side. The frame comes from the camera's
+# own body, so content hugging the border can land marginally outside it.
+_CULL_MARGIN_FRACTION = 0.02
+
+
+def _entity_bbox(entity):
+    """Return (x_min, x_max, y_min, y_max) for one DXF entity, or None.
+
+    ezdxf's own bbox handles every entity type including INSERT (whose block
+    content reaches well past the insertion point) and HATCH. None means "could
+    not be determined", and the caller keeps the entity: nothing is dropped on a
+    guess.
+    """
+    try:
+        import ezdxf.bbox
+
+        box = ezdxf.bbox.extents([entity], fast=True)
+        if not box.has_data:
+            return None
+        return (box.extmin.x, box.extmax.x, box.extmin.y, box.extmax.y)
+    except Exception:
+        return None
+
+
+def _cull_outside_the_drawing(msp, frame):
+    """Delete geometry whose bounding box misses the drawing's own frame.
+
+    A drawing is what its camera sees. The SVG serializer projects whatever it
+    is handed, though, and nothing trims the result to the frame -- Bonsai gets
+    away with that because an SVG viewport clips at render time, and a DXF has
+    no such thing. Frustum culling runs on placement origins with a geometry
+    AABB rescue, so an element reaching into view is admitted whole, and a
+    degenerate one is admitted on an origin that means nothing.
+
+    The cost is not only cosmetic: $EXTMIN/$EXTMAX and the saved viewport are
+    computed from the drawn geometry, so one stray element resizes the view for
+    everyone who opens the file. In one real plan two degenerate elements (an
+    IfcFurniture and an IfcDoor, both named "0" and neither typed) sat ~1800 ft
+    out, stretching a 131 ft frame to 1926 ft: zoom-to-extents left the actual
+    plan a sliver 3% of the window wide, with every room label piled together.
+
+    Only entities that miss the frame entirely are removed, by bounding box, so
+    anything crossing the border is kept whole and no geometry is altered.
+    Returns the number of entities deleted.
+    """
+    x0, x1, y0, y1 = (float(v) for v in frame)
+    margin = max(x1 - x0, y1 - y0) * _CULL_MARGIN_FRACTION
+    x0, x1, y0, y1 = x0 - margin, x1 + margin, y0 - margin, y1 + margin
+
+    doomed = []
+    for entity in msp:
+        if str(entity.dxf.get("layer", "")).startswith(_CULL_EXEMPT_LAYER_PREFIX):
+            continue
+        box = _entity_bbox(entity)
+        if box is None:
+            continue
+        bx0, bx1, by0, by1 = box
+        if bx1 < x0 or bx0 > x1 or by1 < y0 or by0 > y1:
+            doomed.append(entity)
+
+    for entity in doomed:
+        msp.delete_entity(entity)
+    return len(doomed)
+
+
+def _set_extents_from_modelspace(doc, msp, unit_scale=1.0):
+    """Recompute $EXTMIN/$EXTMAX and the saved viewport from what is drawn.
+
+    Called after culling, so the view a CAD application opens on is the drawing
+    that remains rather than the one that included the strays.
+    """
+    try:
+        import ezdxf.bbox
+
+        box = ezdxf.bbox.extents(msp, fast=True)
+        if not box.has_data:
+            return
+    except Exception:
+        return
+    xmin, xmax = box.extmin.x, box.extmax.x
+    ymin, ymax = box.extmin.y, box.extmax.y
+    pad = max((xmax - xmin) * 0.05, (ymax - ymin) * 0.05, 0.5 / unit_scale)
+    xmin, xmax, ymin, ymax = xmin - pad, xmax + pad, ymin - pad, ymax + pad
+    doc.header["$EXTMIN"] = (xmin, ymin, 0)
+    doc.header["$EXTMAX"] = (xmax, ymax, 0)
+    doc.set_modelspace_vport(height=ymax - ymin,
+                             center=((xmin + xmax) / 2, (ymin + ymax) / 2))
+
+
 def _write_dxf(output_path, block_defs, block_order, block_inserts,
                flat_edges, wall_polys_by_key,
                annotations=None, cam_inv_np=None,
@@ -64,7 +159,8 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                drawing_scale=None, footprint_polys=None,
                wall_layer_polys=None, wall_subdivision_lines=None,
                direct_entities=None, section_patch_union=None,
-               unit_scale=1.0, drawing_size=None, drawing_pset=None):
+               unit_scale=1.0, drawing_size=None, drawing_pset=None,
+               clip_frame=None):
     """Write all collected drawing data to a DXF file using ezdxf.
 
     When template_path is provided the document is cloned from the template
@@ -474,6 +570,14 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
                                      current_scale_handle, unit_scale, drawing_pset)
         _write_text_annotations(msp, doc, annotations, cam_inv_np, scale_factor,
                                 current_scale_handle, unit_scale)
+
+    # Stray geometry past the drawing frame, and the blown-out saved view that
+    # comes with it -- see _cull_outside_the_drawing.
+    if clip_frame is not None:
+        n_culled = _cull_outside_the_drawing(msp, clip_frame)
+        if n_culled:
+            print(f"  Clipped    : {n_culled} entities outside the drawing frame")
+        _set_extents_from_modelspace(doc, msp, unit_scale)
 
     # Clearing the template modelspace (delete_all_entities) leaves the sample
     # entities' OBJECTS-section satellites -- AcDbContextDataManager /

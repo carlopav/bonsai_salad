@@ -1513,3 +1513,140 @@ class TestScaleListHasNoDuplicates:
             assert exported[name] == 1, \
                 f"template scale {name!r} appears {exported[name]}x in the export"
 
+
+class TestStrayGeometryIsNotDrawn:
+    """A drawing is what its camera sees.
+
+    The SVG serializer projects whatever it is handed and nothing trims the
+    result to the frame; Bonsai gets away with that because an SVG viewport
+    clips at render time, and a DXF has none. Worse than the clutter, $EXTMIN /
+    $EXTMAX and the saved viewport come from the drawn geometry, so a single
+    stray element resizes the view for everyone who opens the file. One real
+    plan had two degenerate elements (an IfcFurniture and an IfcDoor, both named
+    "0", neither typed) ~1800 ft out: a 131 ft frame became 1926 ft, leaving the
+    plan a sliver 3% of the window wide with its room labels piled together.
+    """
+
+    FRAME = (-10.0, 10.0, -5.0, 5.0)
+
+    def _doc(self):
+        import ezdxf
+
+        doc = ezdxf.new(setup=True)
+        msp = doc.modelspace()
+        for layer in ("IfcWall", "IfcAnnotation_Text"):
+            if layer not in doc.layers:
+                doc.layers.add(layer)
+        return doc, msp
+
+    def test_geometry_clear_of_the_frame_goes(self):
+        from ifc_dxf.core.dxf_writer import _cull_outside_the_drawing
+
+        doc, msp = self._doc()
+        inside = msp.add_lwpolyline([(0, 0), (1, 1)], dxfattribs={"layer": "IfcWall"})
+        stray = msp.add_lwpolyline([(1800, 0), (1801, 1)], dxfattribs={"layer": "IfcWall"})
+        assert _cull_outside_the_drawing(msp, self.FRAME) == 1
+        kept = list(msp)
+        assert inside in kept and stray not in kept
+
+    def test_geometry_crossing_the_border_is_kept_whole(self):
+        """Only entities that miss the frame entirely go, and nothing is
+        altered -- a wall running off the edge still reads as one wall."""
+        from ifc_dxf.core.dxf_writer import _cull_outside_the_drawing
+
+        doc, msp = self._doc()
+        crosser = msp.add_lwpolyline([(0, 0), (40, 0)], dxfattribs={"layer": "IfcWall"})
+        assert _cull_outside_the_drawing(msp, self.FRAME) == 0
+        assert list(crosser.get_points("xy")) == [(0.0, 0.0), (40.0, 0.0)]
+
+    def test_annotations_are_never_culled(self):
+        """A tag is placed for the reader, not by the geometry: one leading off
+        the frame is a drafting decision, not stray linework."""
+        from ifc_dxf.core.dxf_writer import _cull_outside_the_drawing
+
+        doc, msp = self._doc()
+        tag = msp.add_text("NOTE", dxfattribs={"layer": "IfcAnnotation_Text"})
+        tag.set_placement((500, 500))
+        assert _cull_outside_the_drawing(msp, self.FRAME) == 0
+        assert tag in list(msp)
+
+    def test_an_undeterminable_extent_is_kept(self):
+        """_entity_bbox returning None means 'unknown', and nothing is dropped
+        on a guess."""
+        from ifc_dxf.core import dxf_writer
+
+        doc, msp = self._doc()
+        stray = msp.add_lwpolyline([(1800, 0), (1801, 1)], dxfattribs={"layer": "IfcWall"})
+        original = dxf_writer._entity_bbox
+        try:
+            dxf_writer._entity_bbox = lambda _e: None
+            assert dxf_writer._cull_outside_the_drawing(msp, self.FRAME) == 0
+        finally:
+            dxf_writer._entity_bbox = original
+        assert stray in list(msp)
+
+    @staticmethod
+    def _add_degenerate_element(ifc, offset=400.0):
+        """An element whose placement is in view but whose geometry is not.
+
+        Frustum culling admits an element on its placement origin, so this is
+        the case that reaches the writer: the real ones were an IfcFurniture and
+        an IfcDoor named "0" whose geometry sat ~1800 ft from the plan. Offsetting
+        the solid's own Position, rather than the placement, is what reproduces
+        it -- place the element far away instead and culling drops it earlier,
+        which is why an earlier version of this test could not fail.
+        """
+        body_ctx = next(c for c in ifc.by_type("IfcGeometricRepresentationSubContext")
+                        if c.ContextIdentifier == "Body" and c.ContextType == "Model")
+        storey = ifc.by_type("IfcBuildingStorey")[0]
+
+        def pt(*c):
+            return ifc.createIfcCartesianPoint([float(v) for v in c])
+
+        def dr(*c):
+            return ifc.createIfcDirection([float(v) for v in c])
+
+        solid = ifc.createIfcExtrudedAreaSolid(
+            ifc.createIfcRectangleProfileDef("AREA", "STRAY", None, 2.0, 2.0),
+            # the offset lives here, not in the ObjectPlacement
+            ifc.createIfcAxis2Placement3D(pt(offset, offset, 0), dr(0, 0, 1), dr(1, 0, 0)),
+            dr(0.0, 0.0, 1.0), 1.0,
+        )
+        element = ifc.create_entity(
+            "IfcFurniture", ifcopenshell.guid.new(), None, "0", None, None,
+            ifc.createIfcLocalPlacement(
+                storey.ObjectPlacement,
+                ifc.createIfcAxis2Placement3D(pt(1.0, 1.0, 0.0), dr(0, 0, 1), dr(1, 0, 0))),
+            ifc.createIfcProductDefinitionShape(
+                None, None,
+                [ifc.createIfcShapeRepresentation(body_ctx, "Body", "SweptSolid", [solid])]),
+            None,
+        )
+        rel = ifc.by_type("IfcRelContainedInSpatialStructure")[0]
+        rel.RelatedElements = list(rel.RelatedElements) + [element]
+        return element
+
+    def test_the_saved_view_follows_the_drawing_not_the_stray(self, tmp_path):
+        """End to end: a far-off element must not resize the saved view."""
+        import ezdxf
+
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        far = self._add_degenerate_element(ifc)
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / "stray.dxf")
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing(ifc, drawing, pset, out, wall_mode="shapely", template_path=tpl)
+
+        doc = ezdxf.readfile(out)
+        gids = set()
+        for e in doc.modelspace():
+            try:
+                tags = e.get_xdata("IFC_DXF")
+            except Exception:
+                continue
+            gids.update(t.value for t in tags if t.code == 1000)
+        assert far.GlobalId not in gids, "the stray element was drawn"
+
+        extmax = doc.header["$EXTMAX"]
+        assert extmax[0] < 100 and extmax[1] < 100, \
+            f"the saved view still reaches the stray element: $EXTMAX {extmax}"
