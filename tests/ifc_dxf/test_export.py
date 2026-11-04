@@ -1650,3 +1650,88 @@ class TestStrayGeometryIsNotDrawn:
         extmax = doc.header["$EXTMAX"]
         assert extmax[0] < 100 and extmax[1] < 100, \
             f"the saved view still reaches the stray element: $EXTMAX {extmax}"
+
+
+class TestDimensionBlocksAreNotLeftOver:
+    """Every exported file carried nine dimension geometry blocks it never used.
+
+    Both templates ship `*D` blocks for sample dimensions, and clearing the
+    template modelspace orphans all of them -- one plan's DXF held 14 `*D`
+    blocks for its 5 dimensions. Dead weight in every export, and confusing to
+    anyone auditing the file.
+
+    The deletion cannot lean on ezdxf: `delete_block`'s safe mode refuses every
+    `*`-prefixed block outright, since a DIMENSION names its geometry block in
+    group 2 rather than with an INSERT. The reference scan is the safety check,
+    so these tests exist to prove it does not take a live block with it.
+    """
+
+    @staticmethod
+    def _export(tmp_path, name="dims.dxf"):
+        import ezdxf
+
+        ifc = ifcopenshell.open(os.path.join(_FILES_DIR, "test_ifc_01.ifc"))
+        drawing, pset = find_drawings(ifc)[0]
+        out = str(tmp_path / name)
+        tpl = _TEMPLATE_PATH if os.path.isfile(_TEMPLATE_PATH) else None
+        export_drawing(ifc, drawing, pset, out, wall_mode="shapely", template_path=tpl)
+        return ezdxf.readfile(out)
+
+    @staticmethod
+    def _blocks_and_refs(doc):
+        blocks = {b.name for b in doc.blocks if b.name.startswith("*D")}
+        refs = set()
+        for layout_name in doc.layouts.names():
+            for e in doc.layouts.get(layout_name):
+                if e.dxftype() == "DIMENSION":
+                    name = e.dxf.get("geometry", None)
+                    if name:
+                        refs.add(name)
+        return blocks, refs
+
+    def test_no_unused_dimension_block_survives(self, tmp_path):
+        doc = self._export(tmp_path)
+        blocks, refs = self._blocks_and_refs(doc)
+        assert blocks == refs, (
+            f"{len(blocks - refs)} unused dimension block(s) left in the export: "
+            f"{sorted(blocks - refs)}")
+
+    def test_every_dimension_keeps_its_geometry(self, tmp_path):
+        """The point of the exercise: a dimension whose block went missing is
+        the very defect that makes dimensions vanish in AutoCAD, and ezdxf's
+        auditor deletes such a dimension outright."""
+        from ezdxf.audit import Auditor
+
+        doc = self._export(tmp_path)
+        dims = list(doc.modelspace().query("DIMENSION"))
+        assert dims, "no DIMENSION in the export"
+        for dim in dims:
+            name = dim.dxf.get("geometry", None)
+            assert name, "DIMENSION lost its geometry block reference"
+            block = doc.blocks.get(name)
+            assert block is not None, f"geometry block {name} was deleted"
+            assert len(list(block)) > 0, f"geometry block {name} is empty"
+
+        auditor = Auditor(doc)
+        auditor.run()
+        removed = [f for f in auditor.fixes if "DIMENSION" in f.message]
+        assert not removed, f"the auditor rejected a dimension: {[f.message for f in removed]}"
+
+    def test_an_annotative_picture_block_is_not_purged(self, tmp_path):
+        """An annotative dimension also names its per-scale picture block in the
+        context data (group 2). A scan that missed those would delete a block
+        the scale representation still points at."""
+        doc = self._export(tmp_path)
+        blocks, _refs = self._blocks_and_refs(doc)
+        named_in_context = set()
+        for obj in doc.objects:
+            if "OBJECTCONTEXTDATA" not in obj.dxftype():
+                continue
+            for subclass in getattr(obj, "xtags").subclasses:
+                for tag in subclass:
+                    if (tag.code == 2 and isinstance(tag.value, str)
+                            and tag.value.startswith("*D")):
+                        named_in_context.add(tag.value)
+        assert named_in_context, "no annotative picture block found to check"
+        assert named_in_context <= blocks, \
+            f"context data points at deleted block(s): {sorted(named_in_context - blocks)}"

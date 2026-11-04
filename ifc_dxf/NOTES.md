@@ -112,6 +112,45 @@ On the drawing above this removed 1,274 of 2,154 entities and brought the extent
 from 1926 ft to 195 ft. Still wider than the 131 ft frame: entities *crossing*
 the border are kept whole, and trimming those is a separate job.
 
+### A dimension's geometry lives in a `*D` block, and ezdxf will not delete one
+
+**Symptom, reported from outside:** export a DXF, open it in DWG TrueView — fine.
+Re-save it in QCAD without changing anything and the dimensions vanish in
+TrueView, while QCAD still shows them.
+
+A DXF `DIMENSION` names an anonymous `*D` block (group 2) holding its drawn
+geometry. QCAD's writer emits no `*D` blocks at all and leaves the reference
+empty, which is invalid: ezdxf's own auditor deletes every such dimension with
+*"Removed DIMENSION without valid geometry block"*. QCAD keeps showing them
+because it regenerates dimension geometry from its own style parameters instead
+of reading the block. Not our bug — but the mechanism is worth knowing, because
+a missing geometry block is invisible rather than noisy.
+
+It also carries `DIMSCALE = 0` into its own new dimstyle while discarding the
+extension dictionary that holds the annotative scale representation. 0 is
+AutoCAD's marker for "annotative", so that is a scale of zero with nothing to
+resolve it. **Any round-trip through a tool that does not understand annotative
+entities leaves our dimensions scaled by zero** — the only lever that survives
+such a round-trip is the `DIMSCALE` value itself.
+
+**What was ours:** both templates ship nine `*D` blocks for sample dimensions,
+and clearing the template modelspace orphans all nine, so they rode along in
+every exported file (14 blocks for one plan's 5 dimensions, ~13 KB).
+
+Two traps when purging them:
+
+* `doc.blocks.delete_block(name, safe=True)` refuses **every** `*`-prefixed
+  block outright — "maybe used without explicit INSERT entity" — because a
+  dimension names its block in group 2 rather than with an INSERT. So safe mode
+  can never remove one, and the reference scan has to be the safety check
+  instead: every layout, every block definition, and the annotative context
+  data, which names a per-scale picture block in its own group 2.
+* Purge **after** `doc.audit()`. The template's cleared sample dimension leaves
+  its context data behind, and that still names its picture block, so one block
+  looks referenced until the audit purges the orphan.
+
+---
+
 ### Scales in ACAD_SCALELIST are not keyed by their name
 
 **Symptom:** 53 scale entries in an export, twelve of them duplicate pairs --
