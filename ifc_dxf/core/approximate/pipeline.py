@@ -409,7 +409,7 @@ def export_drawing(ifc, drawing, pset, output_path, wall_mode="shapely",
                wall_subdivision_lines=wall_subdivision_lines or None,
                direct_entities=direct_entities or None,
                unit_scale=unit_scale, drawing_size=drawing_size,
-               drawing_pset=pset)
+               drawing_pset=pset, clip_frame=ext)
     elapsed = time.perf_counter() - t0
     size_kb = os.path.getsize(output_path) // 1024
     print(f"  DXF gen    : {elapsed:.2f}s")

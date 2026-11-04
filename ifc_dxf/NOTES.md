@@ -82,6 +82,36 @@ ceiling covers it.
 
 ## Output
 
+### A DXF has no viewport, so nothing clips the drawing to its frame
+
+**Symptom:** text "consolidated to one location". Really the whole drawing was
+squeezed into a sliver: zoom-to-extents covered 1926 ft of a 131 ft frame, so
+the plan filled 3% of the window and its room labels piled together. Every
+coordinate in the file was correct.
+
+Bonsai's SVG has a viewport that clips at render time. A DXF has none, and the
+serializer projects whatever it is handed. Frustum culling admits an element on
+its *placement origin* (with a geometry-AABB rescue for the ones that reach into
+view), so a degenerate element is admitted on an origin that means nothing: two
+of them here, an `IfcFurniture` and an `IfcDoor` both named `0` and neither
+typed, carried 591 entities ~1800 ft away.
+
+The damage is not only cosmetic. `$EXTMIN`/`$EXTMAX` and the saved viewport are
+computed from the drawn geometry, so one stray element resizes the view for
+everyone who opens the file.
+
+**Rule:** cull geometry whose bounding box misses the camera frame
+(`camera_body_local_extents`) and recompute the extents from what survives --
+`dxf_writer._cull_outside_the_drawing`. Only entities that miss the frame
+entirely go, by bounding box, so anything crossing the border is kept whole and
+no geometry is altered; an undeterminable extent is kept, never dropped on a
+guess. Annotation layers are exempt, because a tag leading off the frame is a
+drafting decision rather than stray linework.
+
+On the drawing above this removed 1,274 of 2,154 entities and brought the extent
+from 1926 ft to 195 ft. Still wider than the 131 ft frame: entities *crossing*
+the border are kept whole, and trimming those is a separate job.
+
 ### Scales in ACAD_SCALELIST are not keyed by their name
 
 **Symptom:** 53 scale entries in an export, twelve of them duplicate pairs --
@@ -155,7 +185,11 @@ way:
 * a reflected-plan test written against the approximate pipeline, which
   projects *both* halves of the drawing through the camera and so stayed
   self-consistent while wrong. The bug only exists where the two halves come
-  from different places, i.e. the accurate pipeline.
+  from different places, i.e. the accurate pipeline;
+* a stray-geometry test that placed its stray element far away, where frustum
+  culling dropped it long before the writer saw it. Reproducing that bug needs
+  an element whose *placement* is in view and whose geometry is not, which is
+  what a degenerate element actually looks like.
 
 **Rule:** break the fix and watch the new test fail before committing it. For
 the mirror, disabling `_MIRRORED_TARGET_VIEWS` has to leave the linework
