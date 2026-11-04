@@ -80,6 +80,30 @@ ceiling covers it.
 
 ---
 
+## Output
+
+### Scales in ACAD_SCALELIST are not keyed by their name
+
+**Symptom:** 53 scale entries in an export, twelve of them duplicate pairs --
+two `1:1`, two `1:2`, and so on.
+
+AutoCAD keys these dictionary entries `A0`, `A1`, ... and keeps the scale's name
+in group 300 inside the `SCALE` object. Deduplicating on the dictionary key
+therefore recognises none of the template's own 17 scales and adds a second copy
+of every one the exporter also knows.
+
+The same mistake was hiding in the returned `{name: handle}` map, which the
+writer looks up by name to make an entity annotative
+(`current_scale_handle = scale_handles.get(scale_name)`). Keyed by dictionary
+key, it missed every template scale -- a 1:100 drawing only found its `SCALE`
+object because the duplicate had just been added *under its name*. Fixing the
+dedupe without fixing the map would have left those drawings with no annotative
+scale at all.
+
+**Rule:** read scale names from group 300 — `dxf_template._scale_entries`.
+
+---
+
 ## Annotations
 
 ### Resolve a text literal's formulas before its variables, and pass the product

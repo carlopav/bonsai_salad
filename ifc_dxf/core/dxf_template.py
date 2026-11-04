@@ -223,6 +223,30 @@ def _add_scale(doc, scale_dict, name, paper, drawing, flag290=0):
     scale_dict.add(key=name, entity=obj)
 
 
+def _scale_entries(scale_dict):
+    """Map scale name -> handle for the SCALE objects in ACAD_SCALELIST.
+
+    The dictionary key is not the scale's name: AutoCAD keys these entries
+    ``A0``, ``A1``, ... and keeps the name in group 300 inside the SCALE object,
+    which is how the template's own 17 scales are stored. Reading the names off
+    the keys instead finds none of them, so the shipped scales look absent and
+    get added a second time -- one export carried 53 entries with two ``1:1``,
+    two ``1:2`` and ten more duplicate pairs -- while a lookup by name missed
+    every scale the template already had.
+    """
+    names = {}
+    for key in scale_dict.keys():
+        obj = scale_dict.get(key)
+        tags = getattr(obj, "xtags", None)
+        if tags is None:
+            continue
+        for subclass in tags.subclasses:
+            for tag in subclass:
+                if tag.code == 300:
+                    names.setdefault(tag.value, obj.dxf.handle)
+    return names
+
+
 def _populate_scale_list(doc, scale_factor, scale_name=None, imperial=False):
     """Fill ACAD_SCALELIST with SCALE objects and set the current annotation scale.
 
@@ -238,9 +262,9 @@ def _populate_scale_list(doc, scale_factor, scale_name=None, imperial=False):
 
     Returns ({scale_name: handle}, current scale name).
     """
-    # 1. populate ACAD_SCALELIST
+    # 1. populate ACAD_SCALELIST -- by scale name, not dictionary key (_scale_entries)
     scale_dict = doc.rootdict["ACAD_SCALELIST"]
-    existing = set(scale_dict.keys())
+    existing = set(_scale_entries(scale_dict))
 
     for name, paper, drawing, flag290 in _ARCH_SCALES + (_IMPERIAL_SCALES if imperial else []):
         if name not in existing:
@@ -262,9 +286,9 @@ def _populate_scale_list(doc, scale_factor, scale_name=None, imperial=False):
     var_dict.discard("CANNOSCALE")
     var_dict.add_dict_var("CANNOSCALE", scale_name)
 
-    # 4. return {scale_name: handle} map for annotative entity creation
-    scale_dict = doc.rootdict["ACAD_SCALELIST"]
-    return {k: scale_dict.get(k).dxf.handle for k in scale_dict.keys()}, scale_name
+    # 4. return {scale_name: handle} map for annotative entity creation. Keyed by
+    #    the scale's own name, which is what the caller looks up (CANNOSCALE).
+    return _scale_entries(doc.rootdict["ACAD_SCALELIST"]), scale_name
 
 
 def _system_font_dirs():

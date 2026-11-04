@@ -635,9 +635,16 @@ class TestAnnotativeDimensions:
 
     def test_context_data_points_at_the_current_annotation_scale(self):
         """The 340 handle must resolve to the SCALE named by CANNOSCALE, or the
-        annotative scale field comes out empty whatever the drawing scale."""
+        annotative scale field comes out empty whatever the drawing scale.
+
+        Resolved by the scale's *name* (group 300), not by its dictionary key:
+        AutoCAD keys these entries A0, A1, ... and only a scale this exporter
+        added itself is keyed by its name -- see dxf_template._scale_entries.
+        """
+        from ifc_dxf.core.dxf_template import _scale_entries
+
         scale_list = self.doc.rootdict["ACAD_SCALELIST"]
-        wanted = {scale_list.get(k).dxf.handle: k for k in scale_list.keys()}
+        wanted = {h: n for n, h in _scale_entries(scale_list).items()}
         for dim in self.dims:
             assert dim.has_extension_dict, "DIMENSION carries no context data"
             d = dim.get_extension_dict().dictionary
@@ -1449,3 +1456,60 @@ class TestFootprintPaintingFollowsTheCamera:
             "the RCP dropped the ceiling nearest the viewer"
         assert upper_gid not in painted, \
             "the RCP drew a ceiling hidden behind a lower one"
+
+
+class TestScaleListHasNoDuplicates:
+    """ACAD_SCALELIST entries are keyed A0, A1, ... with the scale's name inside.
+
+    Deduplicating on the dictionary key therefore recognises none of the
+    template's own 17 scales and adds a second copy of every one this exporter
+    also knows: a real export carried 53 entries with twelve duplicate name
+    pairs (two 1:1, two 1:2, ...). The same mistake made the returned
+    name -> handle map miss every template scale, so a drawing whose scale the
+    template already had could only find its SCALE object because the duplicate
+    had just been added under its name.
+    """
+
+    @staticmethod
+    def _names(doc):
+        import collections
+        from ifc_dxf.core.dxf_template import _scale_entries
+
+        scale_list = doc.rootdict["ACAD_SCALELIST"]
+        counts = collections.Counter()
+        for key in scale_list.keys():
+            obj = scale_list.get(key)
+            for subclass in obj.xtags.subclasses:
+                for tag in subclass:
+                    if tag.code == 300:
+                        counts[tag.value] += 1
+        return counts, _scale_entries(scale_list)
+
+    @pytest.mark.parametrize("human_scale", ["1:50", "1:100", "1:200"])
+    def test_every_scale_is_listed_once(self, human_scale):
+        doc = _annotative_dim_export(human_scale)
+        counts, _by_name = self._names(doc)
+        dupes = {n: c for n, c in counts.items() if c > 1}
+        assert not dupes, f"ACAD_SCALELIST lists these scales twice: {dupes}"
+
+    @pytest.mark.parametrize("human_scale", ["1:50", "1:100", "1:200"])
+    def test_the_drawings_own_scale_resolves_by_name(self, human_scale):
+        """What the writer looks up to make an entity annotative."""
+        doc = _annotative_dim_export(human_scale)
+        _counts, by_name = self._names(doc)
+        assert human_scale in by_name, \
+            f"{human_scale} is not resolvable by name; have {sorted(by_name)[:8]}..."
+        assert doc.entitydb.get(by_name[human_scale]) is not None, \
+            "the name resolves to a handle that is not in the database"
+
+    def test_the_template_scales_are_reused_not_re_added(self):
+        """The template ships 17; a metric export must not grow a second set."""
+        import ezdxf
+
+        template = ezdxf.readfile(_TEMPLATE_PATH)
+        shipped, _ = self._names(template)
+        exported, _ = self._names(_annotative_dim_export("1:100"))
+        for name, count in shipped.items():
+            assert exported[name] == 1, \
+                f"template scale {name!r} appears {exported[name]}x in the export"
+
