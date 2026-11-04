@@ -67,6 +67,62 @@ _CULL_EXEMPT_LAYER_PREFIX = "IfcAnnotation"
 _CULL_MARGIN_FRACTION = 0.02
 
 
+def _purge_orphan_dimension_blocks(doc):
+    """Delete anonymous dimension geometry blocks that nothing points at.
+
+    Both templates ship nine ``*D`` blocks for sample dimensions they no longer
+    contain, and clearing the template modelspace orphans every one of them, so
+    they rode along in each exported file. Harmless but dead: the DXF of one
+    plan carried 14 ``*D`` blocks for its 5 dimensions.
+
+    A DIMENSION names its geometry block in group 2 rather than referencing it
+    with an INSERT, so ezdxf cannot see those references: ``delete_block``'s
+    safe mode refuses every ``*``-prefixed block outright ("maybe used without
+    explicit INSERT entity") and so can never remove one. The scan below is
+    therefore the safety check, which is why it has to cover every way a block
+    can be named -- every layout, every block definition, and the annotative
+    context data. Returns the number removed.
+    """
+    referenced = set()
+    sources = [doc.layouts.get(name) for name in doc.layouts.names()]
+    sources += list(doc.blocks)            # dimensions nested inside a block
+    for source in sources:
+        for entity in source:
+            if entity.dxftype() != "DIMENSION":
+                continue
+            name = entity.dxf.get("geometry", None)
+            if name:
+                referenced.add(name)
+
+    # An annotative dimension names its per-scale picture block in the context
+    # data too -- see annotations._make_dim_annotative, which writes it as
+    # group 2. Today that is the dimension's own geometry block, already found
+    # above; reading it anyway keeps this honest if a second scale is ever
+    # written, since each scale gets a picture block of its own.
+    for obj in doc.objects:
+        if "OBJECTCONTEXTDATA" not in obj.dxftype():
+            continue
+        tags = getattr(obj, "xtags", None)
+        if tags is None:
+            continue
+        for subclass in tags.subclasses:
+            for tag in subclass:
+                if (tag.code == 2 and isinstance(tag.value, str)
+                        and tag.value.startswith("*D")):
+                    referenced.add(tag.value)
+
+    removed = 0
+    for name in [block.name for block in doc.blocks if block.name.startswith("*D")]:
+        if name in referenced:
+            continue
+        try:
+            doc.blocks.delete_block(name, safe=False)
+        except Exception:
+            continue
+        removed += 1
+    return removed
+
+
 def _entity_bbox(entity):
     """Return (x_min, x_max, y_min, y_max) for one DXF entity, or None.
 
@@ -586,6 +642,11 @@ def _write_dxf(output_path, block_defs, block_order, block_inserts,
     # Auditor purges these cleanly (BricsCAD's audit otherwise flags/repairs
     # them). Our own generated content is well-formed and survives the audit.
     doc.audit()
+
+    # After the audit, not before: the template's cleared sample dimension
+    # leaves its annotative context data behind, and that still names the
+    # picture block, so the block looks referenced until the audit purges it.
+    _purge_orphan_dimension_blocks(doc)
 
     doc.saveas(output_path)
 
